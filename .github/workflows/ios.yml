@@ -1,0 +1,51 @@
+name: iOS
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Compilar motor (Rust)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: cargo build --release --target aarch64-apple-ios --manifest-path engine/Cargo.toml
+
+      - name: Instalar XcodeGen e ldid
+        run: brew install xcodegen ldid
+
+      - name: Gerar projeto Xcode
+        run: xcodegen generate
+
+      - name: Compilar app
+        run: |
+          xcodebuild \
+            -project Nusky.xcodeproj \
+            -scheme Nusky \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Assinar com entitlements de JIT
+        run: ldid -Sentitlements.plist build/Build/Products/Release-iphoneos/Nusky.app/Nusky
+
+      - name: Empacotar IPA
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Nusky.app Payload/
+          zip -r Nusky-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nusky
+          path: Nusky-unsigned.ipa
