@@ -103,15 +103,31 @@ struct ContentView: View {
                 }
             }
 
-            if model.items.isEmpty && !model.status.isEmpty {
-                Text(model.status)
-                    .foregroundColor(.gray)
+            if model.items.isEmpty {
+                telaVazia
             }
         }
         .padding(barraEmbaixo ? .bottom : .top, altura)
         .simultaneousGesture(TapGesture().onEnded {
             if expandida { recolher() }
         })
+    }
+
+    /// Enquanto a página não está pronta: barra de progresso no centro, ou a mensagem de erro.
+    @ViewBuilder
+    private var telaVazia: some View {
+        if model.carregando {
+            VStack(spacing: 14) {
+                ProgressView(value: model.progresso, total: 1)
+                    .frame(width: 180)
+                Text("Carregando…")
+                    .font(.system(size: 15))
+                    .foregroundColor(.gray)
+            }
+        } else if !model.status.isEmpty {
+            Text(model.status)
+                .foregroundColor(.gray)
+        }
     }
 
     private var pagina: some View {
@@ -201,6 +217,23 @@ struct ContentView: View {
         }
     }
 
+    /// Fundo da barra com a linha de progresso na borda de baixo, enquanto a página carrega.
+    private var fundoBarra: some View {
+        Capsule()
+            .fill(corBarra)
+            .overlay(alignment: .bottom) {
+                if model.carregando {
+                    GeometryReader { geo in
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .frame(width: max(6, geo.size.width * CGFloat(model.progresso)), height: 3)
+                            .frame(maxHeight: .infinity, alignment: .bottom)
+                    }
+                    .clipShape(Capsule())
+                }
+            }
+    }
+
     private var barraRecolhida: some View {
         Text(model.currentHost.isEmpty ? "Nusky" : model.currentHost)
             .font(.system(size: 13))
@@ -209,7 +242,7 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .frame(maxWidth: .infinity)
             .frame(height: 26)
-            .background(Capsule().fill(corBarra))
+            .background(fundoBarra)
             .frame(maxWidth: .infinity)
             .frame(height: 44)
             .contentShape(Rectangle())
@@ -253,7 +286,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 40)
-        .background(Capsule().fill(corBarra))
+        .background(fundoBarra)
         .frame(height: 56)
         .simultaneousGesture(gestoDaBarra)
     }
