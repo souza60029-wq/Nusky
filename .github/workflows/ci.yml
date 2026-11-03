@@ -20,3 +20,9 @@ jobs:
         with:
           targets: aarch64-apple-ios
       - run: cargo build --release --target aarch64-apple-ios --manifest-path engine/Cargo.toml
+      - name: Verificar biblioteca estática
+        run: ls -lh engine/target/aarch64-apple-ios/release/libnusky_engine.a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libnusky_engine-ios
+          path: engine/target/aarch64-apple-ios/release/libnusky_engine.a
