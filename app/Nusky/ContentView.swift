@@ -203,7 +203,7 @@ struct ContentView: View {
         let link = item.href != nil
         return Text(item.text)
             .font(.system(size: CGFloat(item.fontSize), weight: item.bold ? .bold : .regular))
-            .foregroundColor(link ? .blue : textoCor)
+            .foregroundColor(corDaLinha(item))
             .underline(link)
             .fixedSize()
             .offset(x: CGFloat(item.x), y: CGFloat(item.y))
@@ -212,6 +212,17 @@ struct ContentView: View {
                     model.open(href: destino)
                 }
             }
+    }
+
+    /// Cor da linha: a que a página pediu pelo CSS, se contrastar com o fundo do tema.
+    /// Senão, usa a cor do tema (ou azul, nos links). Assim um texto preto da página
+    /// não some no modo noturno, e um branco não some no modo claro.
+    private func corDaLinha(_ item: DrawItem) -> Color {
+        let padrao: Color = item.href != nil ? .blue : textoCor
+        guard let cor = item.cor else { return padrao }
+        let luminanciaDoFundo: Double = escuro ? 0 : 1
+        if abs(cor.luminancia - luminanciaDoFundo) < 0.4 { return padrao }
+        return Color(red: cor.r, green: cor.g, blue: cor.b)
     }
 
     // MARK: - Barra
