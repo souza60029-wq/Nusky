@@ -5,10 +5,12 @@ struct ContentView: View {
     @StateObject private var model = BrowserModel()
     @AppStorage("nightMode") private var nightMode = false
     @AppStorage("barAtBottom") private var barAtBottom = false
+    @AppStorage("useButtons") private var useButtons = false
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var fieldFocused: Bool
     @State private var expanded = false
-    @State private var showActions = false
+    @State private var bubbleOut = false
+    @State private var showSettings = false
     @State private var showTabs = false
 
     private let reserve: CGFloat = 56
@@ -31,14 +33,12 @@ struct ContentView: View {
                     .onTapGesture { collapse() }
             }
 
-            bar
+            barStack
                 .animation(.easeInOut(duration: 0.2), value: expanded)
         }
         .preferredColorScheme(nightMode ? .dark : .light)
-        .confirmationDialog("Opções", isPresented: $showActions, titleVisibility: .hidden) {
-            Button(nightMode ? "Modo diurno" : "Modo noturno") { nightMode.toggle() }
-            Button(barAtBottom ? "Mover barra para cima" : "Mover barra para baixo") { barAtBottom.toggle() }
-            Button("Cancelar", role: .cancel) { }
+        .sheet(isPresented: $showSettings) {
+            Configuracoes()
         }
         .fullScreenCover(isPresented: $showTabs) {
             ListaAbas(
@@ -62,6 +62,18 @@ struct ContentView: View {
     }
 
     // MARK: Barra
+
+    /// Barra e, no modo Botões, a cápsula com as três opções.
+    /// A ordem muda conforme a posição: a cápsula sempre fica do lado da página.
+    private var barStack: some View {
+        VStack(spacing: 0) {
+            if barAtBottom && showsBubbles { bubbles }
+            bar
+            if !barAtBottom && showsBubbles { bubbles }
+        }
+    }
+
+    private var showsBubbles: Bool { expanded && useButtons }
 
     @ViewBuilder
     private var bar: some View {
@@ -88,7 +100,7 @@ struct ContentView: View {
 
     private var expandedBar: some View {
         HStack(spacing: 12) {
-            Button { showActions = true } label: { icon("gearshape") }
+            Button { showSettings = true } label: { icon("gearshape") }
 
             TextField("Endereço", text: $model.address)
                 .font(.system(size: 15))
@@ -118,12 +130,53 @@ struct ContentView: View {
         .simultaneousGesture(gestoDaBarra)
     }
 
-    /// Gestos da barra expandida:
+    /// Cápsula com voltar, avançar e abas. Só aparece no modo Botões.
+    private var bubbles: some View {
+        HStack(spacing: 0) {
+            bubbleButton("chevron.left", ativo: model.canGoBack) {
+                model.goBack()
+                collapse()
+            }
+            bubbleButton("chevron.right", ativo: model.canGoForward) {
+                model.goForward()
+                collapse()
+            }
+            bubbleButton("rectangle.stack", ativo: true) {
+                abrirAbas()
+            }
+        }
+        .foregroundColor(textColor)
+        .padding(.horizontal, 8)
+        .frame(height: 44)
+        .background(Capsule().fill(barFill))
+        .scaleEffect(bubbleOut ? 1 : 0.4, anchor: barAtBottom ? .bottom : .top)
+        .opacity(bubbleOut ? 1 : 0)
+        .onAppear {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                bubbleOut = true
+            }
+        }
+    }
+
+    private func bubbleButton(_ nome: String, ativo: Bool, acao: @escaping () -> Void) -> some View {
+        Button(action: acao) {
+            Image(systemName: nome)
+                .font(.system(size: 17, weight: .medium))
+                .frame(width: 56, height: 44)
+        }
+        .buttonStyle(.plain)
+        .disabled(!ativo)
+        .opacity(ativo ? 1 : 0.35)
+    }
+
+    /// Gestos da barra expandida (só no modo Gestos):
     /// - arrastar para a direita volta, para a esquerda avança;
     /// - arrastar no sentido oposto à barra abre a lista de abas.
     private var gestoDaBarra: some Gesture {
         DragGesture(minimumDistance: 30)
             .onEnded { valor in
+                guard !useButtons else { return }
+
                 let dx = valor.translation.width
                 let dy = valor.translation.height
 
@@ -144,6 +197,11 @@ struct ContentView: View {
             }
     }
 
+    private func abrirAbas() {
+        collapse()
+        showTabs = true
+    }
+
     private func icon(_ name: String) -> some View {
         Image(systemName: name)
             .font(.system(size: 16, weight: .medium))
@@ -159,9 +217,17 @@ struct ContentView: View {
         }
     }
 
+    /// Recolhe a barra. Antes, as opções encolhem de volta para a barra; depois, a barra se fecha.
     private func collapse() {
         fieldFocused = false
-        withAnimation { expanded = false }
+        withAnimation(.easeIn(duration: 0.15)) {
+            bubbleOut = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                expanded = false
+            }
+        }
     }
 
     // MARK: Página
