@@ -48,7 +48,7 @@ struct Configuracoes: View {
                 Spacer()
                 if selecionada {
                     Image(systemName: "checkmark")
-                        .fontWeight(.semibold)
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(.accentColor)
                 }
             }
