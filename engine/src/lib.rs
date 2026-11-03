@@ -3,6 +3,7 @@
 // https://mozilla.org/MPL/2.0/.
 
 pub mod html;
+pub mod layout;
 
 /// Retorna a versão do motor.
 pub fn version() -> &'static str {
