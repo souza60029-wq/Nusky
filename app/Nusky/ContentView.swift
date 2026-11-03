@@ -133,11 +133,11 @@ struct ContentView: View {
     /// Cápsula com voltar, avançar e abas. Só aparece no modo Botões.
     private var bubbles: some View {
         HStack(spacing: 0) {
-            bubbleButton("chevron.left", ativo: model.canGoBack) {
+            bubbleButton("chevron.left", ativo: model.historico.abaAtual.podeVoltar) {
                 model.goBack()
                 collapse()
             }
-            bubbleButton("chevron.right", ativo: model.canGoForward) {
+            bubbleButton("chevron.right", ativo: model.historico.abaAtual.podeAvancar) {
                 model.goForward()
                 collapse()
             }
