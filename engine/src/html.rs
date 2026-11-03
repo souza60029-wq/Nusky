@@ -4,7 +4,7 @@
 
 //! Parser de HTML mínimo do Nusky (v0.1).
 //! Entende elementos, texto, comentários e atributos.
-//! Entidades HTML (como &amp;) ainda não são decodificadas no texto.
+//! Entidades (`&amp;`, `&eacute;`, `&#233;`, `&#xE9;`) são decodificadas no texto e nos atributos.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -80,7 +80,7 @@ pub fn parse(input: &str) -> Vec<Node> {
             // pode ser um '<' solto (como em "a < b") que não inicia tag.
             let first = rest.chars().next().map_or(1, |c| c.len_utf8());
             let end = rest[first..].find('<').map_or(rest.len(), |i| i + first);
-            push_text(&mut stack, &rest[..end]);
+            push_text(&mut stack, &decode_entities(&rest[..end]));
             rest = &rest[end..];
         }
     }
@@ -136,7 +136,7 @@ fn parse_attrs(inner: &str) -> Vec<(String, String)> {
         rest = remaining;
 
         if !name.is_empty() {
-            attrs.push((name, decode_basic_entities(&value)));
+            attrs.push((name, decode_entities(&value)));
         }
     }
     attrs
@@ -159,9 +159,122 @@ fn read_value(s: &str) -> (String, &str) {
     }
 }
 
-/// Decodifica apenas o necessário para URLs. Entidades completas ficam para depois.
-fn decode_basic_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
+/// Substitui as entidades de um trecho. Entidades desconhecidas ficam como estão.
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        match decode_one(after) {
+            Some((ch, consumed)) => {
+                out.push(ch);
+                rest = &after[consumed..];
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Decodifica a entidade que começa logo depois do '&'.
+/// Devolve o caractere e quantos bytes foram consumidos, incluindo o ';'.
+fn decode_one(s: &str) -> Option<(char, usize)> {
+    // Procura o ';' só nos primeiros bytes, para não varrer o texto inteiro.
+    let semi = s.bytes().take(32).position(|b| b == b';')?;
+    if semi == 0 {
+        return None;
+    }
+    let body = &s[..semi];
+    let ch = if let Some(num) = body.strip_prefix('#') {
+        let code = match num.strip_prefix(|c: char| c == 'x' || c == 'X') {
+            Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+            None => num.parse::<u32>().ok()?,
+        };
+        char::from_u32(code)?
+    } else {
+        named_entity(body)?
+    };
+    Some((ch, semi + 1))
+}
+
+/// Entidades nomeadas mais comuns em páginas reais.
+fn named_entity(name: &str) -> Option<char> {
+    Some(match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        "copy" => '©',
+        "reg" => '®',
+        "trade" => '™',
+        "hellip" => '…',
+        "mdash" => '—',
+        "ndash" => '–',
+        "lsquo" => '‘',
+        "rsquo" => '’',
+        "ldquo" => '“',
+        "rdquo" => '”',
+        "laquo" => '«',
+        "raquo" => '»',
+        "middot" => '·',
+        "bull" => '•',
+        "deg" => '°',
+        "times" => '×',
+        "divide" => '÷',
+        "plusmn" => '±',
+        "euro" => '€',
+        "pound" => '£',
+        "yen" => '¥',
+        "cent" => '¢',
+        "sect" => '§',
+        "para" => '¶',
+        "iexcl" => '¡',
+        "iquest" => '¿',
+        "aacute" => 'á',
+        "eacute" => 'é',
+        "iacute" => 'í',
+        "oacute" => 'ó',
+        "uacute" => 'ú',
+        "Aacute" => 'Á',
+        "Eacute" => 'É',
+        "Iacute" => 'Í',
+        "Oacute" => 'Ó',
+        "Uacute" => 'Ú',
+        "agrave" => 'à',
+        "egrave" => 'è',
+        "igrave" => 'ì',
+        "ograve" => 'ò',
+        "ugrave" => 'ù',
+        "atilde" => 'ã',
+        "otilde" => 'õ',
+        "Atilde" => 'Ã',
+        "Otilde" => 'Õ',
+        "acirc" => 'â',
+        "ecirc" => 'ê',
+        "icirc" => 'î',
+        "ocirc" => 'ô',
+        "ucirc" => 'û',
+        "ccedil" => 'ç',
+        "Ccedil" => 'Ç',
+        "ntilde" => 'ñ',
+        "Ntilde" => 'Ñ',
+        "uuml" => 'ü',
+        "Uuml" => 'Ü',
+        "ouml" => 'ö',
+        "auml" => 'ä',
+        "szlig" => 'ß',
+        _ => return None,
+    })
 }
 
 /// Fecha o elemento aberto mais próximo com esse nome, fechando os que estão dentro dele.
@@ -286,6 +399,21 @@ mod tests {
             Node::Element(e) => assert_eq!(e.attr("href"), Some("/busca?a=1&b=2")),
             _ => panic!("esperava um elemento"),
         }
+    }
+
+    #[test]
+    fn entities_in_text_are_decoded() {
+        assert_eq!(parse("a &amp; b &lt;c&gt;"), vec![text("a & b <c>")]);
+    }
+
+    #[test]
+    fn named_and_numeric_entities_are_decoded() {
+        assert_eq!(parse("caf&eacute; &#233; &#xE9;"), vec![text("café é é")]);
+    }
+
+    #[test]
+    fn unknown_or_bare_ampersand_is_kept() {
+        assert_eq!(parse("a & b &foo; c"), vec![text("a & b &foo; c")]);
     }
 
     #[test]
