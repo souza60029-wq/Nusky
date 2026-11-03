@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Teste de cor</title>
+<style>
+  .vermelho { color: red }
+  .verde { color: #00aa00 }
+  .azul { color: blue }
+  .branco { color: white }
+  .preto { color: black }
+  .oculto { display: none }
+  #destaque { color: #ff8800; font-weight: bold }
+</style>
+</head>
+<body>
+<h1>Teste de cor</h1>
+<p class="vermelho">1. Vermelho (classe)</p>
+<p class="verde">2. Verde #00aa00 (classe)</p>
+<p class="azul">3. Azul (classe)</p>
+<p id="destaque">4. Laranja em negrito (id)</p>
+<p style="color: #800080">5. Roxo (atributo style)</p>
+<p class="branco">6. Branco</p>
+<p class="preto">7. Preto</p>
+<div style="color: #008000"><p>8. Verde herdado pelo texto dentro de div</p></div>
+<p>9. Link sem cor própria: deve ficar azul. <a href="https://example.com">exemplo</a></p>
+<p>10. Link com cor pedida pela página: <a href="https://example.com" style="color: red">exemplo vermelho</a></p>
+<p class="oculto">11. Este parágrafo NÃO deve aparecer.</p>
+<p>12. Parágrafo sem cor: deve usar a cor do tema.</p>
+</body>
+</html>
