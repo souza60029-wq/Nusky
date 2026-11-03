@@ -1,0 +1,26 @@
+name: Nusky
+options:
+  bundleIdPrefix: com.nusky
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  Nusky:
+    type: application
+    platform: iOS
+    sources: [app/Nusky]
+    info:
+      path: app/Nusky/Info.plist
+      properties:
+        CFBundleDisplayName: Nusky
+        CFBundleShortVersionString: "0.0.1"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nusky.browser
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: NO
+        SWIFT_OBJC_BRIDGING_HEADER: app/Nusky/Nusky-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/engine/target/aarch64-apple-ios/release
+        OTHER_LDFLAGS: "-lnusky_engine"
