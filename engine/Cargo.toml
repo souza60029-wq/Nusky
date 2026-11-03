@@ -7,5 +7,7 @@ description = "Motor de renderização do navegador Nusky"
 
 [lib]
 name = "nusky_engine"
+# staticlib: para o Swift linkar no iPhone. rlib: para os testes em Rust.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
