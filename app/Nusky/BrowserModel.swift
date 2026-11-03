@@ -52,7 +52,7 @@ final class BrowserModel: ObservableObject {
         let texto = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !texto.isEmpty else { return }
         let completo = texto.contains("://") ? texto : "https://" + texto
-        guard let url = URL(string: completo), url.host != nil else {
+        guard let url = URL(string: codificarEndereco(completo)), url.host != nil else {
             status = "Endereço inválido."
             return
         }
@@ -62,7 +62,7 @@ final class BrowserModel: ObservableObject {
     /// Link tocado na página. Resolve relativos pela URL final da página atual.
     func open(href: String) {
         guard let base = currentURL,
-              let url = URL(string: href, relativeTo: base)?.absoluteURL,
+              let url = URL(string: codificarEndereco(href), relativeTo: base)?.absoluteURL,
               let esquema = url.scheme?.lowercased(),
               esquema == "http" || esquema == "https" else { return }
         open(url: url)
@@ -121,6 +121,13 @@ final class BrowserModel: ObservableObject {
     }
 
     // MARK: Internos
+
+    /// Codifica só o que a URL não aceita (acentos, espaços).
+    /// Mantém % e # como estão, para não codificar duas vezes o que já está codificado.
+    private func codificarEndereco(_ texto: String) -> String {
+        let permitidos = CharacterSet.urlQueryAllowed.union(CharacterSet(charactersIn: "%#"))
+        return texto.addingPercentEncoding(withAllowedCharacters: permitidos) ?? texto
+    }
 
     private func mostrarAtual() {
         if let entrada = historico.entradaAtual {
