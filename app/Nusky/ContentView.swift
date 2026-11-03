@@ -8,6 +8,9 @@ final class BrowserModel: ObservableObject {
     @Published var contentHeight: CGFloat = 0
     @Published var status = ""
 
+    /// Endereço final da página atual, depois de redirecionamentos. Base para links relativos.
+    private var currentURL: URL?
+
     func load() {
         var s = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return }
@@ -21,7 +24,7 @@ final class BrowserModel: ObservableObject {
         status = "Carregando…"
         let width = Float(UIScreen.main.bounds.width)
 
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
             let html = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
             let items = Engine.render(html: html, width: width)
             let height = items.map { $0.y + $0.fontSize * 1.3 }.max() ?? 0
@@ -33,11 +36,21 @@ final class BrowserModel: ObservableObject {
                     self.status = error.localizedDescription
                     return
                 }
+                self.currentURL = response?.url ?? url
                 self.items = items
                 self.contentHeight = height + 16
                 self.status = items.isEmpty ? "Página sem texto" : ""
             }
         }.resume()
+    }
+
+    /// Abre um link da página. Aceita caminhos relativos e só segue http e https.
+    func open(_ href: String) {
+        guard let target = URL(string: href, relativeTo: currentURL)?.absoluteURL,
+              let scheme = target.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return }
+        address = target.absoluteString
+        load()
     }
 }
 
@@ -62,7 +75,12 @@ struct ContentView: View {
                     ForEach(model.items) { item in
                         Text(item.text)
                             .font(.system(size: item.fontSize, weight: item.bold ? .bold : .regular))
+                            .foregroundColor(item.href == nil ? .primary : .blue)
+                            .underline(item.href != nil)
                             .offset(x: item.x, y: item.y)
+                            .onTapGesture {
+                                if let href = item.href { model.open(href) }
+                            }
                     }
 
                     if model.items.isEmpty && !model.status.isEmpty {
