@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 private struct ScrollOffsetKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -30,6 +31,8 @@ struct ContentView: View {
     private let passo: CGFloat = 400      // a janela só é recalculada ao cruzar esta distância
     private let margem: CGFloat = 400     // linhas extras acima da área visível
     private let alcance: CGFloat = 1800   // até onde a janela vai, a partir da faixa atual
+    private let alturaBolha: CGFloat = 44 // altura de um botão de bolha
+    private let folgaBolha: CGFloat = 6   // distância da bolha aberta até a borda da barra
 
     private var esquemaPreferido: ColorScheme? {
         automatico ? nil : (noturno ? .dark : .light)
@@ -43,11 +46,27 @@ struct ContentView: View {
     private var textoCor: Color { escuro ? Color.white : Color.black }
     private var corBarra: Color { escuro ? Color(white: 0.16) : Color(white: 0.93) }
 
+    /// Altura da barra de status (hora, bateria). No iPhone 6s é 20 pt.
+    private var alturaDoTopo: CGFloat {
+        let janelas = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+        let janela = janelas.first(where: { $0.isKeyWindow }) ?? janelas.first
+        return janela?.safeAreaInsets.top ?? 20
+    }
+
     var body: some View {
         ZStack(alignment: barraEmbaixo ? .bottom : .top) {
             fundo.ignoresSafeArea()
             conteudo
             barraComBolhas
+        }
+        // Faixa com a cor da página sob a barra de status, para o texto não passar por trás dela.
+        .overlay(alignment: .top) {
+            fundo
+                .frame(height: alturaDoTopo)
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
         }
         .preferredColorScheme(esquemaPreferido)
         .sheet(isPresented: $mostrarConfiguracoes) {
@@ -198,13 +217,9 @@ struct ContentView: View {
     // MARK: - Barra
 
     private var barraComBolhas: some View {
-        VStack(spacing: 8) {
-            if barraEmbaixo && expandida && botoes { bolhas }
-            barra
-            if !barraEmbaixo && expandida && botoes { bolhas }
-        }
-        .padding(.horizontal, 12)
-        .padding(barraEmbaixo ? .bottom : .top, 6)
+        barra
+            .padding(.horizontal, 12)
+            .padding(barraEmbaixo ? .bottom : .top, 6)
     }
 
     private var barra: some View {
@@ -286,6 +301,12 @@ struct ContentView: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 40)
+        // As bolhas ficam sobrepostas à barra, fora do fluxo de layout: a barra não sai do lugar.
+        .overlay(alignment: barraEmbaixo ? .top : .bottom) {
+            if botoes {
+                bolhasFlutuantes
+            }
+        }
         .background(fundoBarra)
         .frame(height: 56)
         .simultaneousGesture(gestoDaBarra)
@@ -299,6 +320,14 @@ struct ContentView: View {
             LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
                 .frame(width: fade)
         }
+    }
+
+    /// Bolhas encostadas na borda da barra. Fechadas, ficam na borda; abertas, sobem um pouco.
+    /// A escala cresce a partir da borda, então parecem sair dela.
+    private var bolhasFlutuantes: some View {
+        let sinal: CGFloat = barraEmbaixo ? -1 : 1
+        return bolhas
+            .offset(y: sinal * (bolhasAbertas ? alturaBolha + folgaBolha : alturaBolha))
     }
 
     private var bolhas: some View {
@@ -319,6 +348,7 @@ struct ContentView: View {
         .background(Capsule().fill(corBarra))
         .scaleEffect(bolhasAbertas ? 1 : 0.4, anchor: barraEmbaixo ? .bottom : .top)
         .opacity(bolhasAbertas ? 1 : 0)
+        .allowsHitTesting(bolhasAbertas)
         .onAppear {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
                 bolhasAbertas = true
@@ -331,7 +361,7 @@ struct ContentView: View {
             Image(systemName: icone)
                 .font(.system(size: 18, weight: .medium))
                 .foregroundColor(textoCor.opacity(ativo ? 1 : 0.3))
-                .frame(width: 56, height: 44)
+                .frame(width: 56, height: alturaBolha)
         }
         .buttonStyle(.plain)
         .disabled(!ativo)
