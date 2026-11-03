@@ -10,6 +10,10 @@ final class BrowserModel: ObservableObject {
     @Published var status = ""
     @Published var pageVersion = 0
     @Published var restoreY: CGFloat = 0
+    /// Verdadeiro desde o início do carregamento até a página aparecer na tela.
+    @Published var carregando = false
+    /// Progresso de 0 a 1 do carregamento atual.
+    @Published var progresso: Double = 0
 
     let historico = Historico()
 
@@ -143,14 +147,25 @@ final class BrowserModel: ObservableObject {
         currentHost = ""
         address = ""
         status = "Digite um endereço acima."
+        carregando = false
+        progresso = 0
         exibidaId = nil
         scrollY = 0
         restoreY = 0
         pageVersion += 1
     }
 
+    /// Esvazia a tela e mostra o início do carregamento.
+    private func iniciarCarregamento() {
+        status = ""
+        items = []
+        contentHeight = 0
+        carregando = true
+        progresso = 0.05
+    }
+
     private func carregar(_ url: URL, entradaId: UUID?, restoreY y: CGFloat, navegar: Bool) async {
-        status = "Carregando…"
+        iniciarCarregamento()
         do {
             let (html, finalURL) = try await download(url)
             guard !Task.isCancelled else { return }
@@ -159,20 +174,30 @@ final class BrowserModel: ObservableObject {
                 historico.navegar(para: finalURL)
                 id = historico.entradaAtual?.id
             }
+            progresso = 0.9
             await show(html: html, url: finalURL, entradaId: id, restoreY: y)
         } catch {
             guard !Task.isCancelled else { return }
+            carregando = false
+            progresso = 0
             status = "Não foi possível abrir a página."
         }
     }
 
     private func saveScroll() {
-        guard let id = exibidaId else { return }
+        // Com a tela esvaziada, a rolagem atual não vale: não sobrescreve a salva.
+        guard !carregando, let id = exibidaId else { return }
         historico.atualizarRolagem(Double(scrollY), entradaId: id)
     }
 
     private func download(_ url: URL) async throws -> (String, URL) {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let baixador = DownloadPagina { [weak self] fracao in
+            Task { @MainActor in
+                guard let self, self.carregando else { return }
+                self.progresso = 0.05 + fracao * 0.85
+            }
+        }
+        let (data, response) = try await baixador.baixar(url)
         return (String(decoding: data, as: UTF8.self), response.url ?? url)
     }
 
@@ -193,6 +218,8 @@ final class BrowserModel: ObservableObject {
         exibidaId = entradaId
         scrollY = y
         restoreY = y
+        carregando = false
+        progresso = 0
         pageVersion += 1
     }
 }
