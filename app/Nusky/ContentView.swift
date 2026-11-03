@@ -71,6 +71,10 @@ struct ContentView: View {
     /// Espaço reservado para a barra expandida. Fixo, para a página não se mexer ao retrair a barra.
     private let reserve: CGFloat = 56
 
+    /// Largura da faixa de fade e recuo do texto. Os dois usam o mesmo valor,
+    /// assim o texto começa logo depois da faixa e não é apagado por ela.
+    private let fadeWidth: CGFloat = 14
+
     var body: some View {
         ZStack(alignment: barAtBottom ? Alignment.bottom : Alignment.top) {
             ScrollView {
@@ -171,6 +175,8 @@ struct ContentView: View {
                 .submitLabel(.go)
                 // Na fase expandida, o toque passa para a barra e não para o campo.
                 .allowsHitTesting(mode == .editing)
+                // Recuo interno: o texto começa depois da faixa de fade.
+                .padding(.horizontal, fadeWidth)
                 .mask(fadeMask)
                 .onSubmit {
                     model.load()
@@ -179,18 +185,16 @@ struct ContentView: View {
         }
     }
 
-    /// Texto some suavemente nas duas bordas, antes de encostar nos botões.
+    /// Faixas de largura fixa nas bordas, com fade. O meio fica opaco.
     private var fadeMask: some View {
-        LinearGradient(
-            stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .black, location: 0.08),
-                .init(color: .black, location: 0.9),
-                .init(color: .clear, location: 1)
-            ],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
+        HStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                .frame(width: fadeWidth)
+            Rectangle()
+                .fill(Color.black)
+            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                .frame(width: fadeWidth)
+        }
     }
 
     private func handleBarTap() {
