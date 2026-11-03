@@ -2,12 +2,15 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Layout de bloco mínimo (v0.1).
+//! Layout de bloco mínimo.
 //! Empilha blocos verticalmente e quebra o texto em linhas por palavras.
 //! Links (`<a href>`) viram comandos com o destino preenchido.
+//! Aplica CSS básico (tamanho, negrito, margens e display: none), lido das tags
+//! <style> e dos atributos style, id e class. A cor ainda não chega à casca.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
-use crate::html::Node;
+use crate::css::{self, Estilo, Folha};
+use crate::html::{Element, Node};
 
 /// Responsável por medir texto. No iPhone, a casca implementa com CoreText.
 /// Nos testes, usamos uma medida fixa.
@@ -72,7 +75,7 @@ fn is_block(tag: &str) -> bool {
     )
 }
 
-/// Estilo padrão por tag. Valores em pontos, sem CSS ainda.
+/// Estilo padrão por tag. Valores em pontos.
 fn style_for(tag: &str) -> Style {
     match tag {
         "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0 },
@@ -81,6 +84,16 @@ fn style_for(tag: &str) -> Style {
         "h4" | "h5" | "h6" => Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0 },
         "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0 },
         _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0 },
+    }
+}
+
+/// Sobrepõe o CSS ao estilo padrão. Só o que o CSS definiu muda.
+fn aplicar(base: Style, css: &Estilo) -> Style {
+    Style {
+        font_size: css.tamanho.unwrap_or(base.font_size),
+        bold: css.negrito.unwrap_or(base.bold),
+        margin_top: css.margem_topo.unwrap_or(base.margin_top),
+        margin_bottom: css.margem_base.unwrap_or(base.margin_bottom),
     }
 }
 
@@ -94,6 +107,9 @@ struct Span {
 
 struct Ctx<'a> {
     measurer: &'a dyn TextMeasurer,
+    folha: Folha,
+    /// Falso quando a página não tem CSS: evita calcular estilos à toa.
+    tem_css: bool,
     x0: f32,
     y: f32,
     width: f32,
@@ -102,8 +118,13 @@ struct Ctx<'a> {
 
 /// Gera os comandos de desenho para uma lista de nós de topo.
 pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) -> Vec<DrawCommand> {
+    let mut css_texto = String::new();
+    coletar_css(nodes, &mut css_texto);
+
     let mut ctx = Ctx {
         measurer,
+        folha: Folha::parse(&css_texto),
+        tem_css: !css_texto.trim().is_empty(),
         x0: PAGE_MARGIN,
         y: PAGE_MARGIN,
         width: (viewport_width - 2.0 * PAGE_MARGIN).max(0.0),
@@ -114,6 +135,33 @@ pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) 
     layout_children(nodes, root, None, &mut buf, &mut ctx);
     flush_inline(&mut buf, root, &mut ctx);
     ctx.commands
+}
+
+/// Junta o texto de todas as tags <style> do documento, na ordem em que aparecem.
+fn coletar_css(nodes: &[Node], saida: &mut String) {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.tag == "style" {
+                for filho in &el.children {
+                    if let Node::Text(t) = filho {
+                        saida.push_str(t);
+                        saida.push('\n');
+                    }
+                }
+            } else {
+                coletar_css(&el.children, saida);
+            }
+        }
+    }
+}
+
+/// Calcula o CSS que vale para um elemento. Sem CSS na página, devolve o estilo vazio.
+fn estilo_do_elemento(el: &Element, ctx: &Ctx<'_>) -> Estilo {
+    if !ctx.tem_css {
+        return Estilo::default();
+    }
+    let classes: Vec<&str> = el.attr("class").unwrap_or("").split_whitespace().collect();
+    css::estilo_para(&ctx.folha, &el.tag, el.attr("id"), &classes, el.attr("style"))
 }
 
 /// Percorre os filhos. Texto e elementos inline vão para `buf`.
@@ -130,6 +178,10 @@ fn layout_children(
             Node::Text(t) => buf.push(Span { text: t.clone(), href: link.map(str::to_string) }),
             Node::Element(el) => {
                 if SKIP_TAGS.contains(&el.tag.as_str()) {
+                    continue;
+                }
+                let css = estilo_do_elemento(el, ctx);
+                if css.oculto {
                     continue;
                 }
                 if el.tag == "br" {
@@ -150,13 +202,14 @@ fn layout_children(
 
                 if is_block(&el.tag) {
                     flush_inline(buf, style, ctx);
-                    let block = style_for(&el.tag);
+                    let block = aplicar(style_for(&el.tag), &css);
                     ctx.y += block.margin_top;
                     layout_children(&el.children, block, child_link, buf, ctx);
                     flush_inline(buf, block, ctx);
                     ctx.y += block.margin_bottom;
                 } else {
-                    layout_children(&el.children, style, child_link, buf, ctx);
+                    let inline = aplicar(style, &css);
+                    layout_children(&el.children, inline, child_link, buf, ctx);
                 }
             }
         }
@@ -364,5 +417,37 @@ mod tests {
         assert!(cmds
             .iter()
             .all(|c| matches!(c, DrawCommand::Text { href: None, .. })));
+    }
+
+    #[test]
+    fn css_changes_font_size_and_margin() {
+        let cmds = run("<style>p { font-size: 20px; margin-top: 4px }</style><p>oi</p>", 400.0);
+        match &cmds[0] {
+            DrawCommand::Text { y, font_size, .. } => {
+                assert_eq!(*font_size, 20.0);
+                assert_eq!(*y, 12.0);
+            }
+        }
+    }
+
+    #[test]
+    fn display_none_hides_element() {
+        let cmds = run(
+            r#"<style>.oculto { display: none }</style><p class="oculto">a</p><p>b</p>"#,
+            400.0,
+        );
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(text_of(&cmds[0]), "b");
+    }
+
+    #[test]
+    fn inline_style_wins_over_sheet() {
+        let cmds = run(
+            r#"<style>p { font-size: 20px }</style><p style="font-size: 10px">a</p>"#,
+            400.0,
+        );
+        match &cmds[0] {
+            DrawCommand::Text { font_size, .. } => assert_eq!(*font_size, 10.0),
+        }
     }
 }
