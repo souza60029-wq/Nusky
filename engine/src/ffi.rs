@@ -5,7 +5,8 @@
 //! Interface C do motor, chamada pela casca Swift.
 //!
 //! Formato de saída de `nusky_render`: uma linha por comando de texto, com campos
-//! separados por tab: `x<TAB>y<TAB>tamanho<TAB>negrito(0/1)<TAB>texto`.
+//! separados por tab: `x<TAB>y<TAB>tamanho<TAB>negrito(0/1)<TAB>link<TAB>texto`.
+//! O campo `link` fica vazio quando o texto não é link.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -22,6 +23,11 @@ impl TextMeasurer for ApproxMeasurer {
     }
 }
 
+/// Tab, quebra de linha e NUL quebrariam o formato; trocamos por espaço.
+fn sanitize(s: &str) -> String {
+    s.replace(|c: char| matches!(c, '\t' | '\n' | '\r' | '\0'), " ")
+}
+
 /// Renderiza HTML (C string em UTF-8) para uma lista de comandos de texto.
 /// Retorna null em caso de erro. Quem chama deve liberar o resultado
 /// com `nusky_free_string`.
@@ -36,15 +42,15 @@ pub extern "C" fn nusky_render(html: *const c_char, viewport_width: f32) -> *mut
     let mut out = String::new();
     for cmd in commands {
         match cmd {
-            DrawCommand::Text { x, y, text, font_size, bold } => {
-                // Tab, quebra de linha e NUL quebrariam o formato; trocamos por espaço.
-                let clean = text.replace(
-                    |c: char| c == '\t' || c == '\n' || c == '\r' || c == '\0',
-                    " ",
-                );
+            DrawCommand::Text { x, y, text, font_size, bold, href } => {
                 out.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\n",
-                    x, y, font_size, bold as u8, clean
+                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                    x,
+                    y,
+                    font_size,
+                    bold as u8,
+                    sanitize(href.as_deref().unwrap_or("")),
+                    sanitize(&text),
                 ));
             }
         }
@@ -71,14 +77,23 @@ pub extern "C" fn nusky_free_string(s: *mut c_char) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn render_returns_tab_separated_lines() {
-        let html = CString::new("<p>oi</p>").unwrap();
-        let ptr = nusky_render(html.as_ptr(), 400.0);
+    fn render_to_string(html: &str) -> String {
+        let c = CString::new(html).unwrap();
+        let ptr = nusky_render(c.as_ptr(), 400.0);
         assert!(!ptr.is_null());
         let out = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
         nusky_free_string(ptr);
-        assert_eq!(out, "8\t24\t16\t0\toi\n");
+        out
+    }
+
+    #[test]
+    fn render_returns_tab_separated_lines() {
+        assert_eq!(render_to_string("<p>oi</p>"), "8\t24\t16\t0\t\toi\n");
+    }
+
+    #[test]
+    fn render_includes_link_target() {
+        assert_eq!(render_to_string(r#"<a href="/x">oi</a>"#), "8\t8\t16\t0\t/x\toi\n");
     }
 
     #[test]
