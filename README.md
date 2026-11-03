@@ -1,71 +1,80 @@
 # Nusky
 
-Navegador experimental para iOS com motor de renderização próprio, escrito em Rust.
+Navegador próprio para iOS, com motor escrito em Rust e casca em Swift/SwiftUI. Não usa WebKit.
 
-**Versão:** 0.0.1
-**Status:** protótipo funcional. Carrega páginas simples, segue links e tem interface básica. Ainda não funciona com a maioria dos sites.
+Versão atual: **0.0.2**
+
+## Objetivo
+
+Um navegador leve e rápido para o iPhone 6s (chip A9, 2 GB de RAM, iOS 15.8.8), instalado via TrollStore. O motor é feito do zero: parser HTML, layout e desenho são escritos pelo próprio projeto.
 
 ## O que funciona hoje
 
-- Baixar páginas por HTTP e HTTPS.
-- Interpretar HTML: elementos, atributos, comentários e tags sem fechamento.
-- Layout em blocos: títulos, parágrafos e texto em linha, com quebra por palavras.
-- Links clicáveis, incluindo caminhos relativos.
-- Barra de endereço retrátil: toque para expandir, teclado com a tecla Ir.
-- Botões de recarregar e de configurações.
-- Modo noturno e posição da barra (topo ou base), salvos entre aberturas.
-- Testes automatizados do motor no Linux, pelo GitHub Actions.
-- Compilação do motor para iPhone (`aarch64-apple-ios`) e geração do `.ipa`.
+- Parser HTML: tags, atributos, comentários, doctype, tags void e entidades nomeadas e numéricas.
+- Layout de blocos verticais, com quebra de linha por palavras.
+- Medição real de texto pelo CoreText, via callback do Swift, para quebras de linha parecidas com as do Safari.
+- Links clicáveis, em azul e sublinhados. Links relativos são resolvidos pela URL final da página.
+- Barra de endereço retrátil, com modo noturno e diurno e opção de posição (topo ou base).
 
 ## Limitações conhecidas
 
-- **Medição de texto estimada:** as quebras de linha podem diferir do Safari. Isso será corrigido com a medição real do CoreText.
-- **Entidades HTML:** `&amp;`, `&nbsp;` e similares ainda aparecem como estão no texto (são decodificadas apenas em atributos).
-- **Sem CSS:** cores, fontes, margens e posições usam valores fixos.
-- **Sem JavaScript.**
-- **Sem imagens, tabelas, formulários, flexbox ou grid.**
-- **Sem histórico:** não há voltar nem avançar.
-- **Sem abas, favoritos ou downloads.**
+- Sem CSS: cores, fontes, margens e elementos com `display: none` são ignorados.
+- Sem JavaScript.
+- Sem imagens.
+- Sem tabelas, formulários, flexbox ou grid.
+- Sem histórico, abas ou downloads.
+- Sites que o Safari do iPhone 6s não abre também não abrem aqui.
 
 ## Roadmap
 
-- **0.0.2:** medição real de texto pelo CoreText e decodificação completa de entidades.
-- **Próximos passos:** histórico (voltar e avançar), CSS básico (cor, fonte e margens) e imagens.
-- **Bloqueio de anúncios e rastreadores:** implementado no próprio motor, já que o Nusky não usa WebKit.
-- **JavaScript:** depois que o layout estiver estável. Com JIT via TrollStore, há opções para um interpretador rápido.
-- **Metal:** entra apenas quando as medições mostrarem necessidade.
+Próximos passos, nesta ordem:
+
+1. Histórico (voltar e avançar).
+2. CSS básico: cor, fonte, margens e `display: none`.
+3. Imagens.
+4. Bloqueio de anúncios e rastreadores dentro do motor.
+5. JavaScript, depois que o layout estiver estável (com JIT via TrollStore).
+6. Metal, somente se as medições mostrarem gargalo.
 
 ## Estrutura do repositório
 
 ```
-engine/              motor em Rust (HTML, layout e interface C)
-app/Nusky/           app iOS em Swift e SwiftUI
+LICENSE
+README.md
+ARCHITECTURE.md
+engine/          motor em Rust (parser, layout, FFI)
+app/Nusky/       casca em Swift/SwiftUI
+project.yml      geração do projeto Xcode (XcodeGen)
+entitlements.plist
 .github/workflows/   CI: testes do motor e build do app
-project.yml          configuração do projeto Xcode (XcodeGen)
-entitlements.plist   permissões de JIT para o TrollStore
 ```
 
 ## Como verificar
 
-- **Motor:** `cargo test --manifest-path engine/Cargo.toml`, executado automaticamente a cada commit.
-- **App:** o workflow **iOS** gera o `.ipa`, que é instalado no iPhone pelo TrollStore.
+- **Testes do motor:** workflow `test-engine` (roda `cargo test` no Linux).
+- **Build do app:** workflow `iOS` gera `Nusky-unsigned.ipa`, disponível como artifact na execução.
+- **Instalação:** pelo TrollStore, no iPhone.
 
 ## Documentação
 
-- [ARCHITECTURE.md](ARCHITECTURE.md): camadas, fluxo de dados e decisões técnicas.
+As decisões de arquitetura estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Versionamento
 
-A versão só muda em marcos importantes. Enquanto estiver em 0.0.x, o projeto está em fase inicial e pode mudar de forma incompatível.
+A versão só muda em marcos importantes.
+
+- **0.0.1:** primeira versão funcional (parser, layout, links, ponte FFI).
+- **0.0.2:** medição real de texto pelo CoreText e decodificação de entidades HTML.
 
 ## Plataforma de teste
 
-- iPhone 6s (chip A9, 2 GB de RAM)
-- iOS 15.8.8
-- TrollStore 2.1.1 (JIT habilitado)
+- iPhone 6s, iOS 15.8.8
+- TrollStore 2.1.1, com JIT habilitado
 
 ## Licença
 
+Este projeto é licenciado sob a [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/).
+
 Copyright (c) 2026 S7y1_e
 
-Este projeto é distribuído sob a [Mozilla Public License 2.0](LICENSE).
+O texto completo da licença está no arquivo LICENSE.
