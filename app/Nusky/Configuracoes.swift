@@ -1,55 +1,46 @@
 import SwiftUI
 
-// Tela de configurações, no estilo Ajustes do iOS.
-// As preferências ficam em @AppStorage, com as mesmas chaves usadas pelo ContentView.
-
 struct Configuracoes: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("nightMode") private var nightMode = false
-    @AppStorage("barAtBottom") private var barAtBottom = false
-    @AppStorage("useButtons") private var useButtons = false
+    @AppStorage("themeAuto") private var automatico = true
+    @AppStorage("nightMode") private var noturno = false
+    @AppStorage("barAtBottom") private var barraEmbaixo = true
+    @AppStorage("useButtons") private var botoes = true
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("Aparência")) {
-                    opcao("Diurno", selecionada: !nightMode) { nightMode = false }
-                    opcao("Noturno", selecionada: nightMode) { nightMode = true }
+                Section {
+                    Toggle("Automático", isOn: $automatico)
+                    Toggle("Modo noturno", isOn: $noturno)
+                        .disabled(automatico)
+                } header: {
+                    Text("Aparência")
+                } footer: {
+                    Text("Automático segue o modo claro ou escuro do iPhone.")
                 }
 
-                Section(header: Text("Barra")) {
-                    opcao("Em cima", selecionada: !barAtBottom) { barAtBottom = false }
-                    opcao("Embaixo", selecionada: barAtBottom) { barAtBottom = true }
+                Section {
+                    Toggle("Barra embaixo", isOn: $barraEmbaixo)
+                } header: {
+                    Text("Barra")
+                } footer: {
+                    Text("Desligado: a barra fica em cima.")
                 }
 
-                Section(
-                    header: Text("Navegação"),
-                    footer: Text("Gestos: arraste a barra para voltar, avançar e abrir as abas. Botões: ao expandir a barra, aparecem três botões para voltar, avançar e abrir as abas.")
-                ) {
-                    opcao("Gestos", selecionada: !useButtons) { useButtons = false }
-                    opcao("Botões", selecionada: useButtons) { useButtons = true }
+                Section {
+                    Toggle("Botões na barra", isOn: $botoes)
+                } header: {
+                    Text("Navegação")
+                } footer: {
+                    Text("Desligado: arraste a barra para voltar, avançar e abrir as abas. Ligado: ao expandir a barra, aparecem os botões de voltar, avançar e abas.")
                 }
             }
             .navigationTitle("Configurações")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("OK") { dismiss() }
-                }
-            }
-        }
-    }
-
-    private func opcao(_ titulo: String, selecionada: Bool, acao: @escaping () -> Void) -> some View {
-        Button(action: acao) {
-            HStack {
-                Text(titulo)
-                    .foregroundColor(.primary)
-                Spacer()
-                if selecionada {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(.accentColor)
                 }
             }
         }
