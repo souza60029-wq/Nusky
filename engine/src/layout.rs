@@ -5,8 +5,8 @@
 //! Layout de bloco mínimo.
 //! Empilha blocos verticalmente e quebra o texto em linhas por palavras.
 //! Links (`<a href>`) viram comandos com o destino preenchido.
-//! Aplica CSS básico (tamanho, negrito, margens e display: none), lido das tags
-//! <style> e dos atributos style, id e class. A cor ainda não chega à casca.
+//! Aplica CSS básico (tamanho, negrito, margens, display: none e cor), lido das tags
+//! <style> e dos atributos style, id e class.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
 use crate::css::{self, Estilo, Folha};
@@ -30,6 +30,8 @@ pub enum DrawCommand {
         bold: bool,
         /// Destino do link, como está no HTML (pode ser relativo).
         href: Option<String>,
+        /// Cor definida pelo CSS da página, em r, g, b. None quando a página não definiu cor.
+        color: Option<[u8; 3]>,
     },
 }
 
@@ -46,6 +48,7 @@ struct Style {
     bold: bool,
     margin_top: f32,
     margin_bottom: f32,
+    color: Option<[u8; 3]>,
 }
 
 /// Elementos que começam um novo bloco. Os demais são inline.
@@ -75,34 +78,38 @@ fn is_block(tag: &str) -> bool {
     )
 }
 
-/// Estilo padrão por tag. Valores em pontos.
+/// Estilo padrão por tag. Valores em pontos. Sem cor: a cor vem do pai ou do CSS.
 fn style_for(tag: &str) -> Style {
     match tag {
-        "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0 },
-        "h2" => Style { font_size: 24.0, bold: true, margin_top: 19.0, margin_bottom: 19.0 },
-        "h3" => Style { font_size: 18.7, bold: true, margin_top: 18.0, margin_bottom: 18.0 },
-        "h4" | "h5" | "h6" => Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0 },
-        "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0 },
-        _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0 },
+        "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0, color: None },
+        "h2" => Style { font_size: 24.0, bold: true, margin_top: 19.0, margin_bottom: 19.0, color: None },
+        "h3" => Style { font_size: 18.7, bold: true, margin_top: 18.0, margin_bottom: 18.0, color: None },
+        "h4" | "h5" | "h6" => {
+            Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0, color: None }
+        }
+        "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0, color: None },
+        _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0, color: None },
     }
 }
 
-/// Sobrepõe o CSS ao estilo padrão. Só o que o CSS definiu muda.
+/// Sobrepõe o CSS ao estilo base. Só o que o CSS definiu muda.
 fn aplicar(base: Style, css: &Estilo) -> Style {
     Style {
         font_size: css.tamanho.unwrap_or(base.font_size),
         bold: css.negrito.unwrap_or(base.bold),
         margin_top: css.margem_topo.unwrap_or(base.margin_top),
         margin_bottom: css.margem_base.unwrap_or(base.margin_bottom),
+        color: css.cor.or(base.color),
     }
 }
 
-/// Trecho de texto com o link ao qual pertence.
+/// Trecho de texto com o link e a cor ao qual pertence.
 /// Usado para trechos do HTML, para palavras e para o que vai numa mesma linha.
 #[derive(Clone)]
 struct Span {
     text: String,
     href: Option<String>,
+    color: Option<[u8; 3]>,
 }
 
 struct Ctx<'a> {
@@ -130,7 +137,13 @@ pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) 
         width: (viewport_width - 2.0 * PAGE_MARGIN).max(0.0),
         commands: Vec::new(),
     };
-    let root = Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0 };
+    let root = Style {
+        font_size: BASE_FONT,
+        bold: false,
+        margin_top: 0.0,
+        margin_bottom: 0.0,
+        color: None,
+    };
     let mut buf: Vec<Span> = Vec::new();
     layout_children(nodes, root, None, &mut buf, &mut ctx);
     flush_inline(&mut buf, root, &mut ctx);
@@ -155,9 +168,10 @@ fn coletar_css(nodes: &[Node], saida: &mut String) {
     }
 }
 
-/// Calcula o CSS que vale para um elemento. Sem CSS na página, devolve o estilo vazio.
+/// Calcula o CSS que vale para um elemento.
+/// Sem <style> na página, só o atributo style pode trazer CSS.
 fn estilo_do_elemento(el: &Element, ctx: &Ctx<'_>) -> Estilo {
-    if !ctx.tem_css {
+    if !ctx.tem_css && el.attr("style").is_none() {
         return Estilo::default();
     }
     let classes: Vec<&str> = el.attr("class").unwrap_or("").split_whitespace().collect();
@@ -175,7 +189,11 @@ fn layout_children(
 ) {
     for node in nodes {
         match node {
-            Node::Text(t) => buf.push(Span { text: t.clone(), href: link.map(str::to_string) }),
+            Node::Text(t) => buf.push(Span {
+                text: t.clone(),
+                href: link.map(str::to_string),
+                color: style.color,
+            }),
             Node::Element(el) => {
                 if SKIP_TAGS.contains(&el.tag.as_str()) {
                     continue;
@@ -186,7 +204,11 @@ fn layout_children(
                 }
                 if el.tag == "br" {
                     // Quebra de linha forçada ainda não existe; por enquanto vira espaço.
-                    buf.push(Span { text: " ".to_string(), href: link.map(str::to_string) });
+                    buf.push(Span {
+                        text: " ".to_string(),
+                        href: link.map(str::to_string),
+                        color: style.color,
+                    });
                     continue;
                 }
 
@@ -202,13 +224,18 @@ fn layout_children(
 
                 if is_block(&el.tag) {
                     flush_inline(buf, style, ctx);
-                    let block = aplicar(style_for(&el.tag), &css);
+                    // Bloco herda a cor do pai; tamanho e margens vêm da própria tag.
+                    let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
                     ctx.y += block.margin_top;
                     layout_children(&el.children, block, child_link, buf, ctx);
                     flush_inline(buf, block, ctx);
                     ctx.y += block.margin_bottom;
                 } else {
-                    let inline = aplicar(style, &css);
+                    let mut inline = aplicar(style, &css);
+                    // Link não herda a cor do texto ao redor: sem cor própria, fica com a cor de link.
+                    if el.tag == "a" {
+                        inline.color = css.cor;
+                    }
                     layout_children(&el.children, inline, child_link, buf, ctx);
                 }
             }
@@ -216,8 +243,8 @@ fn layout_children(
     }
 }
 
-/// Divide os trechos em palavras, mantendo o link de cada uma.
-/// Uma palavra que atravessa dois trechos fica com o link do primeiro.
+/// Divide os trechos em palavras, mantendo o link e a cor de cada uma.
+/// Uma palavra que atravessa dois trechos fica com o link e a cor do primeiro.
 fn split_words(chunks: &[Span]) -> Vec<Span> {
     let mut words: Vec<Span> = Vec::new();
     let mut cur: Option<Span> = None;
@@ -229,6 +256,7 @@ fn split_words(chunks: &[Span]) -> Vec<Span> {
                 cur.get_or_insert_with(|| Span {
                     text: String::new(),
                     href: chunk.href.clone(),
+                    color: chunk.color,
                 })
                 .text
                 .push(ch);
@@ -267,7 +295,7 @@ fn flush_inline(buf: &mut Vec<Span>, style: Style, ctx: &mut Ctx<'_>) {
     }
 }
 
-/// Desenha uma linha. Palavras vizinhas com o mesmo link viram um só comando,
+/// Desenha uma linha. Palavras vizinhas com o mesmo link e a mesma cor viram um só comando,
 /// para a casca criar menos elementos de tela.
 fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
     let mut runs: Vec<Span> = Vec::new();
@@ -277,13 +305,19 @@ fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
                 last.text.push(' ');
             }
         }
-        let continues = runs.last().map_or(false, |r| r.href == word.href);
+        let continues = runs
+            .last()
+            .map_or(false, |r| r.href == word.href && r.color == word.color);
         if continues {
             if let Some(last) = runs.last_mut() {
                 last.text.push_str(&word.text);
             }
         } else {
-            runs.push(Span { text: word.text.clone(), href: word.href.clone() });
+            runs.push(Span {
+                text: word.text.clone(),
+                href: word.href.clone(),
+                color: word.color,
+            });
         }
     }
 
@@ -297,6 +331,7 @@ fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
             font_size: style.font_size,
             bold: style.bold,
             href: run.href,
+            color: run.color,
         });
         x += w;
     }
@@ -339,6 +374,7 @@ mod tests {
                 font_size: 16.0,
                 bold: false,
                 href: None,
+                color: None,
             }]
         );
     }
@@ -448,6 +484,42 @@ mod tests {
         );
         match &cmds[0] {
             DrawCommand::Text { font_size, .. } => assert_eq!(*font_size, 10.0),
+        }
+    }
+
+    #[test]
+    fn inline_style_works_without_style_sheet() {
+        let cmds = run(r#"<p style="font-size: 20px">a</p>"#, 400.0);
+        match &cmds[0] {
+            DrawCommand::Text { font_size, .. } => assert_eq!(*font_size, 20.0),
+        }
+    }
+
+    #[test]
+    fn color_from_css_reaches_the_text() {
+        let cmds = run(r#"<p style="color: red">a</p>"#, 400.0);
+        match &cmds[0] {
+            DrawCommand::Text { color, .. } => assert_eq!(*color, Some([255, 0, 0])),
+        }
+    }
+
+    #[test]
+    fn color_is_inherited_by_text_inside_blocks() {
+        let cmds = run(r#"<div style="color: #00ff00"><p>a</p></div>"#, 400.0);
+        match &cmds[0] {
+            DrawCommand::Text { color, .. } => assert_eq!(*color, Some([0, 255, 0])),
+        }
+    }
+
+    #[test]
+    fn links_do_not_inherit_color() {
+        let cmds = run(r#"<p style="color: red">x <a href="/y">y</a></p>"#, 400.0);
+        let link = cmds
+            .iter()
+            .find(|c| matches!(c, DrawCommand::Text { href: Some(_), .. }))
+            .expect("deve haver um link");
+        match link {
+            DrawCommand::Text { color, .. } => assert_eq!(*color, None),
         }
     }
 }
