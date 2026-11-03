@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Teste de artigo</title>
+<style>
+.mw-parser-output p { font-size: 16px }
+div p { color: #333333 }
+.caixa { margin-top: 4px }
+</style>
+</head>
+<body>
+<h1>Teste de artigo</h1>
+<p>1. Parágrafo direto no body. Deve aparecer.</p>
+<div><p>2. Parágrafo dentro de div. Deve aparecer.</p></div>
+<div class="mw-parser-output">
+<p>3. Parágrafo dentro de mw-parser-output. Deve aparecer.</p>
+<h2>4. Título de seção. Deve aparecer.</h2>
+<p>5. Parágrafo depois do título. Deve aparecer.</p>
+</div>
+<section><div><p>6. Parágrafo dentro de section e div. Deve aparecer.</p></div></section>
+<div id="toc"><ul><li>7. Item de sumário. Deve aparecer.</li></ul></div>
+<div class="mw-parser-output">
+<p>8. Link de teste: <a href="/wiki/Brasil">texto do link</a>. Deve aparecer.</p>
+<p class="caixa">9. Parágrafo com classe. Deve aparecer.</p>
+<table><tr><td><p>10. Parágrafo dentro de tabela. Deve aparecer.</p></td></tr></table>
+<noscript><p>11. Dentro de noscript. Pode não aparecer.</p></noscript>
+<p>12. Parágrafo com <span>span</span> e <b>negrito</b>. Deve aparecer.</p>
+</div>
+<p>13. Parágrafo final. Deve aparecer.</p>
+</body>
+</html>
