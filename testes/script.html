@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Teste de script</title>
+<script>var a = 1 < 2; var s = "</div>"; document.write("<p>oculto</p>");</script>
+</head>
+<body>
+<div>
+<p>1. Antes do script. Deve aparecer.</p>
+<script>if (x<y) { s = '</div><p>isto nao aparece</p>' }</script>
+<p>2. Depois do script, ainda dentro da div. Deve aparecer.</p>
+</div>
+<p>3. Final. Deve aparecer.</p>
+</body>
+</html>
