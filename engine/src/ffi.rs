@@ -6,8 +6,9 @@
 //!
 //! `nusky_render` recebe HTML e, opcionalmente, uma função de medição fornecida pela casca.
 //! Formato de saída: uma linha por comando de texto, com campos separados por tab:
-//! `x<TAB>y<TAB>tamanho<TAB>negrito(0/1)<TAB>link<TAB>texto`.
+//! `x<TAB>y<TAB>tamanho<TAB>negrito(0/1)<TAB>link<TAB>cor<TAB>texto`.
 //! O campo `link` fica vazio quando o texto não é link.
+//! O campo `cor` é `r,g,b` (0 a 255), ou vazio quando a página não definiu cor.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -58,6 +59,14 @@ fn sanitize(s: &str) -> String {
     s.replace(|c: char| matches!(c, '\t' | '\n' | '\r' | '\0'), " ")
 }
 
+/// Cor como "r,g,b", ou vazio quando a página não definiu cor.
+fn formatar_cor(cor: Option<[u8; 3]>) -> String {
+    match cor {
+        Some([r, g, b]) => format!("{},{},{}", r, g, b),
+        None => String::new(),
+    }
+}
+
 /// Renderiza HTML (C string em UTF-8) para uma lista de comandos de texto.
 /// Retorna null em caso de erro. Quem chama deve liberar o resultado
 /// com `nusky_free_string`.
@@ -85,14 +94,15 @@ pub extern "C" fn nusky_render(
     let mut out = String::new();
     for cmd in commands {
         match cmd {
-            DrawCommand::Text { x, y, text, font_size, bold, href } => {
+            DrawCommand::Text { x, y, text, font_size, bold, href, color } => {
                 out.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     x,
                     y,
                     font_size,
                     bold as u8,
                     sanitize(href.as_deref().unwrap_or("")),
+                    formatar_cor(color),
                     sanitize(&text),
                 ));
             }
@@ -136,12 +146,20 @@ mod tests {
 
     #[test]
     fn render_returns_tab_separated_lines() {
-        assert_eq!(render_with("<p>oi</p>", None), "8\t24\t16\t0\t\toi\n");
+        assert_eq!(render_with("<p>oi</p>", None), "8\t24\t16\t0\t\t\toi\n");
     }
 
     #[test]
     fn render_includes_link_target() {
-        assert_eq!(render_with(r#"<a href="/x">oi</a>"#, None), "8\t8\t16\t0\t/x\toi\n");
+        assert_eq!(render_with(r#"<a href="/x">oi</a>"#, None), "8\t8\t16\t0\t/x\t\toi\n");
+    }
+
+    #[test]
+    fn render_includes_css_color() {
+        assert_eq!(
+            render_with(r#"<p style="color: red">oi</p>"#, None),
+            "8\t24\t16\t0\t\t255,0,0\toi\n"
+        );
     }
 
     #[test]
@@ -153,7 +171,7 @@ mod tests {
 
     #[test]
     fn entities_are_decoded_in_output() {
-        assert_eq!(render_with("<p>a &amp; b</p>", None), "8\t24\t16\t0\t\ta & b\n");
+        assert_eq!(render_with("<p>a &amp; b</p>", None), "8\t24\t16\t0\t\t\ta & b\n");
     }
 
     #[test]
