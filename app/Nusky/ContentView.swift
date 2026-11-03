@@ -214,15 +214,31 @@ struct ContentView: View {
             }
     }
 
-    /// Cor da linha: a que a página pediu pelo CSS, se contrastar com o fundo do tema.
-    /// Senão, usa a cor do tema (ou azul, nos links). Assim um texto preto da página
-    /// não some no modo noturno, e um branco não some no modo claro.
+    /// Cor da linha: a que a página pediu pelo CSS.
+    /// Só troca por cor do tema quando o texto ficaria quase invisível sobre o fundo
+    /// (contraste abaixo de 1,5 para 1). Nos outros casos, vale a cor da página.
+    /// Links sem cor própria continuam azuis.
     private func corDaLinha(_ item: DrawItem) -> Color {
         let padrao: Color = item.href != nil ? .blue : textoCor
         guard let cor = item.cor else { return padrao }
-        let luminanciaDoFundo: Double = escuro ? 0 : 1
-        if abs(cor.luminancia - luminanciaDoFundo) < 0.4 { return padrao }
+        let fundoLuminancia: Double = escuro ? 0 : 1
+        let contraste = razaoDeContraste(luminanciaRelativa(cor), fundoLuminancia)
+        if contraste < 1.5 { return padrao }
         return Color(red: cor.r, green: cor.g, blue: cor.b)
+    }
+
+    /// Luminância relativa pela regra de acessibilidade da web (WCAG): 0 é preto, 1 é branco.
+    /// Corrige a gama do sRGB, porque o olho não percebe brilho de forma linear.
+    private func luminanciaRelativa(_ cor: CorTexto) -> Double {
+        func linear(_ c: Double) -> Double {
+            c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(cor.r) + 0.7152 * linear(cor.g) + 0.0722 * linear(cor.b)
+    }
+
+    /// Razão de contraste entre duas luminâncias relativas. Vai de 1 (igual) a 21 (preto contra branco).
+    private func razaoDeContraste(_ a: Double, _ b: Double) -> Double {
+        (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
     // MARK: - Barra
