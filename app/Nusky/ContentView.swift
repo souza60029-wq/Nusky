@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 final class BrowserModel: ObservableObject {
     @Published var address = "https://example.com"
