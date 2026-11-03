@@ -176,13 +176,18 @@ final class BrowserModel: ObservableObject {
         do {
             let (html, finalURL) = try await download(url)
             guard !Task.isCancelled else { return }
+            // Baixa as folhas de estilo externas antes de registrar a página no histórico,
+            // para não deixar entrada sem tela se o usuário trocar de página no meio.
+            progresso = 0.9
+            let completo = await FolhasExternas.incluir(em: html, base: finalURL)
+            guard !Task.isCancelled else { return }
             var id = entradaId
             if navegar {
                 historico.navegar(para: finalURL)
                 id = historico.entradaAtual?.id
             }
-            progresso = 0.9
-            await show(html: html, url: finalURL, entradaId: id, restoreY: y)
+            progresso = 0.95
+            await show(html: completo, url: finalURL, entradaId: id, restoreY: y)
         } catch {
             guard !Task.isCancelled else { return }
             carregando = false
