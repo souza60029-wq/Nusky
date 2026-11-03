@@ -56,20 +56,23 @@ final class BrowserModel: ObservableObject {
 
 private enum BarMode {
     case collapsed   // linha fina com o domínio
-    case expanded    // barra normal, sem teclado
-    case editing     // barra normal, com teclado
+    case expanded    // barra com botões, sem teclado
+    case editing     // barra com botões e teclado
 }
 
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
     @State private var mode: BarMode = .expanded
+    @State private var showSettings = false
     @FocusState private var focused: Bool
+    @AppStorage("nightMode") private var nightMode = false
+    @AppStorage("barAtBottom") private var barAtBottom = false
 
-    /// Altura reservada no topo do conteúdo. Fixa, para a página não se mexer durante a animação.
-    private let topInset: CGFloat = 44
+    /// Espaço reservado para a barra expandida. Fixo, para a página não se mexer ao retrair a barra.
+    private let reserve: CGFloat = 56
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack(alignment: barAtBottom ? Alignment.bottom : Alignment.top) {
             ScrollView {
                 ZStack(alignment: .topLeading) {
                     ForEach(model.items) { item in
@@ -90,51 +93,104 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: model.contentHeight, alignment: .topLeading)
-                .padding(.top, topInset)
+                .padding(barAtBottom ? Edge.Set.bottom : Edge.Set.top, reserve)
             }
             // Toque em qualquer lugar do conteúdo retrai a barra, sem bloquear a rolagem.
             .simultaneousGesture(TapGesture().onEnded { collapse() })
 
             addressBar
         }
+        .preferredColorScheme(nightMode ? .dark : .light)
         .onAppear { model.load() }
         .onChange(of: focused) { isFocused in
             if !isFocused { collapse() }
         }
+        .confirmationDialog("Configurações", isPresented: $showSettings, titleVisibility: .hidden) {
+            Button(nightMode ? "Modo diurno" : "Modo noturno") {
+                nightMode.toggle()
+            }
+            Button(barAtBottom ? "Mover barra para cima" : "Mover barra para baixo") {
+                barAtBottom.toggle()
+            }
+            Button("Cancelar", role: .cancel) {}
+        }
     }
 
     private var addressBar: some View {
-        VStack(spacing: 0) {
-            if mode == .collapsed {
-                Text(model.currentHost.isEmpty ? "Pesquisar" : model.currentHost)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity)
-            } else {
-                TextField("Endereço ou pesquisa", text: $model.address)
-                    .focused($focused)
-                    .textFieldStyle(.roundedBorder)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                    .keyboardType(.webSearch)
-                    .submitLabel(.go)
-                    // Na fase expandida, o toque passa para a barra e não para o campo.
-                    .allowsHitTesting(mode == .editing)
-                    .padding(.horizontal, 8)
-                    .onSubmit {
-                        model.load()
-                        collapse()
-                    }
+        let collapsed = mode == .collapsed
+
+        return HStack(spacing: 6) {
+            if !collapsed {
+                Button { showSettings = true } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+            }
+
+            barField(collapsed: collapsed)
+                .frame(maxWidth: .infinity)
+
+            if !collapsed {
+                Button { model.load() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
             }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: mode == .collapsed ? topInset : 56)
-        .background(Color(.systemBackground))
+        .padding(.horizontal, collapsed ? 14 : 6)
+        .frame(height: collapsed ? 26 : 40)
+        .background(Capsule().fill(Color(.secondarySystemBackground)))
+        .padding(.horizontal, 12)
+        // A área de toque é maior que a barra visível, principalmente quando retraída.
+        .frame(maxWidth: .infinity, minHeight: collapsed ? 44 : 56)
         .contentShape(Rectangle())
         .onTapGesture { handleBarTap() }
-        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    @ViewBuilder
+    private func barField(collapsed: Bool) -> some View {
+        if collapsed {
+            Text(model.currentHost.isEmpty ? "Pesquisar" : model.currentHost)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        } else {
+            TextField("Endereço ou pesquisa", text: $model.address)
+                .focused($focused)
+                .textFieldStyle(.plain)
+                .font(.system(size: 16))
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+                .keyboardType(.webSearch)
+                .submitLabel(.go)
+                // Na fase expandida, o toque passa para a barra e não para o campo.
+                .allowsHitTesting(mode == .editing)
+                .mask(fadeMask)
+                .onSubmit {
+                    model.load()
+                    collapse()
+                }
+        }
+    }
+
+    /// Texto some suavemente nas duas bordas, antes de encostar nos botões.
+    private var fadeMask: some View {
+        LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black, location: 0.08),
+                .init(color: .black, location: 0.9),
+                .init(color: .clear, location: 1)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
     }
 
     private func handleBarTap() {
