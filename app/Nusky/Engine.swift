@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import CoreGraphics
 
 struct DrawItem: Identifiable {
@@ -12,9 +13,20 @@ struct DrawItem: Identifiable {
     let text: String
 }
 
+/// Mede a largura de um texto com a mesma fonte do sistema que o SwiftUI usa para desenhar.
+/// Não captura nada, para poder ser passada ao motor como função C.
+private let measureCallback: nusky_measure_fn = { text, size, bold in
+    guard let text = text else { return 0 }
+    let string = String(cString: text)
+    let font = bold != 0
+        ? UIFont.boldSystemFont(ofSize: CGFloat(size))
+        : UIFont.systemFont(ofSize: CGFloat(size))
+    return Float((string as NSString).size(withAttributes: [.font: font]).width)
+}
+
 enum Engine {
     static func render(html: String, width: Float) -> [DrawItem] {
-        guard let raw = nusky_render(html, width) else { return [] }
+        guard let raw = nusky_render(html, width, measureCallback) else { return [] }
         defer { nusky_free_string(raw) }
         let output = String(cString: raw)
 
