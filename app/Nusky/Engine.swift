@@ -2,6 +2,16 @@ import Foundation
 import UIKit
 import CoreGraphics
 
+/// Cor de texto vinda do CSS da página, com componentes de 0 a 1.
+struct CorTexto {
+    let r: Double
+    let g: Double
+    let b: Double
+
+    /// Luminância perceptiva: 0 é preto, 1 é branco.
+    var luminancia: Double { 0.299 * r + 0.587 * g + 0.114 * b }
+}
+
 struct DrawItem: Identifiable {
     let id = UUID()
     let x: CGFloat
@@ -10,6 +20,8 @@ struct DrawItem: Identifiable {
     let bold: Bool
     /// Destino do link, como está no HTML (pode ser relativo). Nil quando não é link.
     let href: String?
+    /// Cor definida pelo CSS da página. Nil quando a página não definiu cor.
+    let cor: CorTexto?
     let text: String
 }
 
@@ -32,9 +44,9 @@ enum Engine {
 
         var items: [DrawItem] = []
         for line in output.split(separator: "\n") {
-            // Campos: x, y, tamanho, negrito, link, texto. O texto fica por último.
-            let fields = line.split(separator: "\t", maxSplits: 5, omittingEmptySubsequences: false)
-            guard fields.count == 6,
+            // Campos: x, y, tamanho, negrito, link, cor, texto. O texto fica por último.
+            let fields = line.split(separator: "\t", maxSplits: 6, omittingEmptySubsequences: false)
+            guard fields.count == 7,
                   let x = Float(fields[0]),
                   let y = Float(fields[1]),
                   let size = Float(fields[2]),
@@ -47,9 +59,20 @@ enum Engine {
                 fontSize: CGFloat(size),
                 bold: bold == 1,
                 href: href,
-                text: String(fields[5])
+                cor: parseCor(fields[5]),
+                text: String(fields[6])
             ))
         }
         return items
+    }
+
+    /// "r,g,b" com valores de 0 a 255. Campo vazio quando a página não definiu cor.
+    private static func parseCor(_ campo: Substring) -> CorTexto? {
+        let partes = campo.split(separator: ",")
+        guard partes.count == 3,
+              let r = Int(partes[0]),
+              let g = Int(partes[1]),
+              let b = Int(partes[2]) else { return nil }
+        return CorTexto(r: Double(r) / 255, g: Double(g) / 255, b: Double(b) / 255)
     }
 }
