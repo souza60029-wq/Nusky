@@ -178,7 +178,7 @@ final class BrowserModel: ObservableObject {
 
     /// Gera os itens de desenho fora da thread principal e atualiza a tela.
     private func show(html: String, url: URL, entradaId: UUID?, restoreY y: CGFloat) async {
-        let width = textWidth
+        let width = Float(textWidth)
         let novosItens = await Task.detached(priority: .userInitiated) {
             Engine.render(html: html, width: width)
         }.value
