@@ -6,10 +6,11 @@
 //! Empilha blocos verticalmente e quebra o texto em linhas por palavras.
 //! Links (`<a href>`) viram comandos com o destino preenchido.
 //! Aplica CSS básico (tamanho, negrito, margens, display: none e cor), lido das tags
-//! <style> e dos atributos style, id e class.
+//! <style> e dos atributos style, id e class. Seletores compostos (descendente e filho)
+//! usam a cadeia de pais de cada elemento.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
-use crate::css::{self, Estilo, Folha};
+use crate::css::{self, Estilo, Folha, Info};
 use crate::html::{Element, Node};
 
 /// Responsável por medir texto. No iPhone, a casca implementa com CoreText.
@@ -117,6 +118,8 @@ struct Ctx<'a> {
     folha: Folha,
     /// Falso quando a página não tem CSS: evita calcular estilos à toa.
     tem_css: bool,
+    /// Elementos abertos, do raiz até o pai imediato. Usada por seletores compostos.
+    pais: Vec<Info>,
     x0: f32,
     y: f32,
     width: f32,
@@ -132,6 +135,7 @@ pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) 
         measurer,
         folha: Folha::parse(&css_texto),
         tem_css: !css_texto.trim().is_empty(),
+        pais: Vec::new(),
         x0: PAGE_MARGIN,
         y: PAGE_MARGIN,
         width: (viewport_width - 2.0 * PAGE_MARGIN).max(0.0),
@@ -168,14 +172,27 @@ fn coletar_css(nodes: &[Node], saida: &mut String) {
     }
 }
 
-/// Calcula o CSS que vale para um elemento.
+/// Monta a identificação do elemento (tag, id e classes) para o seletor de CSS.
+fn info_do_elemento(el: &Element) -> Info {
+    Info {
+        tag: el.tag.clone(),
+        id: el.attr("id").map(str::to_string),
+        classes: el
+            .attr("class")
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+/// Calcula o CSS que vale para um elemento, considerando seus pais.
 /// Sem <style> na página, só o atributo style pode trazer CSS.
-fn estilo_do_elemento(el: &Element, ctx: &Ctx<'_>) -> Estilo {
+fn estilo_do_elemento(el: &Element, info: &Info, ctx: &Ctx<'_>) -> Estilo {
     if !ctx.tem_css && el.attr("style").is_none() {
         return Estilo::default();
     }
-    let classes: Vec<&str> = el.attr("class").unwrap_or("").split_whitespace().collect();
-    css::estilo_para(&ctx.folha, &el.tag, el.attr("id"), &classes, el.attr("style"))
+    css::estilo_com_pais(&ctx.folha, info, &ctx.pais, el.attr("style"))
 }
 
 /// Percorre os filhos. Texto e elementos inline vão para `buf`.
@@ -198,7 +215,8 @@ fn layout_children(
                 if SKIP_TAGS.contains(&el.tag.as_str()) {
                     continue;
                 }
-                let css = estilo_do_elemento(el, ctx);
+                let info = info_do_elemento(el);
+                let css = estilo_do_elemento(el, &info, ctx);
                 if css.oculto {
                     continue;
                 }
@@ -227,7 +245,9 @@ fn layout_children(
                     // Bloco herda a cor do pai; tamanho e margens vêm da própria tag.
                     let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
                     ctx.y += block.margin_top;
+                    ctx.pais.push(info);
                     layout_children(&el.children, block, child_link, buf, ctx);
+                    ctx.pais.pop();
                     flush_inline(buf, block, ctx);
                     ctx.y += block.margin_bottom;
                 } else {
@@ -236,7 +256,9 @@ fn layout_children(
                     if el.tag == "a" {
                         inline.color = css.cor;
                     }
+                    ctx.pais.push(info);
                     layout_children(&el.children, inline, child_link, buf, ctx);
+                    ctx.pais.pop();
                 }
             }
         }
@@ -521,5 +543,37 @@ mod tests {
         match link {
             DrawCommand::Text { color, .. } => assert_eq!(*color, None),
         }
+    }
+
+    #[test]
+    fn descendant_selector_reaches_nested_text() {
+        let cmds = run(
+            "<style>div p { font-size: 20px }</style><div><p>a</p></div>",
+            400.0,
+        );
+        match &cmds[0] {
+            DrawCommand::Text { font_size, .. } => assert_eq!(*font_size, 20.0),
+        }
+    }
+
+    #[test]
+    fn child_selector_only_matches_direct_child() {
+        let cmds = run(
+            "<style>div > p { font-size: 20px }</style><div><span><p>a</p></span></div>",
+            400.0,
+        );
+        match &cmds[0] {
+            DrawCommand::Text { font_size, .. } => assert_eq!(*font_size, 16.0),
+        }
+    }
+
+    #[test]
+    fn hides_whole_menu_by_ancestor_class() {
+        let cmds = run(
+            r#"<style>.menu p { display: none }</style><div class="menu"><p>x</p><p>y</p></div><p>z</p>"#,
+            400.0,
+        );
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(text_of(&cmds[0]), "z");
     }
 }
