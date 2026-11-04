@@ -9,6 +9,9 @@
 //! `x<TAB>y<TAB>tamanho<TAB>negrito(0/1)<TAB>link<TAB>cor<TAB>texto`.
 //! O campo `link` fica vazio quando o texto não é link.
 //! O campo `cor` é `r,g,b` (0 a 255), ou vazio quando a página não definiu cor.
+//!
+//! `nusky_diagnose` aceita os mesmos argumentos e devolve um relatório em texto
+//! (ver `diagnostico.rs`). Não altera a renderização.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,6 +19,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
+use crate::diagnostico::relatorio;
 use crate::html::parse;
 use crate::layout::{layout, DrawCommand, TextMeasurer};
 
@@ -115,7 +119,37 @@ pub extern "C" fn nusky_render(
     }
 }
 
-/// Libera uma string devolvida por `nusky_render`.
+/// Gera o relatório de diagnóstico da página (texto em UTF-8).
+/// Mesmos argumentos de `nusky_render`. Retorna null em caso de erro.
+/// Quem chama deve liberar o resultado com `nusky_free_string`.
+#[no_mangle]
+pub extern "C" fn nusky_diagnose(
+    html: *const c_char,
+    viewport_width: f32,
+    measure: Option<MeasureFn>,
+) -> *mut c_char {
+    if html.is_null() {
+        return ptr::null_mut();
+    }
+    let input = unsafe { CStr::from_ptr(html) }.to_string_lossy();
+
+    let texto = match measure {
+        Some(f) => relatorio(
+            &input,
+            viewport_width,
+            &CallbackMeasurer { measure: f, cache: RefCell::new(HashMap::new()) },
+        ),
+        None => relatorio(&input, viewport_width, &ApproxMeasurer),
+    };
+
+    // NUL não cabe numa C string; trocamos por espaço.
+    match CString::new(texto.replace('\0', " ")) {
+        Ok(s) => s.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Libera uma string devolvida por `nusky_render` ou `nusky_diagnose`.
 #[no_mangle]
 pub extern "C" fn nusky_free_string(s: *mut c_char) {
     if s.is_null() {
@@ -177,5 +211,20 @@ mod tests {
     #[test]
     fn null_input_returns_null() {
         assert!(nusky_render(ptr::null(), 400.0, None).is_null());
+    }
+
+    #[test]
+    fn diagnose_returns_report() {
+        let c = CString::new("<p>oi</p>").unwrap();
+        let p = nusky_diagnose(c.as_ptr(), 400.0, None);
+        assert!(!p.is_null());
+        let out = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        nusky_free_string(p);
+        assert!(out.contains("No HTML visível: 2 caracteres"));
+    }
+
+    #[test]
+    fn diagnose_null_input_returns_null() {
+        assert!(nusky_diagnose(ptr::null(), 400.0, None).is_null());
     }
 }
