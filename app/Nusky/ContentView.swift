@@ -70,7 +70,7 @@ struct ContentView: View {
         }
         .preferredColorScheme(esquemaPreferido)
         .sheet(isPresented: $mostrarConfiguracoes) {
-            Configuracoes()
+            Configuracoes(urlAtual: model.currentURL)
                 .preferredColorScheme(esquemaPreferido)
         }
         .fullScreenCover(isPresented: $mostrarAbas) {
