@@ -3,6 +3,7 @@
 // https://mozilla.org/MPL/2.0/.
 
 pub mod css;
+pub mod diagnostico;
 pub mod ffi;
 pub mod html;
 pub mod layout;
