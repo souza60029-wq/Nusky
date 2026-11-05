@@ -6,8 +6,9 @@
 //! Empilha blocos verticalmente e quebra o texto em linhas por palavras.
 //! Links (`<a href>`) viram comandos com o destino preenchido.
 //! Aplica CSS básico (tamanho, negrito, margens, display: none e cor), lido das tags
-//! <style> e dos atributos style, id e class. Seletores compostos (descendente e filho)
-//! usam a cadeia de pais de cada elemento.
+//! <style> e dos atributos style, id e class. Seletores compostos (descendente, filho,
+//! irmãos `+` e `~`, atributos e `:first-child`) usam a cadeia de pais e os irmãos
+//! anteriores de cada elemento.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
 use crate::css::{self, Estilo, Folha, Info};
@@ -133,7 +134,7 @@ pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) 
 
     let mut ctx = Ctx {
         measurer,
-        folha: Folha::parse(&css_texto),
+        folha: Folha::parse_largura(&css_texto, viewport_width),
         tem_css: !css_texto.trim().is_empty(),
         pais: Vec::new(),
         x0: PAGE_MARGIN,
@@ -172,27 +173,33 @@ fn coletar_css(nodes: &[Node], saida: &mut String) {
     }
 }
 
-/// Monta a identificação do elemento (tag, id e classes) para o seletor de CSS.
-fn info_do_elemento(el: &Element) -> Info {
+/// Monta a identificação do elemento (tag, id, classes e atributos citados no CSS).
+/// Só lê os atributos listados em `nomes`, para não copiar o que nenhuma regra usa.
+fn info_do_elemento(el: &Element, nomes: &[String]) -> Info {
+    let atributos = nomes
+        .iter()
+        .filter_map(|nome| el.attr(nome).map(|v| (nome.clone(), v.to_string())))
+        .collect();
     Info {
         tag: el.tag.clone(),
-        id: el.attr("id").map(str::to_string),
+        id: el.attr("id").unwrap_or("").to_string(),
         classes: el
             .attr("class")
             .unwrap_or("")
             .split_whitespace()
             .map(str::to_string)
             .collect(),
+        atributos,
     }
 }
 
-/// Calcula o CSS que vale para um elemento, considerando seus pais.
+/// Calcula o CSS que vale para um elemento, considerando pais e irmãos anteriores.
 /// Sem <style> na página, só o atributo style pode trazer CSS.
-fn estilo_do_elemento(el: &Element, info: &Info, ctx: &Ctx<'_>) -> Estilo {
+fn estilo_do_elemento(el: &Element, info: &Info, irmaos: &[Info], ctx: &Ctx<'_>) -> Estilo {
     if !ctx.tem_css && el.attr("style").is_none() {
         return Estilo::default();
     }
-    css::estilo_com_pais(&ctx.folha, info, &ctx.pais, el.attr("style"))
+    css::estilo_completo(&ctx.folha, info, &ctx.pais, irmaos, el.attr("style"))
 }
 
 /// Percorre os filhos. Texto e elementos inline vão para `buf`.
@@ -204,6 +211,9 @@ fn layout_children(
     buf: &mut Vec<Span>,
     ctx: &mut Ctx<'_>,
 ) {
+    // Irmãos anteriores só são guardados quando alguma regra os usa.
+    let guarda_irmaos = ctx.folha.precisa_irmaos();
+    let mut irmaos: Vec<Info> = Vec::new();
     for node in nodes {
         match node {
             Node::Text(t) => buf.push(Span {
@@ -212,56 +222,74 @@ fn layout_children(
                 color: style.color,
             }),
             Node::Element(el) => {
-                if SKIP_TAGS.contains(&el.tag.as_str()) {
-                    continue;
-                }
-                let info = info_do_elemento(el);
-                let css = estilo_do_elemento(el, &info, ctx);
-                if css.oculto {
-                    continue;
-                }
-                if el.tag == "br" {
-                    // Quebra de linha forçada ainda não existe; por enquanto vira espaço.
-                    buf.push(Span {
-                        text: " ".to_string(),
-                        href: link.map(str::to_string),
-                        color: style.color,
-                    });
-                    continue;
-                }
-
-                // Âncoras sem destino real (vazias ou "#topo") não viram links.
-                let own_link = if el.tag == "a" {
-                    el.attr("href")
-                        .map(str::trim)
-                        .filter(|h| !h.is_empty() && !h.starts_with('#'))
-                } else {
-                    None
-                };
-                let child_link = own_link.or(link);
-
-                if is_block(&el.tag) {
-                    flush_inline(buf, style, ctx);
-                    // Bloco herda a cor do pai; tamanho e margens vêm da própria tag.
-                    let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
-                    ctx.y += block.margin_top;
-                    ctx.pais.push(info);
-                    layout_children(&el.children, block, child_link, buf, ctx);
-                    ctx.pais.pop();
-                    flush_inline(buf, block, ctx);
-                    ctx.y += block.margin_bottom;
-                } else {
-                    let mut inline = aplicar(style, &css);
-                    // Link não herda a cor do texto ao redor: sem cor própria, fica com a cor de link.
-                    if el.tag == "a" {
-                        inline.color = css.cor;
-                    }
-                    ctx.pais.push(info);
-                    layout_children(&el.children, inline, child_link, buf, ctx);
-                    ctx.pais.pop();
+                let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+                let info = tratar_elemento(el, info, &irmaos, style, link, buf, ctx);
+                if guarda_irmaos {
+                    irmaos.push(info);
                 }
             }
         }
+    }
+}
+
+/// Trata um elemento e devolve a sua identificação, para entrar na lista de irmãos.
+/// Elementos ignorados ou ocultos também entram na lista, porque contam como irmãos.
+fn tratar_elemento(
+    el: &Element,
+    info: Info,
+    irmaos: &[Info],
+    style: Style,
+    link: Option<&str>,
+    buf: &mut Vec<Span>,
+    ctx: &mut Ctx<'_>,
+) -> Info {
+    if SKIP_TAGS.contains(&el.tag.as_str()) {
+        return info;
+    }
+    let css = estilo_do_elemento(el, &info, irmaos, ctx);
+    if css.oculto {
+        return info;
+    }
+    if el.tag == "br" {
+        // Quebra de linha forçada ainda não existe; por enquanto vira espaço.
+        buf.push(Span {
+            text: " ".to_string(),
+            href: link.map(str::to_string),
+            color: style.color,
+        });
+        return info;
+    }
+
+    // Âncoras sem destino real (vazias ou "#topo") não viram links.
+    let own_link = if el.tag == "a" {
+        el.attr("href")
+            .map(str::trim)
+            .filter(|h| !h.is_empty() && !h.starts_with('#'))
+    } else {
+        None
+    };
+    let child_link = own_link.or(link);
+
+    if is_block(&el.tag) {
+        flush_inline(buf, style, ctx);
+        // Bloco herda a cor do pai; tamanho e margens vêm da própria tag.
+        let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
+        ctx.y += block.margin_top;
+        ctx.pais.push(info);
+        layout_children(&el.children, block, child_link, buf, ctx);
+        let info = ctx.pais.pop().unwrap_or_default();
+        flush_inline(buf, block, ctx);
+        ctx.y += block.margin_bottom;
+        info
+    } else {
+        let mut inline = aplicar(style, &css);
+        // Link não herda a cor do texto ao redor: sem cor própria, fica com a cor de link.
+        if el.tag == "a" {
+            inline.color = css.cor;
+        }
+        ctx.pais.push(info);
+        layout_children(&el.children, inline, child_link, buf, ctx);
+        ctx.pais.pop().unwrap_or_default()
     }
 }
 
@@ -575,5 +603,25 @@ mod tests {
         );
         assert_eq!(cmds.len(), 1);
         assert_eq!(text_of(&cmds[0]), "z");
+    }
+
+    #[test]
+    fn sibling_selector_reaches_the_next_element() {
+        let cmds = run(
+            r#"<style>.a + p { display: none }</style><div class="a">x</div><p>y</p><p>z</p>"#,
+            400.0,
+        );
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["x", "z"]);
+    }
+
+    #[test]
+    fn first_child_hides_only_the_first_item() {
+        let cmds = run(
+            "<style>li:first-child { display: none }</style><ul><li>um</li><li>dois</li></ul>",
+            400.0,
+        );
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["dois"]);
     }
 }
