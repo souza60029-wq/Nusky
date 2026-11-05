@@ -858,4 +858,133 @@ mod testes {
 
     #[test]
     fn descendente_volta_atras_quando_o_pai_nao_casa() {
-        // O <p> 
+        // O <p> mais próximo tem pai <section>. O <p> de fora tem pai <div>.
+        let css = "div > p span { color: red }";
+        let span = info("span", None, &[]);
+        let pais = [
+            info("div", None, &[]),
+            info("p", None, &[]),
+            info("section", None, &[]),
+            info("p", None, &[]),
+        ];
+        assert_eq!(cor_com_pais(css, &span, &pais), Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn not_exclui_a_classe() {
+        let css = "p:not(.x) { color: red }";
+        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
+        let com_classe = info("p", None, &["x"]);
+        assert_eq!(cor_com_pais(css, &com_classe, &[]), None);
+    }
+
+    #[test]
+    fn not_de_pseudo_de_interacao_sempre_vale() {
+        assert_eq!(estilo("p:not(:focus) { color: red }", "p").cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn hover_nunca_casa() {
+        assert_eq!(estilo("a:hover { color: red }", "a").cor, None);
+    }
+
+    #[test]
+    fn pseudo_nao_suportado_e_ignorado() {
+        assert_eq!(estilo("p::before { color: red }", "p").cor, None);
+        assert_eq!(estilo("li:first-child { color: red }", "li").cor, None);
+    }
+
+    #[test]
+    fn at_regras_sao_ignoradas() {
+        let css = "@media print { p { color: red } } @import url(x.css); span { color: blue }";
+        assert_eq!(estilo(css, "p").cor, None);
+        assert_eq!(estilo(css, "span").cor, Some([0, 0, 255]));
+    }
+
+    #[test]
+    fn universal_casa_tudo() {
+        assert_eq!(estilo("* { color: blue }", "span").cor, Some([0, 0, 255]));
+    }
+
+    #[test]
+    fn comentarios_sao_ignorados() {
+        assert_eq!(estilo("/* x { */ span { color: blue }", "span").cor, Some([0, 0, 255]));
+    }
+
+    #[test]
+    fn media_max_width_casa_em_tela_pequena() {
+        let css = "@media screen and (max-width: 999px) { nav { display: none } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert!(estilo_para(&folha, "nav", None, &[], None).oculto);
+    }
+
+    #[test]
+    fn media_min_width_nao_casa_em_tela_pequena() {
+        let css = "@media (min-width: 720px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
+    }
+
+    #[test]
+    fn media_min_width_casa_em_tela_grande() {
+        let css = "@media (min-width: 320px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn media_lista_com_virgula_casa_se_uma_casar() {
+        let css = "@media print, (max-width: 500px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn media_not_inverte_a_consulta() {
+        let css = "@media not all and (min-width: 720px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn media_condicao_desconhecida_fica_de_fora() {
+        let css = "@media (prefers-color-scheme: dark) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
+    }
+
+    #[test]
+    fn media_com_em_usa_16_px() {
+        // 30em = 480 px, então 375 pt casa com max-width.
+        let css = "@media (max-width: 30em) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn parse_padrao_usa_375_pt() {
+        let css = "@media (max-width: 400px) { p { color: red } }";
+        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn seletor_com_til_e_registrado_como_ignorado() {
+        let folha = Folha::parse(".a ~ .b { display: none }");
+        assert_eq!(folha.ignoradas.len(), 1);
+        assert!(folha.ignoradas[0].motivo.contains('~'));
+    }
+
+    #[test]
+    fn regra_sem_display_none_nao_e_registrada() {
+        let folha = Folha::parse(".a ~ .b { color: red }");
+        assert!(folha.ignoradas.is_empty());
+    }
+
+    #[test]
+    fn media_inativo_registra_regra_ocultadora() {
+        let css = "@media (min-width: 720px) { nav { display: none } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(folha.ignoradas.len(), 1);
+        assert!(folha.ignoradas[0].motivo.contains("não casa"));
+    }
+}
