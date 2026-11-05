@@ -6,9 +6,14 @@ struct Configuracoes: View {
     @AppStorage("nightMode") private var noturno = false
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage("useButtons") private var botoes = true
+    @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
 
     /// Página aberta no momento, usada pelo diagnóstico.
     var urlAtual: URL? = nil
+
+    private var versao: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
 
     var body: some View {
         NavigationView {
@@ -40,6 +45,14 @@ struct Configuracoes: View {
                 }
 
                 Section {
+                    Toggle(versaoDesktop ? "Solicitar versão mobile" : "Solicitar versão desktop", isOn: $versaoDesktop)
+                } header: {
+                    Text("Site")
+                } footer: {
+                    Text("Vale para as próximas páginas baixadas. Para aplicar na página aberta, recarregue.")
+                }
+
+                Section {
                     NavigationLink {
                         DiagnosticoView(url: urlAtual)
                     } label: {
@@ -50,6 +63,23 @@ struct Configuracoes: View {
                     Text("Diagnóstico")
                 } footer: {
                     Text("Baixa de novo a página aberta e gera um relatório de texto para copiar. Não altera a página.")
+                }
+
+                Section {
+                    HStack {
+                        Text("Versão")
+                        Spacer()
+                        Text(versao)
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("Licença")
+                        Spacer()
+                        Text("MPL-2.0")
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("Sobre")
                 }
             }
             .navigationTitle("Configurações")
