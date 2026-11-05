@@ -112,7 +112,6 @@ final class DesenhoPagina: UIView {
             camada.tileSize = CGSize(width: 256, height: 256)
             camada.levelsOfDetail = 1
             camada.levelsOfDetailBias = 0
-            camada.fadeDuration = 0
         }
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tocou(_:))))
     }
