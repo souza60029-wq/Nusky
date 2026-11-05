@@ -4,6 +4,8 @@ import Foundation
 /// e junta o conteúdo num bloco <style> colocado no início do HTML.
 /// O motor já lê <style> de qualquer lugar do documento.
 /// Folhas para impressão são ignoradas.
+/// Usa a mesma identificação do HTML (IdentificacaoNavegador), para que o CSS
+/// venha da mesma versão da página.
 enum FolhasExternas {
     static let maximoFolhas = 8
     static let maximoBytesPorFolha = 400_000
@@ -100,6 +102,7 @@ enum FolhasExternas {
     static func baixar(_ url: URL) async -> String? {
         var pedido = URLRequest(url: url)
         pedido.timeoutInterval = tempoLimite
+        pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
         do {
             let (dados, resposta) = try await URLSession.shared.data(for: pedido)
             guard let http = resposta as? HTTPURLResponse,
