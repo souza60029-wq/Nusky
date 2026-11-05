@@ -1,990 +1,1266 @@
-// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one at
-// https://mozilla.org/MPL/2.0/.
-
-//! CSS básico: lê folhas de estilo e calcula o estilo de cada elemento.
+//! Motor de CSS do Nusky.
 //!
-//! Seletores suportados: tipo, `.classe`, `#id`, `*`, listas com vírgula,
-//! descendente (`div p`), filho direto (`div > p`) e `:not(...)`.
-//! Pseudo-classes de interação (`:hover`, `:focus`, `:active`, `:visited`) nunca casam,
-//! porque o motor não tem mouse nem estado de foco.
-//! Blocos `@media` entram quando a condição casa com a largura da tela
-//! (`min-width` e `max-width`, com os tipos `screen` e `all`).
-//! Outras condições de `@media` (cor, orientação, impressão) não casam.
-//! `@import` e `@font-face` são ignorados por inteiro.
-//! Seletores com `+`, `~`, `[atributo]`, `::before` ou `:first-child` são ignorados.
-//! Regras com `display: none` que não entram ficam em `Folha::ignoradas`, com o motivo,
-//! só para o diagnóstico.
-//!
-//! Propriedades: color, font-size, font-weight, margin, margin-top, margin-bottom
-//! e display (só none).
-//!
-//! Seletores compostos precisam dos pais do elemento. `estilo_com_pais` recebe essa lista.
-//! `estilo_para` equivale a `estilo_com_pais` sem pais.
+//! Suporta: seletores de tipo, `.classe`, `#id`, `*`, listas com vírgula,
+//! atributos (`[a]`, `[a=v]`, `[a~=v]`, `[a|=v]`, `[a^=v]`, `[a$=v]`, `[a*=v]`),
+//! descendente, `>`, `+` e `~` (só ao lado do alvo), `:not(...)`,
+//! `:first-child` (só no alvo ou no irmão ao lado).
+//! Pseudo de interação (hover, focus etc.) nunca casa.
+//! `@media` por largura, com px, em e calc(a + b) / calc(a - b).
+//! Regras com `display: none` que o motor não aplica ficam em `ignoradas`.
 
 use std::collections::HashMap;
 
-/// Largura usada quando o chamador não informa. É a largura do iPhone 6s (375 pt).
-pub const LARGURA_PADRAO: f32 = 375.0;
+const ERRO_COMPOSTO: &str = "seletor não suportado (combinador ou composto)";
 
-/// Dados de um elemento usados para casar seletores.
+/// Informações de um elemento usadas pelo CSS.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Info {
     pub tag: String,
-    pub id: Option<String>,
+    pub id: String,
     pub classes: Vec<String>,
+    pub atributos: Vec<(String, String)>,
 }
 
-/// Estilo calculado de um elemento. `None` significa "não definido".
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Estilo final de um elemento.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Estilo {
-    pub cor: Option<[u8; 3]>,
     pub tamanho: Option<f32>,
     pub negrito: Option<bool>,
     pub margem_topo: Option<f32>,
     pub margem_base: Option<f32>,
+    pub cor: Option<(u8, u8, u8)>,
     pub oculto: bool,
 }
 
-/// Regra `display: none` que o motor não aplicou, com o motivo.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Regra que o motor não aplicou, com o motivo.
+#[derive(Debug, Clone)]
 pub struct Ignorada {
     pub seletor: String,
     pub motivo: String,
 }
 
-/// Como um composto se liga ao composto da direita.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Combinador {
-    Descendente,
-    Filho,
-}
-
-/// Seletor simples (um composto): tipo, id, classes e negações.
-#[derive(Debug, Clone, Default, PartialEq)]
-struct Simples {
-    tag: Option<String>,
-    id: Option<String>,
-    classes: Vec<String>,
-    /// Compostos que o elemento não pode casar (vindos de `:not(...)`).
-    negados: Vec<Simples>,
-    /// Pseudo-classe de interação: o composto nunca casa.
-    impossivel: bool,
-}
-
-/// Seletor completo, por exemplo `div > p span`.
-#[derive(Debug, Clone, PartialEq)]
-struct Seletor {
-    /// Composto que descreve o elemento (o último da cadeia).
-    alvo: Simples,
-    /// Compostos anteriores, do mais próximo ao mais distante.
-    /// Cada item traz o combinador que o liga ao composto da direita.
-    anteriores: Vec<(Combinador, Simples)>,
-    especificidade: u32,
-}
-
-#[derive(Debug, Clone)]
-struct Regra {
-    seletor: Seletor,
-    declaracoes: Vec<(String, String)>,
-    ordem: usize,
-}
-
-/// Índice para não testar todas as regras em cada elemento.
-/// Cada regra entra em uma só lista, pela chave mais específica do seu alvo.
-#[derive(Debug, Clone, Default)]
-struct Indice {
-    por_id: HashMap<String, Vec<usize>>,
-    por_classe: HashMap<String, Vec<usize>>,
-    por_tipo: HashMap<String, Vec<usize>>,
-    sem_chave: Vec<usize>,
-}
-
 /// Folha de estilo já analisada.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Folha {
     regras: Vec<Regra>,
     indice: Indice,
-    /// Regras com `display: none` que o motor não aplicou, com o motivo.
-    /// Só serve para o diagnóstico.
     pub ignoradas: Vec<Ignorada>,
+    usa_irmaos: bool,
+    nomes_atributos: Vec<String>,
 }
-
-/// Pseudo-classes que nunca casam, porque o motor não tem interação nem estado.
-const PSEUDO_IMPOSSIVEIS: &[&str] = &[
-    "hover",
-    "focus",
-    "focus-within",
-    "focus-visible",
-    "active",
-    "visited",
-];
 
 impl Folha {
-    /// Analisa o CSS com a largura padrão da tela (375 pt).
+    /// Analisa com a largura padrão de 375 pt.
     pub fn parse(css: &str) -> Folha {
-        Folha::parse_largura(css, LARGURA_PADRAO)
+        Folha::parse_largura(css, 375.0)
     }
 
-    /// Analisa o CSS com a largura da tela informada.
-    /// Blocos `@media` só entram se a condição casar com essa largura.
+    /// Analisa escolhendo os `@media` pela largura informada.
     pub fn parse_largura(css: &str, largura: f32) -> Folha {
-        let limpo = remover_comentarios(css);
-        let mut regras = Vec::new();
-        let mut ignoradas = Vec::new();
-        ler_blocos(&limpo, largura, &mut regras, &mut ignoradas);
-        let indice = construir_indice(&regras);
-        Folha {
-            regras,
-            indice,
-            ignoradas,
+        let mut f = Folha::default();
+        analisa(css, largura, &mut f, None);
+        for (i, r) in f.regras.iter().enumerate() {
+            indexa(&mut f.indice, &r.seletor, i);
         }
+        f.nomes_atributos.sort();
+        f.nomes_atributos.dedup();
+        f
+    }
+
+    /// Verdadeiro se algum seletor usa irmãos ou `:first-child`.
+    pub fn precisa_irmaos(&self) -> bool {
+        self.usa_irmaos
+    }
+
+    /// Nomes de atributo usados nos seletores (em minúsculas).
+    pub fn nomes_atributos(&self) -> &[String] {
+        &self.nomes_atributos
     }
 }
 
-/// Lê regras e blocos `@media` de um trecho de CSS. Chamado de novo dentro de cada `@media`
-/// que casa, então regras aninhadas também entram.
-fn ler_blocos(
-    texto: &str,
-    largura: f32,
-    regras: &mut Vec<Regra>,
-    ignoradas: &mut Vec<Ignorada>,
-) {
-    let mut resto = texto;
-
-    while let Some(abre) = resto.find('{') {
-        // Em "@import url(x); p", o seletor começa depois do último ';'.
-        let cabeca = resto[..abre].rsplit(';').next().unwrap_or("").trim();
-        let depois = &resto[abre + 1..];
-        let fim = fim_do_bloco(depois);
-        let corpo = &depois[..fim];
-        resto = depois.get(fim + 1..).unwrap_or("");
-
-        if let Some(condicao) = cabeca.strip_prefix("@media") {
-            if media_casa(condicao, largura) {
-                ler_blocos(corpo, largura, regras, ignoradas);
-            } else {
-                let motivo = format!("@media {} não casa com {} pt", condicao.trim(), largura);
-                registrar_inativos(corpo, &motivo, ignoradas);
-            }
-            continue;
-        }
-
-        if cabeca.starts_with('@') {
-            continue;
-        }
-
-        let declaracoes = parse_declaracoes(corpo);
-        let oculta = esconde(&declaracoes);
-        for parte in cabeca.split(',') {
-            match parse_seletor(parte) {
-                Some(seletor) => {
-                    let ordem = regras.len();
-                    regras.push(Regra {
-                        seletor,
-                        declaracoes: declaracoes.clone(),
-                        ordem,
-                    });
-                }
-                None => {
-                    if oculta && !parte.trim().is_empty() {
-                        ignoradas.push(Ignorada {
-                            seletor: parte.trim().to_string(),
-                            motivo: motivo_recusa(parte),
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Varre um bloco `@media` que não casou e registra as regras que esconderiam elementos.
-/// Não cria regras: só guarda o que ficou de fora, para o diagnóstico.
-fn registrar_inativos(texto: &str, motivo: &str, ignoradas: &mut Vec<Ignorada>) {
-    let mut resto = texto;
-
-    while let Some(abre) = resto.find('{') {
-        let cabeca = resto[..abre].rsplit(';').next().unwrap_or("").trim();
-        let depois = &resto[abre + 1..];
-        let fim = fim_do_bloco(depois);
-        let corpo = &depois[..fim];
-        resto = depois.get(fim + 1..).unwrap_or("");
-
-        if cabeca.starts_with("@media") {
-            registrar_inativos(corpo, motivo, ignoradas);
-            continue;
-        }
-        if cabeca.is_empty() || cabeca.starts_with('@') {
-            continue;
-        }
-        if esconde(&parse_declaracoes(corpo)) {
-            ignoradas.push(Ignorada {
-                seletor: cabeca.to_string(),
-                motivo: motivo.to_string(),
-            });
-        }
-    }
-}
-
-/// Diz se a lista de declarações esconde o elemento (`display: none`).
-fn esconde(declaracoes: &[(String, String)]) -> bool {
-    declaracoes
-        .iter()
-        .any(|(k, v)| k == "display" && v.eq_ignore_ascii_case("none"))
-}
-
-/// Diz por que um seletor foi recusado. Usado só pelo relatório de diagnóstico.
-fn motivo_recusa(texto: &str) -> String {
-    let t = texto.trim();
-    if !t.is_ascii() {
-        return "caracteres não ASCII no seletor".to_string();
-    }
-    if t.contains('[') {
-        return "atributo [..] não suportado".to_string();
-    }
-    if t.contains('~') || t.contains('+') {
-        return "combinador ~ ou + não suportado".to_string();
-    }
-    let nomes = nomes_de_pseudo(t);
-    if nomes
-        .iter()
-        .any(|n| PSEUDO_IMPOSSIVEIS.contains(&n.as_str()))
-    {
-        return "pseudo de interação (hover, focus etc.): nunca casa".to_string();
-    }
-    if !nomes.is_empty() {
-        return format!("pseudo não suportada: {}", nomes.join(", "));
-    }
-    "seletor não suportado (combinador ou composto)".to_string()
-}
-
-/// Nomes das pseudo-classes e pseudo-elementos de um seletor, em minúsculas.
-fn nomes_de_pseudo(t: &str) -> Vec<String> {
-    t.split(':')
-        .skip(1)
-        .filter_map(|p| {
-            let nome: String = p
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect();
-            if nome.is_empty() {
-                None
-            } else {
-                Some(nome.to_ascii_lowercase())
-            }
-        })
-        .collect()
-}
-
-/// Diz se uma lista de consultas de mídia (`screen, (max-width: 999px)`) casa com a largura.
-fn media_casa(lista: &str, largura: f32) -> bool {
-    lista
-        .split(',')
-        .any(|consulta| consulta_casa(consulta, largura))
-}
-
-/// Uma consulta de mídia, com `and`, `not` ou `only` opcionais.
-fn consulta_casa(consulta: &str, largura: f32) -> bool {
-    let minuscula = consulta.trim().to_ascii_lowercase();
-    let (negada, sem_prefixo) = if let Some(resto) = minuscula.strip_prefix("not ") {
-        (true, resto)
-    } else {
-        (false, minuscula.strip_prefix("only ").unwrap_or(minuscula.as_str()))
-    };
-    let casa = sem_prefixo
-        .split(" and ")
-        .all(|parte| condicao_casa(parte.trim(), largura));
-    casa != negada
-}
-
-/// Uma condição de uma consulta: `(min-width: 320px)`, `(max-width: 999px)` ou um tipo de mídia.
-/// Qualquer condição desconhecida não casa.
-fn condicao_casa(parte: &str, largura: f32) -> bool {
-    if let Some(dentro) = parte.strip_prefix('(').and_then(|p| p.strip_suffix(')')) {
-        let Some((nome, valor)) = dentro.split_once(':') else {
-            return false;
-        };
-        let Some(medida) = comprimento_media(valor) else {
-            return false;
-        };
-        return match nome.trim() {
-            "min-width" => largura >= medida,
-            "max-width" => largura <= medida,
-            _ => false,
-        };
-    }
-    matches!(parte, "all" | "screen")
-}
-
-/// Lê um comprimento de consulta de mídia em px ou em em (16 px por em).
-fn comprimento_media(valor: &str) -> Option<f32> {
-    let v = valor.trim();
-    if let Some(numero) = v.strip_suffix("px") {
-        numero.trim().parse::<f32>().ok()
-    } else if let Some(numero) = v.strip_suffix("em") {
-        numero.trim().parse::<f32>().ok().map(|n| n * 16.0)
-    } else {
-        None
-    }
-}
-
-impl Estilo {
-    fn aplicar(&mut self, propriedade: &str, valor: &str) {
-        match propriedade {
-            "color" => {
-                if let Some(c) = parse_cor(valor) {
-                    self.cor = Some(c);
-                }
-            }
-            "font-size" => {
-                if let Some(p) = parse_px(valor) {
-                    self.tamanho = Some(p);
-                }
-            }
-            "font-weight" => {
-                let novo = match valor {
-                    "bold" | "bolder" => Some(true),
-                    "normal" | "lighter" => Some(false),
-                    _ => valor.parse::<u32>().ok().map(|n| n >= 600),
-                };
-                if novo.is_some() {
-                    self.negrito = novo;
-                }
-            }
-            "margin" => {
-                if let Some(p) = parse_px(valor) {
-                    self.margem_topo = Some(p);
-                    self.margem_base = Some(p);
-                }
-            }
-            "margin-top" => {
-                if let Some(p) = parse_px(valor) {
-                    self.margem_topo = Some(p);
-                }
-            }
-            "margin-bottom" => {
-                if let Some(p) = parse_px(valor) {
-                    self.margem_base = Some(p);
-                }
-            }
-            "display" => self.oculto = valor.eq_ignore_ascii_case("none"),
-            _ => {}
-        }
-    }
-}
-
-/// Calcula o estilo de um elemento sem informação de pais.
-/// Seletores compostos com descendente ou filho direto não casam aqui.
+/// Estilo de um elemento sem pais nem irmãos.
 pub fn estilo_para(
     folha: &Folha,
     tag: &str,
-    id: Option<&str>,
-    classes: &[&str],
+    id: &str,
+    classes: &[String],
     inline: Option<&str>,
 ) -> Estilo {
     let alvo = Info {
         tag: tag.to_string(),
-        id: id.map(str::to_string),
-        classes: classes.iter().map(|c| c.to_string()).collect(),
+        id: id.to_string(),
+        classes: classes.to_vec(),
+        atributos: Vec::new(),
     };
-    estilo_com_pais(folha, &alvo, &[], inline)
+    estilo_completo(folha, &alvo, &[], &[], inline)
 }
 
-/// Calcula o estilo de um elemento.
-/// `pais` vai do ancestral mais externo (raiz) até o pai imediato.
-/// Ordem: folha por especificidade e ordem do arquivo, depois o estilo inline.
+/// Estilo de um elemento com pais, sem irmãos.
 pub fn estilo_com_pais(
     folha: &Folha,
     alvo: &Info,
     pais: &[Info],
     inline: Option<&str>,
 ) -> Estilo {
-    let mut candidatas: Vec<usize> = Vec::new();
-    if let Some(id) = &alvo.id {
-        if let Some(v) = folha.indice.por_id.get(id) {
-            candidatas.extend_from_slice(v);
-        }
-    }
-    for classe in &alvo.classes {
-        if let Some(v) = folha.indice.por_classe.get(classe) {
-            candidatas.extend_from_slice(v);
-        }
-    }
-    if let Some(v) = folha.indice.por_tipo.get(&alvo.tag) {
-        candidatas.extend_from_slice(v);
-    }
-    candidatas.extend_from_slice(&folha.indice.sem_chave);
-    candidatas.sort_unstable();
-    candidatas.dedup();
+    estilo_completo(folha, alvo, pais, &[], inline)
+}
 
-    let mut casadas: Vec<&Regra> = candidatas
-        .iter()
-        .map(|&i| &folha.regras[i])
-        .filter(|r| casa_seletor(&r.seletor, alvo, pais))
-        .collect();
-    casadas.sort_by(|a, b| {
-        a.seletor
-            .especificidade
-            .cmp(&b.seletor.especificidade)
-            .then(a.ordem.cmp(&b.ordem))
-    });
-
-    let mut estilo = Estilo::default();
-    for regra in casadas {
-        for (k, v) in &regra.declaracoes {
-            estilo.aplicar(k, v);
+/// Estilo completo. `pais` vai da raiz até o pai. `irmaos` vai do primeiro
+/// até o irmão imediatamente anterior.
+pub fn estilo_completo(
+    folha: &Folha,
+    alvo: &Info,
+    pais: &[Info],
+    irmaos: &[Info],
+    inline: Option<&str>,
+) -> Estilo {
+    let ind = &folha.indice;
+    let mut cand: Vec<usize> = Vec::new();
+    if !alvo.id.is_empty() {
+        if let Some(v) = ind.ids.get(alvo.id.as_str()) {
+            cand.extend_from_slice(v);
         }
+    }
+    for c in &alvo.classes {
+        if let Some(v) = ind.classes.get(c.as_str()) {
+            cand.extend_from_slice(v);
+        }
+    }
+    let tag = alvo.tag.to_ascii_lowercase();
+    if let Some(v) = ind.tags.get(tag.as_str()) {
+        cand.extend_from_slice(v);
+    }
+    cand.extend_from_slice(&ind.universais);
+    cand.sort_unstable();
+    cand.dedup();
+    cand.retain(|&i| casa_seletor(&folha.regras[i].seletor, alvo, pais, irmaos));
+    cand.sort_by_key(|&i| (folha.regras[i].seletor.especificidade, i));
+
+    let mut d = Decl::default();
+    for &i in &cand {
+        aplica(&mut d, &folha.regras[i].decl);
     }
     if let Some(texto) = inline {
-        for (k, v) in parse_declaracoes(texto) {
-            estilo.aplicar(&k, &v);
-        }
+        aplica(&mut d, &declaracoes(texto));
     }
-    estilo
+    para_estilo(d)
 }
 
-fn construir_indice(regras: &[Regra]) -> Indice {
-    let mut indice = Indice::default();
-    for (i, regra) in regras.iter().enumerate() {
-        let alvo = &regra.seletor.alvo;
-        if let Some(id) = &alvo.id {
-            indice.por_id.entry(id.clone()).or_default().push(i);
-        } else if let Some(classe) = alvo.classes.first() {
-            indice.por_classe.entry(classe.clone()).or_default().push(i);
-        } else if let Some(tag) = &alvo.tag {
-            indice.por_tipo.entry(tag.clone()).or_default().push(i);
+// ---------------------------------------------------------------------------
+// Estruturas internas
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Decl {
+    tamanho: Option<f32>,
+    negrito: Option<bool>,
+    margem_topo: Option<f32>,
+    margem_base: Option<f32>,
+    cor: Option<(u8, u8, u8)>,
+    oculto: Option<bool>,
+}
+
+#[derive(Debug)]
+struct Regra {
+    seletor: Seletor,
+    decl: Decl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Combinador {
+    Descendente,
+    Filho,
+    Adjacente,
+    Geral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OperadorAtributo {
+    Existe,
+    Igual,
+    Palavra,
+    Traco,
+    Prefixo,
+    Sufixo,
+    Contem,
+}
+
+#[derive(Debug)]
+struct Atributo {
+    nome: String,
+    op: OperadorAtributo,
+    valor: String,
+}
+
+#[derive(Debug, Default)]
+struct Simples {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+    atributos: Vec<Atributo>,
+    primeiro_filho: bool,
+    negados: Vec<Simples>,
+}
+
+#[derive(Debug)]
+struct Seletor {
+    alvo: Simples,
+    anteriores: Vec<(Combinador, Simples)>,
+    especificidade: u32,
+    usa_irmaos: bool,
+}
+
+#[derive(Debug, Default)]
+struct Indice {
+    ids: HashMap<String, Vec<usize>>,
+    classes: HashMap<String, Vec<usize>>,
+    tags: HashMap<String, Vec<usize>>,
+    universais: Vec<usize>,
+}
+
+enum Token {
+    Atomo(String),
+    Comb(Combinador),
+}
+
+// ---------------------------------------------------------------------------
+// Análise do arquivo
+// ---------------------------------------------------------------------------
+
+fn analisa(texto: &str, largura: f32, f: &mut Folha, media: Option<(&str, bool)>) {
+    let limpo = remove_comentarios(texto);
+    let mut resto: &str = &limpo;
+    loop {
+        resto = resto.trim_start();
+        if resto.is_empty() {
+            break;
+        }
+        if let Some(depois_arroba) = resto.strip_prefix('@') {
+            let fim_nome = depois_arroba
+                .find(|c: char| c == '{' || c == ';' || c.is_whitespace())
+                .unwrap_or(depois_arroba.len());
+            let nome = depois_arroba[..fim_nome].to_ascii_lowercase();
+            let resto_nome = &depois_arroba[fim_nome..];
+            let p = match resto_nome.find(|c: char| c == '{' || c == ';') {
+                Some(p) => p,
+                None => break,
+            };
+            let prelude = resto_nome[..p].trim();
+            if resto_nome[p..].starts_with(';') {
+                resto = &resto_nome[p + 1..];
+                continue;
+            }
+            let (corpo, depois) = corpo_bloco(&resto_nome[p..]);
+            resto = depois;
+            if nome == "media" {
+                let externa = media.map_or(true, |(_, a)| a);
+                let ativa = externa && media_casa(prelude, largura);
+                analisa(corpo, largura, f, Some((prelude, ativa)));
+            }
         } else {
-            indice.sem_chave.push(i);
+            let p = match resto.find('{') {
+                Some(p) => p,
+                None => break,
+            };
+            let seletor_txt = resto[..p].trim();
+            let (corpo, depois) = corpo_bloco(&resto[p..]);
+            resto = depois;
+            regra(seletor_txt, corpo, largura, f, media);
         }
     }
-    indice
 }
 
-fn casa_seletor(sel: &Seletor, alvo: &Info, pais: &[Info]) -> bool {
-    casa_simples(&sel.alvo, alvo) && casa_ancestrais(&sel.anteriores, pais, pais.len())
-}
-
-fn casa_simples(s: &Simples, el: &Info) -> bool {
-    if let Some(t) = &s.tag {
-        if !t.eq_ignore_ascii_case(&el.tag) {
-            return false;
+fn regra(
+    seletor_txt: &str,
+    corpo: &str,
+    largura: f32,
+    f: &mut Folha,
+    media: Option<(&str, bool)>,
+) {
+    let decl = declaracoes(corpo);
+    let oculta = decl.oculto == Some(true);
+    let ativa = media.map_or(true, |(_, a)| a);
+    for parte in divide_seletores(seletor_txt) {
+        let parte = parte.trim();
+        if parte.is_empty() {
+            continue;
         }
-    }
-    if let Some(sid) = &s.id {
-        if el.id.as_deref() != Some(sid.as_str()) {
-            return false;
+        if !ativa {
+            if oculta {
+                let motivo = format!(
+                    "@media {} não casa com {} pt",
+                    media.map_or("", |(p, _)| p),
+                    largura
+                );
+                f.ignoradas.push(Ignorada {
+                    seletor: parte.to_string(),
+                    motivo,
+                });
+            }
+            continue;
         }
-    }
-    if !s.classes.iter().all(|c| el.classes.iter().any(|x| x == c)) {
-        return false;
-    }
-    !s.negados.iter().any(|n| casa_simples(n, el))
-}
-
-/// Confere os compostos anteriores contra os pais.
-/// `pos` é quantos pais ainda podem ser usados; o pai imediato é `pais[pos - 1]`.
-/// No descendente, testa todos os ancestrais possíveis, para não perder um caminho válido.
-fn casa_ancestrais(anteriores: &[(Combinador, Simples)], pais: &[Info], pos: usize) -> bool {
-    let Some(((comb, simples), resto)) = anteriores.split_first() else {
-        return true;
-    };
-    match comb {
-        Combinador::Filho => {
-            pos > 0
-                && casa_simples(simples, &pais[pos - 1])
-                && casa_ancestrais(resto, pais, pos - 1)
-        }
-        Combinador::Descendente => (0..pos).rev().any(|j| {
-            casa_simples(simples, &pais[j]) && casa_ancestrais(resto, pais, j)
-        }),
-    }
-}
-
-/// Peso da regra: id vale mais que classe, classe mais que tipo.
-fn peso(s: &Simples) -> u32 {
-    (s.id.is_some() as u32) * 10_000
-        + (s.classes.len() as u32) * 100
-        + (s.tag.is_some() as u32)
-}
-
-/// Acha o `}` que fecha o bloco. Conta chaves aninhadas (de @media, por exemplo).
-fn fim_do_bloco(texto: &str) -> usize {
-    let mut profundidade = 1usize;
-    for (i, c) in texto.char_indices() {
-        match c {
-            '{' => profundidade += 1,
-            '}' => {
-                profundidade -= 1;
-                if profundidade == 0 {
-                    return i;
+        match parse_seletor(parte) {
+            Ok(s) => {
+                if s.usa_irmaos {
+                    f.usa_irmaos = true;
+                }
+                colhe_atributos(&s, &mut f.nomes_atributos);
+                f.regras.push(Regra { seletor: s, decl });
+            }
+            Err(m) => {
+                if oculta {
+                    f.ignoradas.push(Ignorada {
+                        seletor: parte.to_string(),
+                        motivo: m,
+                    });
                 }
             }
-            _ => {}
         }
     }
-    texto.len()
 }
 
-fn remover_comentarios(css: &str) -> String {
-    let mut saida = String::with_capacity(css.len());
-    let mut resto = css;
-    while let Some(inicio) = resto.find("/*") {
-        saida.push_str(&resto[..inicio]);
-        match resto[inicio + 2..].find("*/") {
-            Some(fim) => resto = &resto[inicio + 2 + fim + 2..],
-            None => return saida,
+/// `s` começa com `{`. Devolve (conteúdo, resto depois do `}` final).
+fn corpo_bloco(s: &str) -> (&str, &str) {
+    let mut prof = 0usize;
+    for (i, c) in s.char_indices() {
+        if c == '{' {
+            prof += 1;
+        } else if c == '}' {
+            prof -= 1;
+            if prof == 0 {
+                return (&s[1..i], &s[i + 1..]);
+            }
+        }
+    }
+    (&s[1..], "")
+}
+
+fn remove_comentarios(s: &str) -> String {
+    let mut saida = String::with_capacity(s.len());
+    let mut resto = s;
+    while let Some(i) = resto.find("/*") {
+        saida.push_str(&resto[..i]);
+        match resto[i + 2..].find("*/") {
+            Some(f) => resto = &resto[i + 2 + f + 2..],
+            None => {
+                resto = "";
+                break;
+            }
         }
     }
     saida.push_str(resto);
     saida
 }
 
-/// Analisa um seletor completo. Retorna None se houver algo que o motor não entende.
-fn parse_seletor(texto: &str) -> Option<Seletor> {
-    let t = texto.trim();
-    if t.is_empty() || !t.is_ascii() {
-        return None;
-    }
-
-    // Divide em compostos, guardando o combinador que vem antes de cada um.
-    let mut blocos: Vec<(Combinador, String)> = Vec::new();
-    let mut atual = String::new();
-    let mut combinador = Combinador::Descendente;
-    let mut profundidade = 0u32;
-
-    for c in t.chars() {
-        if profundidade == 0 {
-            if c == '+' || c == '~' {
-                return None;
+/// Divide a lista de seletores por vírgula, sem cortar dentro de `()`, `[]` ou aspas.
+fn divide_seletores(texto: &str) -> Vec<&str> {
+    let mut partes = Vec::new();
+    let mut inicio = 0;
+    let mut prof = 0i32;
+    let mut aspas: Option<char> = None;
+    for (i, c) in texto.char_indices() {
+        if let Some(q) = aspas {
+            if c == q {
+                aspas = None;
             }
-            if c.is_whitespace() || c == '>' {
-                if !atual.is_empty() {
-                    blocos.push((combinador, std::mem::take(&mut atual)));
-                    combinador = Combinador::Descendente;
-                }
-                if c == '>' {
-                    if blocos.is_empty() {
-                        return None;
-                    }
-                    combinador = Combinador::Filho;
-                }
-                continue;
-            }
+            continue;
         }
         match c {
-            '(' => profundidade += 1,
-            ')' => profundidade = profundidade.checked_sub(1)?,
+            '"' | '\'' => aspas = Some(c),
+            '(' | '[' => prof += 1,
+            ')' | ']' => prof -= 1,
+            ',' if prof == 0 => {
+                partes.push(&texto[inicio..i]);
+                inicio = i + 1;
+            }
             _ => {}
         }
-        atual.push(c);
     }
+    partes.push(&texto[inicio..]);
+    partes
+}
 
-    if profundidade != 0 {
-        return None;
-    }
-    if !atual.is_empty() {
-        blocos.push((combinador, atual));
-    } else if combinador == Combinador::Filho {
-        return None;
-    }
+// ---------------------------------------------------------------------------
+// Declarações e valores
+// ---------------------------------------------------------------------------
 
-    let mut compostos: Vec<(Combinador, Simples)> = Vec::with_capacity(blocos.len());
-    for (comb, bloco) in blocos {
-        let simples = parse_composto(&bloco)?;
-        if simples.impossivel {
-            return None;
+fn declaracoes(texto: &str) -> Decl {
+    let mut d = Decl::default();
+    for par in texto.split(';') {
+        let (nome, valor) = match par.split_once(':') {
+            Some(x) => x,
+            None => continue,
+        };
+        let nome = nome.trim().to_ascii_lowercase();
+        let mut valor = valor.trim();
+        if let Some(sem) = valor.strip_suffix("!important") {
+            valor = sem.trim_end();
         }
-        compostos.push((comb, simples));
+        match nome.as_str() {
+            "font-size" => {
+                if let Some(v) = comprimento(valor) {
+                    d.tamanho = Some(v);
+                }
+            }
+            "font-weight" => {
+                if let Some(v) = peso(valor) {
+                    d.negrito = Some(v);
+                }
+            }
+            "margin-top" => {
+                if let Some(v) = comprimento(valor) {
+                    d.margem_topo = Some(v);
+                }
+            }
+            "margin-bottom" => {
+                if let Some(v) = comprimento(valor) {
+                    d.margem_base = Some(v);
+                }
+            }
+            "margin" => {
+                let vals: Vec<Option<f32>> = valor.split_whitespace().map(comprimento).collect();
+                let (topo, base) = match vals.len() {
+                    1 | 2 => (vals[0], vals[0]),
+                    3 | 4 => (vals[0], vals[2]),
+                    _ => (None, None),
+                };
+                if let Some(v) = topo {
+                    d.margem_topo = Some(v);
+                }
+                if let Some(v) = base {
+                    d.margem_base = Some(v);
+                }
+            }
+            "display" => {
+                d.oculto = Some(valor.eq_ignore_ascii_case("none"));
+            }
+            "color" => {
+                if let Some(c) = cor(valor) {
+                    d.cor = Some(c);
+                }
+            }
+            _ => {}
+        }
+    }
+    d
+}
+
+fn aplica(dst: &mut Decl, src: &Decl) {
+    if src.tamanho.is_some() {
+        dst.tamanho = src.tamanho;
+    }
+    if src.negrito.is_some() {
+        dst.negrito = src.negrito;
+    }
+    if src.margem_topo.is_some() {
+        dst.margem_topo = src.margem_topo;
+    }
+    if src.margem_base.is_some() {
+        dst.margem_base = src.margem_base;
+    }
+    if src.cor.is_some() {
+        dst.cor = src.cor;
+    }
+    if src.oculto.is_some() {
+        dst.oculto = src.oculto;
+    }
+}
+
+fn para_estilo(d: Decl) -> Estilo {
+    Estilo {
+        tamanho: d.tamanho,
+        negrito: d.negrito,
+        margem_topo: d.margem_topo,
+        margem_base: d.margem_base,
+        cor: d.cor,
+        oculto: d.oculto == Some(true),
+    }
+}
+
+/// Comprimento em px. em e rem valem 16 px, pt vale 4/3 px. `calc(a + b)` e `calc(a - b)`.
+fn comprimento(v: &str) -> Option<f32> {
+    let v = v.trim().to_ascii_lowercase();
+    if let Some(inner) = v
+        .strip_prefix("calc(")
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        return calculo(inner);
+    }
+    unidade(&v)
+}
+
+fn unidade(v: &str) -> Option<f32> {
+    let (numero, fator): (&str, f32) = if let Some(n) = v.strip_suffix("px") {
+        (n, 1.0)
+    } else if let Some(n) = v.strip_suffix("rem") {
+        (n, 16.0)
+    } else if let Some(n) = v.strip_suffix("em") {
+        (n, 16.0)
+    } else if let Some(n) = v.strip_suffix("pt") {
+        (n, 4.0 / 3.0)
+    } else {
+        (v, 1.0)
+    };
+    numero.trim().parse::<f32>().ok().map(|x| x * fator)
+}
+
+fn calculo(texto: &str) -> Option<f32> {
+    let (esq, dir, sinal) = if let Some(p) = texto.find(" + ") {
+        (&texto[..p], &texto[p + 3..], 1.0)
+    } else if let Some(p) = texto.find(" - ") {
+        (&texto[..p], &texto[p + 3..], -1.0)
+    } else {
+        return None;
+    };
+    Some(unidade(esq.trim())? + sinal * unidade(dir.trim())?)
+}
+
+fn peso(v: &str) -> Option<bool> {
+    let v = v.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "bold" | "bolder" => Some(true),
+        "normal" | "lighter" => Some(false),
+        outro => outro.parse::<f32>().ok().map(|n| n >= 600.0),
+    }
+}
+
+fn cor(v: &str) -> Option<(u8, u8, u8)> {
+    let v = v.trim().to_ascii_lowercase();
+    if let Some(hex) = v.strip_prefix('#') {
+        let d: Vec<u8> = hex
+            .chars()
+            .map(|c| c.to_digit(16).map(|x| x as u8))
+            .collect::<Option<Vec<u8>>>()?;
+        return match d.len() {
+            3 => Some((d[0] * 17, d[1] * 17, d[2] * 17)),
+            6 => Some((d[0] * 16 + d[1], d[2] * 16 + d[3], d[4] * 16 + d[5])),
+            _ => None,
+        };
+    }
+    if let Some(args) = v
+        .strip_prefix("rgb(")
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        let p: Vec<u8> = args
+            .split(',')
+            .map(|s| s.trim().parse::<u8>().ok())
+            .collect::<Option<Vec<u8>>>()?;
+        if p.len() == 3 {
+            return Some((p[0], p[1], p[2]));
+        }
+        return None;
+    }
+    match v.as_str() {
+        "black" => Some((0, 0, 0)),
+        "white" => Some((255, 255, 255)),
+        "red" => Some((255, 0, 0)),
+        "green" => Some((0, 128, 0)),
+        "blue" => Some((0, 0, 255)),
+        "gray" | "grey" => Some((128, 128, 128)),
+        "navy" => Some((0, 0, 128)),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// @media
+// ---------------------------------------------------------------------------
+
+fn media_casa(prelude: &str, largura: f32) -> bool {
+    let normal = prelude
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    normal.split(',').any(|q| query_casa(q.trim(), largura))
+}
+
+fn query_casa(q: &str, largura: f32) -> bool {
+    let mut resto = q;
+    let mut negada = false;
+    if let Some(r) = resto.strip_prefix("not ") {
+        negada = true;
+        resto = r;
+    } else if let Some(r) = resto.strip_prefix("only ") {
+        resto = r;
+    }
+    match partes_casam(resto, largura) {
+        Some(v) => v != negada,
+        None => false,
+    }
+}
+
+/// `None` se houver condição desconhecida. Nesse caso a consulta não casa.
+fn partes_casam(q: &str, largura: f32) -> Option<bool> {
+    let mut tudo = true;
+    for parte in q.split(" and ") {
+        let parte = parte.trim();
+        match parte.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+            Some(dentro) => {
+                let (nome, valor) = dentro.split_once(':')?;
+                let limite = comprimento(valor)?;
+                match nome.trim() {
+                    "min-width" => tudo = tudo && largura >= limite,
+                    "max-width" => tudo = tudo && largura <= limite,
+                    _ => return None,
+                }
+            }
+            None => {
+                if parte != "screen" && parte != "all" {
+                    tudo = false;
+                }
+            }
+        }
+    }
+    Some(tudo)
+}
+
+// ---------------------------------------------------------------------------
+// Seletores: tokenização e análise
+// ---------------------------------------------------------------------------
+
+fn despeja(atual: &mut String, tokens: &mut Vec<Token>) {
+    if !atual.is_empty() {
+        tokens.push(Token::Atomo(std::mem::take(atual)));
+    }
+}
+
+fn tokeniza(sel: &str) -> Vec<Token> {
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut atual = String::new();
+    let mut espaco = false;
+    let mut colchete = false;
+    let mut parenteses: i32 = 0;
+    let mut aspas: Option<char> = None;
+    for c in sel.chars() {
+        if let Some(q) = aspas {
+            atual.push(c);
+            if c == q {
+                aspas = None;
+            }
+            continue;
+        }
+        if colchete {
+            atual.push(c);
+            if c == ']' {
+                colchete = false;
+            } else if c == '"' || c == '\'' {
+                aspas = Some(c);
+            }
+            continue;
+        }
+        if parenteses > 0 {
+            atual.push(c);
+            if c == '(' {
+                parenteses += 1;
+            } else if c == ')' {
+                parenteses -= 1;
+            }
+            continue;
+        }
+        match c {
+            ' ' | '\t' | '\n' | '\r' | '\u{c}' => {
+                despeja(&mut atual, &mut tokens);
+                espaco = true;
+            }
+            '>' | '+' | '~' => {
+                despeja(&mut atual, &mut tokens);
+                let comb = match c {
+                    '>' => Combinador::Filho,
+                    '+' => Combinador::Adjacente,
+                    _ => Combinador::Geral,
+                };
+                tokens.push(Token::Comb(comb));
+                espaco = false;
+            }
+            _ => {
+                if espaco {
+                    let atomo_antes = matches!(tokens.last(), Some(Token::Atomo(_)));
+                    if atomo_antes {
+                        tokens.push(Token::Comb(Combinador::Descendente));
+                    }
+                    espaco = false;
+                }
+                match c {
+                    '[' => colchete = true,
+                    '(' => parenteses += 1,
+                    '"' | '\'' => aspas = Some(c),
+                    _ => {}
+                }
+                atual.push(c);
+            }
+        }
+    }
+    despeja(&mut atual, &mut tokens);
+    tokens
+}
+
+fn eh_irmao(c: Combinador) -> bool {
+    matches!(c, Combinador::Adjacente | Combinador::Geral)
+}
+
+fn parse_seletor(texto: &str) -> Result<Seletor, String> {
+    let mut compostos: Vec<Simples> = Vec::new();
+    let mut combs: Vec<Combinador> = Vec::new();
+    let mut esperando = true;
+    for t in tokeniza(texto) {
+        match t {
+            Token::Atomo(s) => {
+                if !esperando {
+                    return Err(ERRO_COMPOSTO.to_string());
+                }
+                compostos.push(parse_composto(&s)?);
+                esperando = false;
+            }
+            Token::Comb(c) => {
+                if esperando {
+                    return Err(ERRO_COMPOSTO.to_string());
+                }
+                combs.push(c);
+                esperando = true;
+            }
+        }
+    }
+    if esperando || compostos.is_empty() {
+        return Err(ERRO_COMPOSTO.to_string());
+    }
+    let n = compostos.len();
+
+    // Irmão (+ ou ~) só é aceito ao lado do alvo.
+    for (k, c) in combs.iter().enumerate() {
+        if eh_irmao(*c) && k + 2 != n {
+            return Err("irmão (+ ou ~) fora da posição suportada".to_string());
+        }
     }
 
-    // O último composto é o alvo. Os anteriores recebem o combinador do composto à direita.
-    let (comb_alvo, alvo) = compostos.pop()?;
+    // :first-child só no alvo ou no irmão ao lado.
+    for (k, s) in compostos.iter().enumerate() {
+        if s.primeiro_filho {
+            let alvo_ok = k + 1 == n;
+            let irmao_ok = k + 2 == n && eh_irmao(combs[n - 2]);
+            if !alvo_ok && !irmao_ok {
+                return Err("first-child fora do alvo ou do irmão ao lado".to_string());
+            }
+        }
+    }
+
+    let usa_primeiro = compostos.iter().any(|s| s.primeiro_filho);
+    let alvo = match compostos.pop() {
+        Some(a) => a,
+        None => return Err(ERRO_COMPOSTO.to_string()),
+    };
     let mut anteriores: Vec<(Combinador, Simples)> = Vec::new();
-    let mut direita = comb_alvo;
-    while let Some((esquerda, simples)) = compostos.pop() {
-        anteriores.push((direita, simples));
-        direita = esquerda;
+    while let Some(s) = compostos.pop() {
+        if let Some(c) = combs.pop() {
+            anteriores.push((c, s));
+        }
     }
-
-    let especificidade = peso(&alvo) + anteriores.iter().map(|(_, s)| peso(s)).sum::<u32>();
-    Some(Seletor {
+    let usa_irmao = anteriores.first().map_or(false, |(c, _)| eh_irmao(*c));
+    let especificidade = especificidade_de(&alvo, &anteriores);
+    Ok(Seletor {
         alvo,
         anteriores,
         especificidade,
+        usa_irmaos: usa_irmao || usa_primeiro,
     })
 }
 
-/// Analisa um composto, como `p`, `.a.b`, `#x`, `*` ou `a:not(.y)`.
-fn parse_composto(texto: &str) -> Option<Simples> {
-    if !texto.is_ascii() {
-        return None;
-    }
-    let bytes = texto.as_bytes();
+fn eh_interacao(nome: &str) -> bool {
+    matches!(
+        nome,
+        "hover" | "focus" | "focus-visible" | "focus-within" | "active" | "visited"
+    )
+}
+
+fn parse_composto(texto: &str) -> Result<Simples, String> {
+    let chars: Vec<char> = texto.chars().collect();
     let mut s = Simples::default();
     let mut i = 0;
-
-    if bytes.first() == Some(&b'*') {
-        i = 1;
-    } else {
-        let inicio = i;
-        while i < bytes.len() && eh_ident(bytes[i]) {
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '*' {
             i += 1;
-        }
-        if i > inicio {
-            s.tag = Some(texto[inicio..i].to_ascii_lowercase());
-        }
-    }
-
-    while i < bytes.len() {
-        let marca = bytes[i];
-        i += 1;
-        match marca {
-            b'.' => {
-                let (nome, proximo) = ident_em(texto, i)?;
-                s.classes.push(nome.to_string());
-                i = proximo;
+        } else if c == '#' || c == '.' {
+            let (nome, prox) = ident(&chars, i + 1);
+            if nome.is_empty() {
+                return Err(ERRO_COMPOSTO.to_string());
             }
-            b'#' => {
-                let (nome, proximo) = ident_em(texto, i)?;
-                if s.id.is_some() {
-                    return None;
+            if c == '#' {
+                s.id = Some(nome);
+            } else {
+                s.classes.push(nome);
+            }
+            i = prox;
+        } else if c == '[' {
+            let fim = match chars[i..].iter().position(|&ch| ch == ']') {
+                Some(p) => i + p,
+                None => return Err("atributo sem fechamento".to_string()),
+            };
+            let conteudo: String = chars[i + 1..fim].iter().collect();
+            s.atributos.push(parse_atributo(&conteudo)?);
+            i = fim + 1;
+        } else if c == ':' {
+            if chars.get(i + 1) == Some(&':') {
+                return Err("pseudo-elemento não suportado".to_string());
+            }
+            let (nome, prox) = ident(&chars, i + 1);
+            let nome = nome.to_ascii_lowercase();
+            if nome.is_empty() {
+                return Err(ERRO_COMPOSTO.to_string());
+            }
+            i = prox;
+            if chars.get(i) == Some(&'(') {
+                let fim = match fecha_parenteses(&chars, i) {
+                    Some(f) => f,
+                    None => return Err(ERRO_COMPOSTO.to_string()),
+                };
+                let interno: String = chars[i + 1..fim].iter().collect();
+                i = fim + 1;
+                if nome != "not" {
+                    return Err(format!("pseudo não suportada: {}", nome));
                 }
-                s.id = Some(nome.to_string());
-                i = proximo;
-            }
-            b':' => {
-                let (nome, proximo) = ident_em(texto, i)?;
-                let nome = nome.to_ascii_lowercase();
-                i = proximo;
-                if bytes.get(i) == Some(&b'(') {
-                    let fecha = i + texto[i..].find(')')?;
-                    let argumento = texto[i + 1..fecha].trim();
-                    i = fecha + 1;
-                    if nome != "not" {
-                        return None;
-                    }
-                    let negado = parse_composto(argumento)?;
-                    if negado.impossivel {
-                        // :not(:hover) é sempre verdadeiro, então não muda nada.
-                        continue;
-                    }
-                    if negado == Simples::default() {
-                        // :not(*) nunca casa.
-                        return None;
+                let interno = interno.trim();
+                if interno == "*" {
+                    return Err("`:not(*)` não suportado".to_string());
+                }
+                let so_interacao = interno.strip_prefix(':').map_or(false, eh_interacao);
+                if !so_interacao {
+                    let negado = parse_composto(interno)?;
+                    if negado.primeiro_filho {
+                        return Err("first-child dentro de :not não suportado".to_string());
                     }
                     s.negados.push(negado);
-                } else if PSEUDO_IMPOSSIVEIS.contains(&nome.as_str()) {
-                    s.impossivel = true;
-                } else {
-                    return None;
                 }
+            } else if nome == "first-child" {
+                s.primeiro_filho = true;
+            } else if eh_interacao(&nome) {
+                return Err("pseudo de interação (hover, focus etc.): nunca casa".to_string());
+            } else {
+                return Err(format!("pseudo não suportada: {}", nome));
             }
-            _ => return None,
+        } else {
+            let (nome, prox) = ident(&chars, i);
+            if nome.is_empty() {
+                return Err(ERRO_COMPOSTO.to_string());
+            }
+            s.tag = Some(nome.to_ascii_lowercase());
+            i = prox;
         }
     }
-    Some(s)
+    Ok(s)
 }
 
-fn eh_ident(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'-' || c == b'_'
-}
-
-/// Lê um nome a partir de `inicio`. Devolve o nome e a posição logo depois dele.
-fn ident_em(texto: &str, inicio: usize) -> Option<(&str, usize)> {
-    let bytes = texto.as_bytes();
-    let mut fim = inicio;
-    while fim < bytes.len() && eh_ident(bytes[fim]) {
-        fim += 1;
-    }
-    (fim > inicio).then(|| (&texto[inicio..fim], fim))
-}
-
-fn parse_declaracoes(corpo: &str) -> Vec<(String, String)> {
-    corpo
-        .split(';')
-        .filter_map(|declaracao| {
-            let (propriedade, valor) = declaracao.split_once(':')?;
-            let propriedade = propriedade.trim().to_ascii_lowercase();
-            let valor = valor.replace("!important", "").trim().to_string();
-            let nome_valido = !propriedade.is_empty()
-                && propriedade
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-');
-            if nome_valido && !valor.is_empty() {
-                Some((propriedade, valor))
+fn parse_atributo(txt: &str) -> Result<Atributo, String> {
+    let t = txt.trim();
+    let erro = format!("atributo [{}] com forma não suportada", t);
+    let (antes, valor_txt, op) = match t.find('=') {
+        None => (t, "", OperadorAtributo::Existe),
+        Some(p) => {
+            let antes = &t[..p];
+            let (nome, op) = if let Some(n) = antes.strip_suffix('~') {
+                (n, OperadorAtributo::Palavra)
+            } else if let Some(n) = antes.strip_suffix('|') {
+                (n, OperadorAtributo::Traco)
+            } else if let Some(n) = antes.strip_suffix('^') {
+                (n, OperadorAtributo::Prefixo)
+            } else if let Some(n) = antes.strip_suffix('$') {
+                (n, OperadorAtributo::Sufixo)
+            } else if let Some(n) = antes.strip_suffix('*') {
+                (n, OperadorAtributo::Contem)
             } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn parse_cor(valor: &str) -> Option<[u8; 3]> {
-    let v = valor.trim().to_ascii_lowercase();
-    let nomeada = match v.as_str() {
-        "black" => Some([0, 0, 0]),
-        "white" => Some([255, 255, 255]),
-        "red" => Some([255, 0, 0]),
-        "green" => Some([0, 128, 0]),
-        "blue" => Some([0, 0, 255]),
-        "gray" | "grey" => Some([128, 128, 128]),
-        _ => None,
+                (antes, OperadorAtributo::Igual)
+            };
+            (nome, &t[p + 1..], op)
+        }
     };
-    if nomeada.is_some() {
-        return nomeada;
+    let nome = antes.trim().to_ascii_lowercase();
+    if nome.is_empty() || !nome.chars().all(eh_ident) {
+        return Err(erro);
     }
+    if op == OperadorAtributo::Existe {
+        return Ok(Atributo {
+            nome,
+            op,
+            valor: String::new(),
+        });
+    }
+    let v = valor_txt.trim();
+    let valor = match v.chars().next() {
+        Some(q) if q == '"' || q == '\'' => match v[1..].strip_suffix(q) {
+            Some(x) => x.to_string(),
+            None => return Err(erro),
+        },
+        _ => {
+            if v.is_empty() || v.contains(char::is_whitespace) {
+                return Err(erro);
+            }
+            v.to_string()
+        }
+    };
+    Ok(Atributo { nome, op, valor })
+}
 
-    let hex = v.strip_prefix('#')?;
-    if !hex.is_ascii() {
-        return None;
+fn eh_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || (c as u32) >= 0x80
+}
+
+fn ident(chars: &[char], inicio: usize) -> (String, usize) {
+    let mut nome = String::new();
+    let mut i = inicio;
+    while i < chars.len() && eh_ident(chars[i]) {
+        nome.push(chars[i]);
+        i += 1;
     }
-    let digitos: Vec<u8> = hex
-        .chars()
-        .map(|c| c.to_digit(16).map(|d| d as u8))
-        .collect::<Option<Vec<u8>>>()?;
-    match digitos.as_slice() {
-        &[r, g, b] => Some([r * 17, g * 17, b * 17]),
-        &[r1, r2, g1, g2, b1, b2] => Some([r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2]),
-        _ => None,
+    (nome, i)
+}
+
+fn fecha_parenteses(chars: &[char], abre: usize) -> Option<usize> {
+    let mut prof = 0i32;
+    for (j, &c) in chars.iter().enumerate().skip(abre) {
+        if c == '(' {
+            prof += 1;
+        } else if c == ')' {
+            prof -= 1;
+            if prof == 0 {
+                return Some(j);
+            }
+        }
+    }
+    None
+}
+
+fn soma_especificidade(s: &Simples, t: &mut (u32, u32, u32)) {
+    if s.id.is_some() {
+        t.0 += 1;
+    }
+    t.1 += s.classes.len() as u32
+        + s.atributos.len() as u32
+        + (if s.primeiro_filho { 1 } else { 0 });
+    if s.tag.is_some() {
+        t.2 += 1;
+    }
+    for n in &s.negados {
+        soma_especificidade(n, t);
     }
 }
 
-fn parse_px(valor: &str) -> Option<f32> {
-    let v = valor.trim();
-    let numero = v.strip_suffix("px").unwrap_or(v).trim();
-    let n: f32 = numero.parse().ok()?;
-    (n.is_finite() && n >= 0.0).then_some(n)
+fn especificidade_de(alvo: &Simples, anteriores: &[(Combinador, Simples)]) -> u32 {
+    let mut total = (0u32, 0u32, 0u32);
+    soma_especificidade(alvo, &mut total);
+    for (_, s) in anteriores {
+        soma_especificidade(s, &mut total);
+    }
+    total.0 * 10000 + total.1 * 100 + total.2
 }
+
+fn colhe_simples(s: &Simples, nomes: &mut Vec<String>) {
+    for a in &s.atributos {
+        if !nomes.contains(&a.nome) {
+            nomes.push(a.nome.clone());
+        }
+    }
+    for n in &s.negados {
+        colhe_simples(n, nomes);
+    }
+}
+
+fn colhe_atributos(s: &Seletor, nomes: &mut Vec<String>) {
+    colhe_simples(&s.alvo, nomes);
+    for (_, c) in &s.anteriores {
+        colhe_simples(c, nomes);
+    }
+}
+
+fn indexa(ind: &mut Indice, s: &Seletor, i: usize) {
+    if let Some(id) = &s.alvo.id {
+        ind.ids.entry(id.clone()).or_insert_with(Vec::new).push(i);
+    } else if let Some(c) = s.alvo.classes.first() {
+        ind.classes.entry(c.clone()).or_insert_with(Vec::new).push(i);
+    } else if let Some(t) = &s.alvo.tag {
+        ind.tags.entry(t.clone()).or_insert_with(Vec::new).push(i);
+    } else {
+        ind.universais.push(i);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Casamento
+// ---------------------------------------------------------------------------
+
+fn casa_atributo(a: &Atributo, info: &Info) -> bool {
+    let w = match info.atributos.iter().find(|(n, _)| *n == a.nome) {
+        Some((_, v)) => v.as_str(),
+        None => return false,
+    };
+    match a.op {
+        OperadorAtributo::Existe => true,
+        OperadorAtributo::Igual => w == a.valor.as_str(),
+        OperadorAtributo::Palavra => {
+            !a.valor.is_empty() && w.split_whitespace().any(|p| p == a.valor.as_str())
+        }
+        OperadorAtributo::Traco => {
+            w == a.valor.as_str() || w.starts_with(format!("{}-", a.valor).as_str())
+        }
+        OperadorAtributo::Prefixo => !a.valor.is_empty() && w.starts_with(a.valor.as_str()),
+        OperadorAtributo::Sufixo => !a.valor.is_empty() && w.ends_with(a.valor.as_str()),
+        OperadorAtributo::Contem => !a.valor.is_empty() && w.contains(a.valor.as_str()),
+    }
+}
+
+fn casa_simples(s: &Simples, info: &Info, e_primeiro: bool) -> bool {
+    if let Some(t) = &s.tag {
+        if !info.tag.eq_ignore_ascii_case(t) {
+            return false;
+        }
+    }
+    if let Some(i) = &s.id {
+        if info.id != *i {
+            return false;
+        }
+    }
+    if !s.classes.iter().all(|c| info.classes.iter().any(|ic| ic == c)) {
+        return false;
+    }
+    if s.primeiro_filho && !e_primeiro {
+        return false;
+    }
+    if !s.atributos.iter().all(|a| casa_atributo(a, info)) {
+        return false;
+    }
+    s.negados.iter().all(|n| !casa_simples(n, info, e_primeiro))
+}
+
+/// Casa a cadeia de ancestrais. `topo` é o limite exclusivo de `pais`:
+/// o elemento atual é filho de `pais[topo - 1]`.
+fn casa_ancestrais(rest: &[(Combinador, Simples)], pais: &[Info], topo: usize) -> bool {
+    match rest.first() {
+        None => true,
+        Some((comb, s)) => match comb {
+            Combinador::Filho => {
+                topo > 0
+                    && casa_simples(s, &pais[topo - 1], false)
+                    && casa_ancestrais(&rest[1..], pais, topo - 1)
+            }
+            Combinador::Descendente => (0..topo).rev().any(|i| {
+                casa_simples(s, &pais[i], false) && casa_ancestrais(&rest[1..], pais, i)
+            }),
+            _ => false,
+        },
+    }
+}
+
+fn casa_seletor(sel: &Seletor, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> bool {
+    if !casa_simples(&sel.alvo, alvo, irmaos.is_empty()) {
+        return false;
+    }
+    match sel.anteriores.first() {
+        None => true,
+        Some((comb, s)) => match comb {
+            Combinador::Adjacente | Combinador::Geral => {
+                let n = irmaos.len();
+                let inicio = if *comb == Combinador::Adjacente {
+                    n.saturating_sub(1)
+                } else {
+                    0
+                };
+                (inicio..n).any(|c| {
+                    casa_simples(s, &irmaos[c], c == 0)
+                        && casa_ancestrais(&sel.anteriores[1..], pais, pais.len())
+                })
+            }
+            _ => casa_ancestrais(&sel.anteriores, pais, pais.len()),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Testes
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod testes {
     use super::*;
 
-    fn estilo(css: &str, tag: &str) -> Estilo {
-        estilo_para(&Folha::parse(css), tag, None, &[], None)
-    }
-
-    fn info(tag: &str, id: Option<&str>, classes: &[&str]) -> Info {
+    fn info(tag: &str, id: &str, classes: &[&str], atributos: &[(&str, &str)]) -> Info {
         Info {
             tag: tag.to_string(),
-            id: id.map(str::to_string),
+            id: id.to_string(),
             classes: classes.iter().map(|c| c.to_string()).collect(),
+            atributos: atributos
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
         }
     }
 
-    fn cor_com_pais(css: &str, alvo: &Info, pais: &[Info]) -> Option<[u8; 3]> {
-        estilo_com_pais(&Folha::parse(css), alvo, pais, None).cor
+    fn oculto(css: &str, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> bool {
+        let f = Folha::parse(css);
+        estilo_completo(&f, alvo, pais, irmaos, None).oculto
     }
 
     #[test]
-    fn aplica_cor_tamanho_e_negrito_por_tipo() {
-        let e = estilo("p { color: #f00; font-size: 20px; font-weight: bold }", "p");
-        assert_eq!(e.cor, Some([255, 0, 0]));
-        assert_eq!(e.tamanho, Some(20.0));
+    fn le_tamanho_negrito_e_cor() {
+        let f = Folha::parse("h1 { font-size: 2em; font-weight: bold; color: #f00 }");
+        let e = estilo_para(&f, "h1", "", &[], None);
+        assert_eq!(e.tamanho, Some(32.0));
         assert_eq!(e.negrito, Some(true));
+        assert_eq!(e.cor, Some((255, 0, 0)));
     }
 
     #[test]
-    fn classe_vence_tipo_mesmo_vindo_antes() {
-        let css = ".destaque { color: blue } p { color: black }";
-        let e = estilo_para(&Folha::parse(css), "p", None, &["destaque"], None);
-        assert_eq!(e.cor, Some([0, 0, 255]));
-    }
-
-    #[test]
-    fn id_vence_classe() {
-        let css = "#topo { color: red } .x { color: blue }";
-        let e = estilo_para(&Folha::parse(css), "div", Some("topo"), &["x"], None);
-        assert_eq!(e.cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn estilo_inline_vence_a_folha() {
-        let e = estilo_para(
-            &Folha::parse("p { color: red }"),
-            "p",
-            None,
-            &[],
-            Some("color: green"),
+    fn media_calc_max_width_casa_em_tela_pequena() {
+        let f = Folha::parse(
+            "@media screen and (max-width: calc(640px - 1px)) { p { display: none } }",
         );
-        assert_eq!(e.cor, Some([0, 128, 0]));
+        assert!(estilo_para(&f, "p", "", &[], None).oculto);
     }
 
     #[test]
-    fn display_none_oculta() {
-        assert!(estilo("nav { display: none }", "nav").oculto);
-        assert!(!estilo("nav { display: none }", "p").oculto);
+    fn media_calc_min_width_nao_casa_em_tela_pequena() {
+        let f = Folha::parse("@media (min-width: calc(640px - 1px)) { p { display: none } }");
+        assert!(!estilo_para(&f, "p", "", &[], None).oculto);
     }
 
     #[test]
-    fn margens_em_px() {
-        let e = estilo("p { margin: 8px; margin-bottom: 12px }", "p");
-        assert_eq!(e.margem_topo, Some(8.0));
-        assert_eq!(e.margem_base, Some(12.0));
+    fn media_calc_com_em() {
+        let f = Folha::parse("@media (max-width: 40em) { p { display: none } }");
+        assert!(estilo_para(&f, "p", "", &[], None).oculto);
     }
 
     #[test]
-    fn valores_invalidos_sao_ignorados() {
-        let e = estilo("p { font-size: 2em; color: #zz0 }", "p");
-        assert_eq!(e.tamanho, None);
-        assert_eq!(e.cor, None);
+    fn media_calc_com_operacao_desconhecida_nao_casa() {
+        let f = Folha::parse("@media (max-width: calc(640px * 2)) { p { display: none } }");
+        assert!(!estilo_para(&f, "p", "", &[], None).oculto);
     }
 
     #[test]
-    fn lista_de_seletores() {
-        let css = "h1, h2 { font-weight: bold }";
-        assert_eq!(estilo(css, "h2").negrito, Some(true));
-        assert_eq!(estilo(css, "h1").negrito, Some(true));
+    fn seletor_com_acento_casa() {
+        let f = Folha::parse("p.café { display: none }");
+        let alvo = info("p", "", &["café"], &[]);
+        assert!(estilo_completo(&f, &alvo, &[], &[], None).oculto);
     }
 
     #[test]
-    fn descendente_casa_com_ancestral() {
-        let css = "div p { color: red }";
-        let p = info("p", None, &[]);
-        assert_eq!(cor_com_pais(css, &p, &[info("div", None, &[])]), Some([255, 0, 0]));
-        assert_eq!(cor_com_pais(css, &p, &[info("section", None, &[])]), None);
+    fn atributo_presenca_casa() {
+        let alvo = info("div", "", &[], &[("data-x", "")]);
+        assert!(oculto("[data-x] { display: none }", &alvo, &[], &[]));
     }
 
     #[test]
-    fn filho_direto_exige_pai_imediato() {
-        let css = "div > p { color: red }";
-        let p = info("p", None, &[]);
-        let div_longe = [info("div", None, &[]), info("section", None, &[])];
-        let div_perto = [info("section", None, &[]), info("div", None, &[])];
-        assert_eq!(cor_com_pais(css, &p, &div_longe), None);
-        assert_eq!(cor_com_pais(css, &p, &div_perto), Some([255, 0, 0]));
+    fn atributo_palavra_casa_entre_espacos() {
+        let alvo = info("div", "", &[], &[("class", "a b c")]);
+        assert!(oculto("[class~=b] { display: none }", &alvo, &[], &[]));
     }
 
     #[test]
-    fn descendente_volta_atras_quando_o_pai_nao_casa() {
-        // O <p> mais próximo tem pai <section>. O <p> de fora tem pai <div>.
-        let css = "div > p span { color: red }";
-        let span = info("span", None, &[]);
-        let pais = [
-            info("div", None, &[]),
-            info("p", None, &[]),
-            info("section", None, &[]),
-            info("p", None, &[]),
-        ];
-        assert_eq!(cor_com_pais(css, &span, &pais), Some([255, 0, 0]));
+    fn atributo_prefixo() {
+        let alvo = info("a", "", &[], &[("href", "https://x")]);
+        assert!(oculto("[href^=http] { display: none }", &alvo, &[], &[]));
     }
 
     #[test]
-    fn not_exclui_a_classe() {
-        let css = "p:not(.x) { color: red }";
-        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
-        let com_classe = info("p", None, &["x"]);
-        assert_eq!(cor_com_pais(css, &com_classe, &[]), None);
+    fn atributo_igual_sem_aspas() {
+        let alvo = info("div", "", &[], &[("role", "note")]);
+        assert!(oculto("[role=note] { display: none }", &alvo, &[], &[]));
     }
 
     #[test]
-    fn not_de_pseudo_de_interacao_sempre_vale() {
-        assert_eq!(estilo("p:not(:focus) { color: red }", "p").cor, Some([255, 0, 0]));
+    fn virgula_dentro_de_atributo_nao_divide_seletor() {
+        assert_eq!(divide_seletores("p[title=\"a,b\"], span").len(), 2);
+        let alvo = info("p", "", &[], &[("title", "a,b")]);
+        assert!(oculto("p[title=\"a,b\"] { display: none }", &alvo, &[], &[]));
     }
 
     #[test]
-    fn hover_nunca_casa() {
-        assert_eq!(estilo("a:hover { color: red }", "a").cor, None);
+    fn irmao_adjacente_casa_so_com_o_anterior_imediato() {
+        let css = ".a + p { display: none }";
+        let p = info("p", "", &[], &[]);
+        let a = info("div", "", &["a"], &[]);
+        let x = info("span", "", &[], &[]);
+        assert!(!oculto(css, &p, &[], &[a.clone(), x.clone()]));
+        assert!(oculto(css, &p, &[], &[x, a]));
     }
 
     #[test]
-    fn pseudo_nao_suportado_e_ignorado() {
-        assert_eq!(estilo("p::before { color: red }", "p").cor, None);
-        assert_eq!(estilo("li:first-child { color: red }", "li").cor, None);
+    fn irmao_geral_casa_com_qualquer_anterior() {
+        let css = ".a ~ p { display: none }";
+        let p = info("p", "", &[], &[]);
+        let a = info("div", "", &["a"], &[]);
+        let x = info("span", "", &[], &[]);
+        assert!(oculto(css, &p, &[], &[a, x]));
     }
 
     #[test]
-    fn at_regras_sao_ignoradas() {
-        let css = "@media print { p { color: red } } @import url(x.css); span { color: blue }";
-        assert_eq!(estilo(css, "p").cor, None);
-        assert_eq!(estilo(css, "span").cor, Some([0, 0, 255]));
+    fn irmao_com_ancestral_usa_os_pais_do_alvo() {
+        let css = "div .a + p { display: none }";
+        let p = info("p", "", &[], &[]);
+        let a = info("div", "", &["a"], &[]);
+        let div = info("div", "", &[], &[]);
+        let span = info("span", "", &[], &[]);
+        assert!(oculto(css, &p, &[div], &[a.clone()]));
+        assert!(!oculto(css, &p, &[span], &[a]));
     }
 
     #[test]
-    fn universal_casa_tudo() {
-        assert_eq!(estilo("* { color: blue }", "span").cor, Some([0, 0, 255]));
+    fn first_child_casa_so_sem_irmaos_antes() {
+        let css = "p:first-child { display: none }";
+        let p = info("p", "", &[], &[]);
+        let x = info("span", "", &[], &[]);
+        assert!(oculto(css, &p, &[], &[]));
+        assert!(!oculto(css, &p, &[], &[x]));
     }
 
     #[test]
-    fn comentarios_sao_ignorados() {
-        assert_eq!(estilo("/* x { */ span { color: blue }", "span").cor, Some([0, 0, 255]));
+    fn first_child_em_ancestral_fica_de_fora() {
+        let f = Folha::parse("li:first-child p { display: none }");
+        assert_eq!(f.ignoradas.len(), 1);
     }
 
     #[test]
-    fn media_max_width_casa_em_tela_pequena() {
-        let css = "@media screen and (max-width: 999px) { nav { display: none } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert!(estilo_para(&folha, "nav", None, &[], None).oculto);
+    fn irmao_depois_de_ancestral_fica_de_fora() {
+        let f = Folha::parse(".a + .b p { display: none }");
+        assert_eq!(f.ignoradas.len(), 1);
+        assert!(f.ignoradas[0].motivo.contains("irmão"));
     }
 
     #[test]
-    fn media_min_width_nao_casa_em_tela_pequena() {
-        let css = "@media (min-width: 720px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
+    fn precisa_irmaos_so_quando_a_folha_usa() {
+        assert!(!Folha::parse("p { display: none }").precisa_irmaos());
+        assert!(Folha::parse("p:first-child { color: red }").precisa_irmaos());
     }
 
     #[test]
-    fn media_min_width_casa_em_tela_grande() {
-        let css = "@media (min-width: 320px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    fn nomes_de_atributo_sao_coletados() {
+        let f = Folha::parse("[data-x], a[href] { color: red }");
+        let nomes = f.nomes_atributos();
+        assert!(nomes.iter().any(|s| s.as_str() == "data-x"));
+        assert!(nomes.iter().any(|s| s.as_str() == "href"));
     }
 
     #[test]
-    fn media_lista_com_virgula_casa_se_uma_casar() {
-        let css = "@media print, (max-width: 500px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    fn has_e_ignorado_e_registrado() {
+        let f = Folha::parse("p:has(a) { display: none }");
+        assert_eq!(f.ignoradas.len(), 1);
+        assert!(f.ignoradas[0].motivo.contains("has"));
     }
 
     #[test]
-    fn media_not_inverte_a_consulta() {
-        let css = "@media not all and (min-width: 720px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn media_condicao_desconhecida_fica_de_fora() {
-        let css = "@media (prefers-color-scheme: dark) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
-    }
-
-    #[test]
-    fn media_com_em_usa_16_px() {
-        // 30em = 480 px, então 375 pt casa com max-width.
-        let css = "@media (max-width: 30em) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn parse_padrao_usa_375_pt() {
-        let css = "@media (max-width: 400px) { p { color: red } }";
-        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn seletor_com_til_e_registrado_como_ignorado() {
-        let folha = Folha::parse(".a ~ .b { display: none }");
-        assert_eq!(folha.ignoradas.len(), 1);
-        assert!(folha.ignoradas[0].motivo.contains('~'));
+    fn seletor_com_til_fora_da_posicao_e_registrado() {
+        let f = Folha::parse(".a ~ .b .c { display: none }");
+        assert_eq!(f.ignoradas.len(), 1);
+        assert!(f.ignoradas[0].motivo.contains("irmão"));
     }
 
     #[test]
     fn regra_sem_display_none_nao_e_registrada() {
-        let folha = Folha::parse(".a ~ .b { color: red }");
-        assert!(folha.ignoradas.is_empty());
+        let f = Folha::parse("p:hover { color: red }");
+        assert!(f.ignoradas.is_empty());
     }
 
     #[test]
     fn media_inativo_registra_regra_ocultadora() {
-        let css = "@media (min-width: 720px) { nav { display: none } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(folha.ignoradas.len(), 1);
-        assert!(folha.ignoradas[0].motivo.contains("não casa"));
+        let f = Folha::parse("@media print { p { display: none } }");
+        assert_eq!(f.ignoradas.len(), 1);
+        assert!(f.ignoradas[0].motivo.contains("print"));
     }
 }
