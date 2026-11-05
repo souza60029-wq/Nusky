@@ -99,6 +99,8 @@ struct Bloco {
     exibir: String,
     /// Início do texto sem espaços, usado para conferir se foi desenhado.
     chave: String,
+    /// Verdadeiro quando o bloco não aparece: ou o próprio elemento está oculto, ou todo o
+    /// texto dele está dentro de filhos ocultos por CSS.
     oculto: bool,
     /// Regras do próprio bloco e dos ancestrais. Ordem: o próprio, depois os ancestrais
     /// do mais próximo para o mais distante.
@@ -498,9 +500,24 @@ impl Diagnostico {
 
         if e_bloco {
             if let Some(quadro) = self.abertos.pop() {
+                // Sem texto visível: o texto pode estar todo dentro de filhos ocultos por CSS
+                // (ex.: `span + span:last-child` escondendo o rótulo de um botão). Nesse caso
+                // o bloco entra como oculto, com o texto que deveria aparecer, para que as
+                // regras que o escondem continuem no relatório.
+                let mut texto = quadro.texto.clone();
+                let mut oculto = false;
+                if contar(&texto) == 0 {
+                    let mut bruto = String::new();
+                    texto_de(&el.children, &mut bruto);
+                    if contar(&bruto) > 0 {
+                        texto = bruto;
+                        oculto = true;
+                    }
+                }
                 let bloco = &mut self.blocos[quadro.indice];
-                bloco.exibir = texto_exibido(&quadro.texto);
-                bloco.chave = texto_conferido(&quadro.texto);
+                bloco.exibir = texto_exibido(&texto);
+                bloco.chave = texto_conferido(&texto);
+                bloco.oculto = oculto;
             }
         }
         info
@@ -1158,6 +1175,13 @@ mod tests {
         );
         assert!(r.contains("span + span:last-child"));
         assert!(r.contains("(descendente span)"));
+    }
+
+    #[test]
+    fn texto_escondido_por_filho_deixa_o_bloco_como_oculto() {
+        let r = rel("<style>span.x { display: none }</style><ul><li><span class=\"x\">Idioma</span></li></ul>");
+        assert!(r.contains("[oculto] ul > li: \"Idioma\""));
+        assert!(r.contains("[oculto no Nusky] ul > li: \"Idioma\""));
     }
 
     #[test]
