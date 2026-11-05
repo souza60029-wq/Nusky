@@ -10,6 +10,9 @@
 //! O campo `link` fica vazio quando o texto não é link.
 //! O campo `cor` é `r,g,b` (0 a 255), ou vazio quando a página não definiu cor.
 //!
+//! Antes do layout, o HTML passa por `preparo::marcar_com_javascript`, que troca
+//! "client-nojs" por "client-js" na tag <html>.
+//!
 //! `nusky_diagnose` aceita os mesmos argumentos e devolve um relatório em texto
 //! (ver `diagnostico.rs`). Não altera a renderização.
 
@@ -22,6 +25,7 @@ use std::ptr;
 use crate::diagnostico::relatorio;
 use crate::html::parse;
 use crate::layout::{layout, DrawCommand, TextMeasurer};
+use crate::preparo::marcar_com_javascript;
 
 /// Função de medição da casca: largura em pontos de um texto UTF-8 terminado em NUL,
 /// na fonte indicada. `bold` é 0 ou 1.
@@ -83,7 +87,8 @@ pub extern "C" fn nusky_render(
     if html.is_null() {
         return ptr::null_mut();
     }
-    let input = unsafe { CStr::from_ptr(html) }.to_string_lossy();
+    let bruto = unsafe { CStr::from_ptr(html) }.to_string_lossy();
+    let input = marcar_com_javascript(&bruto);
     let nodes = parse(&input);
 
     let commands = match measure {
@@ -131,7 +136,8 @@ pub extern "C" fn nusky_diagnose(
     if html.is_null() {
         return ptr::null_mut();
     }
-    let input = unsafe { CStr::from_ptr(html) }.to_string_lossy();
+    let bruto = unsafe { CStr::from_ptr(html) }.to_string_lossy();
+    let input = marcar_com_javascript(&bruto);
 
     let texto = match measure {
         Some(f) => relatorio(
