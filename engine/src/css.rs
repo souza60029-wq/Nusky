@@ -13,6 +13,8 @@
 //! Outras condições de `@media` (cor, orientação, impressão) não casam.
 //! `@import` e `@font-face` são ignorados por inteiro.
 //! Seletores com `+`, `~`, `[atributo]`, `::before` ou `:first-child` são ignorados.
+//! Regras com `display: none` que não entram ficam em `Folha::ignoradas`, com o motivo,
+//! só para o diagnóstico.
 //!
 //! Propriedades: color, font-size, font-weight, margin, margin-top, margin-bottom
 //! e display (só none).
@@ -42,6 +44,13 @@ pub struct Estilo {
     pub margem_topo: Option<f32>,
     pub margem_base: Option<f32>,
     pub oculto: bool,
+}
+
+/// Regra `display: none` que o motor não aplicou, com o motivo.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ignorada {
+    pub seletor: String,
+    pub motivo: String,
 }
 
 /// Como um composto se liga ao composto da direita.
@@ -96,6 +105,9 @@ struct Indice {
 pub struct Folha {
     regras: Vec<Regra>,
     indice: Indice,
+    /// Regras com `display: none` que o motor não aplicou, com o motivo.
+    /// Só serve para o diagnóstico.
+    pub ignoradas: Vec<Ignorada>,
 }
 
 /// Pseudo-classes que nunca casam, porque o motor não tem interação nem estado.
@@ -119,15 +131,25 @@ impl Folha {
     pub fn parse_largura(css: &str, largura: f32) -> Folha {
         let limpo = remover_comentarios(css);
         let mut regras = Vec::new();
-        ler_blocos(&limpo, largura, &mut regras);
+        let mut ignoradas = Vec::new();
+        ler_blocos(&limpo, largura, &mut regras, &mut ignoradas);
         let indice = construir_indice(&regras);
-        Folha { regras, indice }
+        Folha {
+            regras,
+            indice,
+            ignoradas,
+        }
     }
 }
 
 /// Lê regras e blocos `@media` de um trecho de CSS. Chamado de novo dentro de cada `@media`
 /// que casa, então regras aninhadas também entram.
-fn ler_blocos(texto: &str, largura: f32, regras: &mut Vec<Regra>) {
+fn ler_blocos(
+    texto: &str,
+    largura: f32,
+    regras: &mut Vec<Regra>,
+    ignoradas: &mut Vec<Ignorada>,
+) {
     let mut resto = texto;
 
     while let Some(abre) = resto.find('{') {
@@ -140,7 +162,10 @@ fn ler_blocos(texto: &str, largura: f32, regras: &mut Vec<Regra>) {
 
         if let Some(condicao) = cabeca.strip_prefix("@media") {
             if media_casa(condicao, largura) {
-                ler_blocos(corpo, largura, regras);
+                ler_blocos(corpo, largura, regras, ignoradas);
+            } else {
+                let motivo = format!("@media {} não casa com {} pt", condicao.trim(), largura);
+                registrar_inativos(corpo, &motivo, ignoradas);
             }
             continue;
         }
@@ -150,17 +175,106 @@ fn ler_blocos(texto: &str, largura: f32, regras: &mut Vec<Regra>) {
         }
 
         let declaracoes = parse_declaracoes(corpo);
+        let oculta = esconde(&declaracoes);
         for parte in cabeca.split(',') {
-            if let Some(seletor) = parse_seletor(parte) {
-                let ordem = regras.len();
-                regras.push(Regra {
-                    seletor,
-                    declaracoes: declaracoes.clone(),
-                    ordem,
-                });
+            match parse_seletor(parte) {
+                Some(seletor) => {
+                    let ordem = regras.len();
+                    regras.push(Regra {
+                        seletor,
+                        declaracoes: declaracoes.clone(),
+                        ordem,
+                    });
+                }
+                None => {
+                    if oculta && !parte.trim().is_empty() {
+                        ignoradas.push(Ignorada {
+                            seletor: parte.trim().to_string(),
+                            motivo: motivo_recusa(parte),
+                        });
+                    }
+                }
             }
         }
     }
+}
+
+/// Varre um bloco `@media` que não casou e registra as regras que esconderiam elementos.
+/// Não cria regras: só guarda o que ficou de fora, para o diagnóstico.
+fn registrar_inativos(texto: &str, motivo: &str, ignoradas: &mut Vec<Ignorada>) {
+    let mut resto = texto;
+
+    while let Some(abre) = resto.find('{') {
+        let cabeca = resto[..abre].rsplit(';').next().unwrap_or("").trim();
+        let depois = &resto[abre + 1..];
+        let fim = fim_do_bloco(depois);
+        let corpo = &depois[..fim];
+        resto = depois.get(fim + 1..).unwrap_or("");
+
+        if cabeca.starts_with("@media") {
+            registrar_inativos(corpo, motivo, ignoradas);
+            continue;
+        }
+        if cabeca.is_empty() || cabeca.starts_with('@') {
+            continue;
+        }
+        if esconde(&parse_declaracoes(corpo)) {
+            ignoradas.push(Ignorada {
+                seletor: cabeca.to_string(),
+                motivo: motivo.to_string(),
+            });
+        }
+    }
+}
+
+/// Diz se a lista de declarações esconde o elemento (`display: none`).
+fn esconde(declaracoes: &[(String, String)]) -> bool {
+    declaracoes
+        .iter()
+        .any(|(k, v)| k == "display" && v.eq_ignore_ascii_case("none"))
+}
+
+/// Diz por que um seletor foi recusado. Usado só pelo relatório de diagnóstico.
+fn motivo_recusa(texto: &str) -> String {
+    let t = texto.trim();
+    if !t.is_ascii() {
+        return "caracteres não ASCII no seletor".to_string();
+    }
+    if t.contains('[') {
+        return "atributo [..] não suportado".to_string();
+    }
+    if t.contains('~') || t.contains('+') {
+        return "combinador ~ ou + não suportado".to_string();
+    }
+    let nomes = nomes_de_pseudo(t);
+    if nomes
+        .iter()
+        .any(|n| PSEUDO_IMPOSSIVEIS.contains(&n.as_str()))
+    {
+        return "pseudo de interação (hover, focus etc.): nunca casa".to_string();
+    }
+    if !nomes.is_empty() {
+        return format!("pseudo não suportada: {}", nomes.join(", "));
+    }
+    "seletor não suportado (combinador ou composto)".to_string()
+}
+
+/// Nomes das pseudo-classes e pseudo-elementos de um seletor, em minúsculas.
+fn nomes_de_pseudo(t: &str) -> Vec<String> {
+    t.split(':')
+        .skip(1)
+        .filter_map(|p| {
+            let nome: String = p
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if nome.is_empty() {
+                None
+            } else {
+                Some(nome.to_ascii_lowercase())
+            }
+        })
+        .collect()
 }
 
 /// Diz se uma lista de consultas de mídia (`screen, (max-width: 999px)`) casa com a largura.
@@ -744,112 +858,4 @@ mod testes {
 
     #[test]
     fn descendente_volta_atras_quando_o_pai_nao_casa() {
-        // O <p> mais próximo tem pai <section>. O <p> de fora tem pai <div>.
-        let css = "div > p span { color: red }";
-        let span = info("span", None, &[]);
-        let pais = [
-            info("div", None, &[]),
-            info("p", None, &[]),
-            info("section", None, &[]),
-            info("p", None, &[]),
-        ];
-        assert_eq!(cor_com_pais(css, &span, &pais), Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn not_exclui_a_classe() {
-        let css = "p:not(.x) { color: red }";
-        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
-        let com_classe = info("p", None, &["x"]);
-        assert_eq!(cor_com_pais(css, &com_classe, &[]), None);
-    }
-
-    #[test]
-    fn not_de_pseudo_de_interacao_sempre_vale() {
-        assert_eq!(estilo("p:not(:focus) { color: red }", "p").cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn hover_nunca_casa() {
-        assert_eq!(estilo("a:hover { color: red }", "a").cor, None);
-    }
-
-    #[test]
-    fn pseudo_nao_suportado_e_ignorado() {
-        assert_eq!(estilo("p::before { color: red }", "p").cor, None);
-        assert_eq!(estilo("li:first-child { color: red }", "li").cor, None);
-    }
-
-    #[test]
-    fn at_regras_sao_ignoradas() {
-        let css = "@media print { p { color: red } } @import url(x.css); span { color: blue }";
-        assert_eq!(estilo(css, "p").cor, None);
-        assert_eq!(estilo(css, "span").cor, Some([0, 0, 255]));
-    }
-
-    #[test]
-    fn universal_casa_tudo() {
-        assert_eq!(estilo("* { color: blue }", "span").cor, Some([0, 0, 255]));
-    }
-
-    #[test]
-    fn comentarios_sao_ignorados() {
-        assert_eq!(estilo("/* x { */ span { color: blue }", "span").cor, Some([0, 0, 255]));
-    }
-
-    #[test]
-    fn media_max_width_casa_em_tela_pequena() {
-        let css = "@media screen and (max-width: 999px) { nav { display: none } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert!(estilo_para(&folha, "nav", None, &[], None).oculto);
-    }
-
-    #[test]
-    fn media_min_width_nao_casa_em_tela_pequena() {
-        let css = "@media (min-width: 720px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
-    }
-
-    #[test]
-    fn media_min_width_casa_em_tela_grande() {
-        let css = "@media (min-width: 320px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn media_lista_com_virgula_casa_se_uma_casar() {
-        let css = "@media print, (max-width: 500px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn media_not_inverte_a_consulta() {
-        let css = "@media not all and (min-width: 720px) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn media_condicao_desconhecida_fica_de_fora() {
-        let css = "@media (prefers-color-scheme: dark) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
-    }
-
-    #[test]
-    fn media_com_em_usa_16_px() {
-        // 30em = 480 px, então 375 pt casa com max-width.
-        let css = "@media (max-width: 30em) { p { color: red } }";
-        let folha = Folha::parse_largura(css, 375.0);
-        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn parse_padrao_usa_375_pt() {
-        let css = "@media (max-width: 400px) { p { color: red } }";
-        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
-    }
-}
+        // O <p> 
