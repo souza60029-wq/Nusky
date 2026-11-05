@@ -1,13 +1,6 @@
 import SwiftUI
 import UIKit
 
-private struct ScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
 
@@ -24,13 +17,9 @@ struct ContentView: View {
     @State private var bolhasAbertas = false
     @State private var mostrarConfiguracoes = false
     @State private var mostrarAbas = false
-    @State private var faixa = 0
 
     private let altura: CGFloat = 56      // espaço reservado para a barra
     private let fade: CGFloat = 14
-    private let passo: CGFloat = 400      // a janela só é recalculada ao cruzar esta distância
-    private let margem: CGFloat = 400     // linhas extras acima da área visível
-    private let alcance: CGFloat = 1800   // até onde a janela vai, a partir da faixa atual
     private let alturaBolha: CGFloat = 44 // altura de um botão de bolha
     private let folgaBolha: CGFloat = 6   // distância da bolha aberta até a borda da barra
 
@@ -103,33 +92,21 @@ struct ContentView: View {
 
     private var conteudo: some View {
         ZStack {
-            ScrollViewReader { leitor in
-                ScrollView {
-                    pagina
-                }
-                .coordinateSpace(name: "rolagem")
-                .onPreferenceChange(ScrollOffsetKey.self) { y in
-                    let deslocado = max(0, -y)
-                    model.scrollY = deslocado
-                    let nova = Int(deslocado / passo)
-                    if nova != faixa { faixa = nova }
-                }
-                .onChange(of: model.pageVersion) { _ in
-                    faixa = Int(CGFloat(model.restoreY) / passo)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        leitor.scrollTo("ancora", anchor: .top)
-                    }
-                }
-            }
+            PaginaView(
+                itens: model.items,
+                altura: CGFloat(model.contentHeight),
+                escuro: escuro,
+                restoreY: CGFloat(model.restoreY),
+                aoRolar: { posicao in model.scrollY = posicao },
+                aoAbrirLink: { link in model.open(href: link) },
+                aoTocarPagina: { if expandida { recolher() } }
+            )
 
             if model.items.isEmpty {
                 telaVazia
             }
         }
         .padding(barraEmbaixo ? .bottom : .top, altura)
-        .simultaneousGesture(TapGesture().onEnded {
-            if expandida { recolher() }
-        })
     }
 
     /// Enquanto a página não está pronta: barra de progresso no centro, ou a mensagem de erro.
@@ -147,98 +124,6 @@ struct ContentView: View {
             Text(model.status)
                 .foregroundColor(.gray)
         }
-    }
-
-    private var pagina: some View {
-        let inicio = CGFloat(faixa) * passo - margem
-        let fim = CGFloat(faixa) * passo + alcance
-        return ZStack(alignment: .topLeading) {
-            Color.clear
-                .frame(maxWidth: .infinity)
-                .frame(height: CGFloat(model.contentHeight))
-
-            Color.clear
-                .frame(width: 1, height: 1)
-                .id("ancora")
-                .padding(.top, CGFloat(model.restoreY))
-
-            ForEach(linhasVisiveis(inicio, fim)) { item in
-                linha(item)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(
-                    key: ScrollOffsetKey.self,
-                    value: geo.frame(in: .named("rolagem")).minY
-                )
-            }
-        )
-    }
-
-    /// Itens ordenados por altura. Busca binária para achar o começo da faixa.
-    private func linhasVisiveis(_ inicio: CGFloat, _ fim: CGFloat) -> [DrawItem] {
-        let itens = model.items
-        var baixo = 0
-        var alto = itens.count
-        while baixo < alto {
-            let meio = (baixo + alto) / 2
-            if CGFloat(itens[meio].y) < inicio {
-                baixo = meio + 1
-            } else {
-                alto = meio
-            }
-        }
-        var saida: [DrawItem] = []
-        var i = baixo
-        while i < itens.count && CGFloat(itens[i].y) <= fim {
-            saida.append(itens[i])
-            i += 1
-        }
-        return saida
-    }
-
-    private func linha(_ item: DrawItem) -> some View {
-        let link = item.href != nil
-        return Text(item.text)
-            .font(.system(size: CGFloat(item.fontSize), weight: item.bold ? .bold : .regular))
-            .foregroundColor(corDaLinha(item))
-            .underline(link)
-            .fixedSize()
-            .offset(x: CGFloat(item.x), y: CGFloat(item.y))
-            .onTapGesture {
-                if let destino = item.href {
-                    model.open(href: destino)
-                }
-            }
-    }
-
-    /// Cor da linha: a que a página pediu pelo CSS.
-    /// Só troca por cor do tema quando o texto ficaria quase invisível sobre o fundo
-    /// (contraste abaixo de 1,5 para 1). Nos outros casos, vale a cor da página.
-    /// Links sem cor própria continuam azuis.
-    private func corDaLinha(_ item: DrawItem) -> Color {
-        let padrao: Color = item.href != nil ? .blue : textoCor
-        guard let cor = item.cor else { return padrao }
-        let fundoLuminancia: Double = escuro ? 0 : 1
-        let contraste = razaoDeContraste(luminanciaRelativa(cor), fundoLuminancia)
-        if contraste < 1.5 { return padrao }
-        return Color(red: cor.r, green: cor.g, blue: cor.b)
-    }
-
-    /// Luminância relativa pela regra de acessibilidade da web (WCAG): 0 é preto, 1 é branco.
-    /// Corrige a gama do sRGB, porque o olho não percebe brilho de forma linear.
-    private func luminanciaRelativa(_ cor: CorTexto) -> Double {
-        func linear(_ c: Double) -> Double {
-            c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
-        }
-        return 0.2126 * linear(cor.r) + 0.7152 * linear(cor.g) + 0.0722 * linear(cor.b)
-    }
-
-    /// Razão de contraste entre duas luminâncias relativas. Vai de 1 (igual) a 21 (preto contra branco).
-    private func razaoDeContraste(_ a: Double, _ b: Double) -> Double {
-        (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
     // MARK: - Barra
