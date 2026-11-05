@@ -6,6 +6,9 @@
 //! `:first-child` (só no alvo ou no irmão ao lado).
 //! Pseudo de interação (hover, focus etc.) nunca casa.
 //! `@media` por largura, com px, em e calc(a + b) / calc(a - b).
+//! Esconde texto com `display: none`, `visibility: hidden`, `clip` de área
+//! zero (texto de leitor de tela), `clip-path: inset(50%)` e
+//! `transform: translate(-100%)` (gaveta fora da tela).
 //! Regras com `display: none` que o motor não aplica ficam em `ignoradas`.
 
 use std::collections::HashMap;
@@ -158,6 +161,8 @@ struct Decl {
     margem_base: Option<f32>,
     cor: Option<(u8, u8, u8)>,
     oculto: Option<bool>,
+    /// `true` quando visibility, clip, clip-path ou transform escondem o texto.
+    escondido_visual: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -434,6 +439,29 @@ fn declaracoes(texto: &str) -> Decl {
             "display" => {
                 d.oculto = Some(valor.eq_ignore_ascii_case("none"));
             }
+            "visibility" => {
+                let v = valor.to_ascii_lowercase();
+                if v == "hidden" || v == "collapse" {
+                    d.escondido_visual = Some(true);
+                } else if v == "visible" {
+                    d.escondido_visual = Some(false);
+                }
+            }
+            "clip" => {
+                if clip_escondido(valor) {
+                    d.escondido_visual = Some(true);
+                }
+            }
+            "clip-path" => {
+                if inset_escondido(valor) {
+                    d.escondido_visual = Some(true);
+                }
+            }
+            "transform" => {
+                if transform_fora_da_tela(valor) {
+                    d.escondido_visual = Some(true);
+                }
+            }
             "color" => {
                 if let Some(c) = cor(valor) {
                     d.cor = Some(c);
@@ -464,6 +492,9 @@ fn aplica(dst: &mut Decl, src: &Decl) {
     if src.oculto.is_some() {
         dst.oculto = src.oculto;
     }
+    if src.escondido_visual.is_some() {
+        dst.escondido_visual = src.escondido_visual;
+    }
 }
 
 fn para_estilo(d: Decl) -> Estilo {
@@ -473,7 +504,7 @@ fn para_estilo(d: Decl) -> Estilo {
         margem_topo: d.margem_topo,
         margem_base: d.margem_base,
         cor: d.cor,
-        oculto: d.oculto == Some(true),
+        oculto: d.oculto == Some(true) || d.escondido_visual == Some(true),
     }
 }
 
@@ -513,6 +544,68 @@ fn calculo(texto: &str) -> Option<f32> {
         return None;
     };
     Some(unidade(esq.trim())? + sinal * unidade(dir.trim())?)
+}
+
+/// `rect(topo, direita, base, esquerda)` com área de no máximo 1 px.
+/// É o padrão de texto que só existe para leitor de tela.
+fn clip_escondido(valor: &str) -> bool {
+    let v = valor.trim().to_ascii_lowercase();
+    let args = match v.strip_prefix("rect(").and_then(|r| r.strip_suffix(')')) {
+        Some(a) => a,
+        None => return false,
+    };
+    let nums: Option<Vec<f32>> = args
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(unidade)
+        .collect();
+    match nums {
+        Some(n) if n.len() == 4 => {
+            (n[2] - n[0]).abs() <= 1.0 && (n[1] - n[3]).abs() <= 1.0
+        }
+        _ => false,
+    }
+}
+
+/// `inset(50%)` ou mais: o recorte deixa o texto invisível.
+fn inset_escondido(valor: &str) -> bool {
+    let v = valor.trim().to_ascii_lowercase();
+    let args = match v.strip_prefix("inset(").and_then(|r| r.split(')').next()) {
+        Some(a) => a,
+        None => return false,
+    };
+    let primeiro = args.split_whitespace().next().unwrap_or("");
+    match primeiro.strip_suffix('%').and_then(|n| n.parse::<f32>().ok()) {
+        Some(p) => p >= 50.0,
+        None => false,
+    }
+}
+
+/// `translate(-100%)` e variantes: leva o elemento para fora da tela.
+fn transform_fora_da_tela(valor: &str) -> bool {
+    let v = valor.trim().to_ascii_lowercase();
+    let nome_ok = ["translate(", "translatex(", "translate3d("]
+        .iter()
+        .any(|p| v.starts_with(*p));
+    if !nome_ok {
+        return false;
+    }
+    let dentro = match v.split_once('(') {
+        Some((_, r)) => r,
+        None => return false,
+    };
+    let primeiro = dentro
+        .split(|c: char| c == ',' || c == ')')
+        .next()
+        .unwrap_or("")
+        .trim();
+    match primeiro
+        .strip_suffix('%')
+        .and_then(|n| n.trim().parse::<f32>().ok())
+    {
+        Some(p) => p <= -100.0,
+        None => false,
+    }
 }
 
 fn peso(v: &str) -> Option<bool> {
@@ -1262,5 +1355,50 @@ mod testes {
         let f = Folha::parse("@media print { p { display: none } }");
         assert_eq!(f.ignoradas.len(), 1);
         assert!(f.ignoradas[0].motivo.contains("print"));
+    }
+
+    #[test]
+    fn visibility_hidden_esconde() {
+        let alvo = info("div", "", &[], &[]);
+        assert!(oculto("div { visibility: hidden }", &alvo, &[], &[]));
+    }
+
+    #[test]
+    fn visibility_visible_desfaz_na_ordem() {
+        let alvo = info("div", "", &[], &[]);
+        assert!(!oculto(
+            "div { visibility: hidden } div { visibility: visible }",
+            &alvo,
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn clip_de_leitor_de_tela_esconde() {
+        let alvo = info("span", "", &[], &[]);
+        assert!(oculto("span { clip: rect(0,0,0,0) }", &alvo, &[], &[]));
+        assert!(oculto("span { clip: rect(1px, 1px, 1px, 1px) }", &alvo, &[], &[]));
+    }
+
+    #[test]
+    fn clip_com_area_grande_nao_esconde() {
+        let alvo = info("span", "", &[], &[]);
+        assert!(!oculto("span { clip: rect(0, 100px, 100px, 0) }", &alvo, &[], &[]));
+    }
+
+    #[test]
+    fn clip_path_inset_50_esconde() {
+        let alvo = info("span", "", &[], &[]);
+        assert!(oculto("span { clip-path: inset(50%) }", &alvo, &[], &[]));
+        assert!(!oculto("span { clip-path: inset(10%) }", &alvo, &[], &[]));
+    }
+
+    #[test]
+    fn transform_fora_da_tela_esconde() {
+        let nav = info("nav", "", &[], &[]);
+        assert!(oculto("nav { transform: translate3d(-100%, 0, 0) }", &nav, &[], &[]));
+        assert!(!oculto("nav { transform: translate3d(20%, 0, 0) }", &nav, &[], &[]));
+        assert!(!oculto("nav { transform: rotate(90deg) }", &nav, &[], &[]));
     }
 }
