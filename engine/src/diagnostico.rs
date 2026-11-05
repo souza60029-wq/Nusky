@@ -6,9 +6,10 @@
 //! Passa o HTML pelo mesmo parser, CSS e layout do motor e descreve em texto curto
 //! o que aconteceu: quanto texto o HTML tem, quanto foi ocultado por CSS, quanto foi
 //! desenhado, quais blocos de texto não chegaram à tela, onde estão os elementos ocultos,
-//! quais regras `display: none` o motor não aplicou (com o motivo) e quais regras que
+//! quais regras `display: none` o motor não aplicou (com o motivo), quais regras que
 //! casam com um bloco de texto têm declarações que costumam esconder texto
-//! (posição fora da tela, tamanho zero, cor transparente etc.), com o texto da regra.
+//! (posição fora da tela, tamanho zero, cor transparente etc.) e, para textos curtos
+//! visíveis (menus e rótulos), todas as regras que casam com eles, com as declarações.
 //! Usa a mesma lista de irmãos anteriores do layout, para que seletores `+`, `~`
 //! e `:first-child` deem o mesmo resultado na tela e no relatório.
 //! Só lê: não altera a renderização.
@@ -38,6 +39,10 @@ const MAX_IGNORADAS_POR_MOTIVO: usize = 6;
 const LIMITE_SELETOR: usize = 140;
 const MAX_REGRAS_BLOCO: usize = 6;
 const MAX_ACHADOS: usize = 30;
+const MAX_BLOCOS_CURTOS: usize = 8;
+const MAX_REGRAS_CURTAS: usize = 10;
+const LIMITE_TEXTO_CURTO: usize = 40;
+const LIMITE_DECLARACAO: usize = 120;
 
 /// Bloco de texto encontrado no HTML.
 struct Bloco {
@@ -48,6 +53,9 @@ struct Bloco {
     oculto: bool,
     /// Regras (do próprio bloco ou de ancestrais) com declarações que costumam esconder texto.
     achados: Vec<String>,
+    /// Todas as regras que casam com o bloco ou com ancestrais, com as declarações.
+    /// Ordem: o próprio bloco, depois os ancestrais do mais próximo para o mais distante.
+    regras: Vec<String>,
 }
 
 /// Bloco aberto durante a percorrida. Acumula o texto visível dele.
@@ -214,6 +222,40 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         linhas.push(format!("… e mais {} blocos", com_regras.len() - MAX_ACHADOS));
     }
 
+    // Textos curtos visíveis (menus, rótulos, títulos). Mostra todas as regras que casam,
+    // com as declarações, mesmo as que o diagnóstico não reconhece como suspeitas.
+    let curtos: Vec<&Bloco> = d
+        .blocos
+        .iter()
+        .filter(|b| {
+            !b.oculto
+                && !b.chave.is_empty()
+                && !b.regras.is_empty()
+                && b.exibir.chars().count() <= LIMITE_TEXTO_CURTO
+        })
+        .collect();
+
+    linhas.push(String::new());
+    linhas.push(format!(
+        "REGRAS QUE ATINGEM TEXTOS CURTOS VISÍVEIS: {} blocos",
+        curtos.len()
+    ));
+    linhas.push(
+        "  Regras que casam com o bloco ou com ancestrais, da mais próxima para a mais distante.".to_string(),
+    );
+    for b in curtos.iter().take(MAX_BLOCOS_CURTOS) {
+        linhas.push(format!("[VISÍVEL no Nusky] {}: \"{}\"", b.caminho, b.exibir));
+        for regra in b.regras.iter().take(MAX_REGRAS_CURTAS) {
+            linhas.push(format!("    {}", regra));
+        }
+        if b.regras.len() > MAX_REGRAS_CURTAS {
+            linhas.push(format!("    … e mais {}", b.regras.len() - MAX_REGRAS_CURTAS));
+        }
+    }
+    if curtos.len() > MAX_BLOCOS_CURTOS {
+        linhas.push(format!("… e mais {} blocos", curtos.len() - MAX_BLOCOS_CURTOS));
+    }
+
     linhas.push(String::new());
     linhas.push("ÁRVORE (até nível 4)".to_string());
     let mut arvore: Vec<String> = Vec::new();
@@ -259,10 +301,10 @@ impl Diagnostico {
         let caminho = caminho_de(&self.pais, &info);
         let estilo = self.estilo(el, &info, irmaos);
         let e_bloco = BLOCK_TAGS.contains(&el.tag.as_str());
-        let achados = if e_bloco {
-            self.achados(&info, irmaos)
+        let (achados, regras) = if e_bloco {
+            self.regras_do_bloco(&info, irmaos)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         if estilo.oculto {
@@ -277,6 +319,7 @@ impl Diagnostico {
                     chave: texto_conferido(&texto),
                     oculto: true,
                     achados,
+                    regras,
                 });
             }
             return info;
@@ -289,6 +332,7 @@ impl Diagnostico {
                 chave: String::new(),
                 oculto: false,
                 achados,
+                regras,
             });
             let indice = self.blocos.len() - 1;
             self.abertos.push(Quadro { indice, texto: String::new() });
@@ -318,38 +362,37 @@ impl Diagnostico {
         css::estilo_completo(&self.folha, info, &self.pais, irmaos, el.attr("style"))
     }
 
-    /// Regras que casam com o elemento ou com algum ancestral e têm declarações que
-    /// costumam esconder texto. Mostra o texto da regra, não só o nome do elemento.
-    fn achados(&self, info: &Info, irmaos: &[Info]) -> Vec<String> {
-        let mut linhas: Vec<String> = Vec::new();
+    /// Regras que casam com o bloco ou com algum ancestral. Devolve duas listas:
+    /// as que têm declaração que costuma esconder texto, e todas, com as declarações.
+    fn regras_do_bloco(&self, info: &Info, irmaos: &[Info]) -> (Vec<String>, Vec<String>) {
+        let mut suspeitas: Vec<String> = Vec::new();
+        let mut todas: Vec<String> = Vec::new();
         if !self.tem_css {
-            return linhas;
+            return (suspeitas, todas);
         }
+
+        let mut regras: Vec<(String, String)> = Vec::new();
         for c in css::regras_casadas(&self.folha, info, &self.pais, irmaos) {
-            let sus = declaracoes_suspeitas(&c.declaracoes);
-            if !sus.is_empty() {
-                linhas.push(format!(
-                    "{}  →  {}",
-                    seletor_exibido(&c.seletor),
-                    sus.join("; ")
+            regras.push((seletor_exibido(&c.seletor), c.declaracoes));
+        }
+        for (k, anc) in self.pais.iter().enumerate().rev() {
+            for c in css::regras_casadas(&self.folha, anc, &self.pais[..k], &self.pais_irmaos[k]) {
+                regras.push((
+                    format!("{}  (ancestral {})", seletor_exibido(&c.seletor), rotulo(anc)),
+                    c.declaracoes,
                 ));
             }
         }
-        for (k, anc) in self.pais.iter().enumerate() {
-            for c in css::regras_casadas(&self.folha, anc, &self.pais[..k], &self.pais_irmaos[k]) {
-                let sus = declaracoes_suspeitas(&c.declaracoes);
-                if !sus.is_empty() {
-                    linhas.push(format!(
-                        "{}  (ancestral {})  →  {}",
-                        seletor_exibido(&c.seletor),
-                        rotulo(anc),
-                        sus.join("; ")
-                    ));
-                }
+
+        for (seletor, corpo) in &regras {
+            let sus = declaracoes_suspeitas(corpo);
+            if !sus.is_empty() {
+                suspeitas.push(format!("{}  →  {}", seletor, sus.join("; ")));
             }
+            todas.push(format!("{}  →  {}", seletor, cortar(corpo, LIMITE_DECLARACAO)));
         }
-        linhas.truncate(MAX_REGRAS_BLOCO);
-        linhas
+        suspeitas.truncate(MAX_REGRAS_BLOCO);
+        (suspeitas, todas)
     }
 }
 
@@ -468,15 +511,20 @@ fn texto_conferido(texto: &str) -> String {
         .collect()
 }
 
-/// Seletor com espaços normalizados, cortado para caber numa linha.
-fn seletor_exibido(s: &str) -> String {
+/// Texto com espaços normalizados, cortado no limite dado (com reticências).
+fn cortar(s: &str, limite: usize) -> String {
     let junto = s.split_whitespace().collect::<Vec<&str>>().join(" ");
-    if junto.chars().count() > LIMITE_SELETOR {
-        let curto: String = junto.chars().take(LIMITE_SELETOR).collect();
+    if junto.chars().count() > limite {
+        let curto: String = junto.chars().take(limite).collect();
         format!("{}…", curto)
     } else {
         junto
     }
+}
+
+/// Seletor com espaços normalizados, cortado para caber numa linha.
+fn seletor_exibido(s: &str) -> String {
+    cortar(s, LIMITE_SELETOR)
 }
 
 /// Agrupa as regras ignoradas pelo motivo. Grupos maiores vêm primeiro.
@@ -661,6 +709,13 @@ mod tests {
     fn regra_de_ancestral_aparece_no_bloco() {
         let r = rel("<style>div.x { text-indent: -9999px }</style><div class=\"x\"><p>abc</p></div>");
         assert!(r.contains("(ancestral div.x)"));
+    }
+
+    #[test]
+    fn texto_curto_mostra_todas_as_regras_que_casam() {
+        let r = rel("<style>li.x { color: red }</style><ul><li class=\"x\">Idioma</li></ul>");
+        assert!(r.contains("REGRAS QUE ATINGEM TEXTOS CURTOS VISÍVEIS: 1 blocos"));
+        assert!(r.contains("color: red"));
     }
 
     #[test]
