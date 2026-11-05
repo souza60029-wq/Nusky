@@ -4,7 +4,8 @@
 
 //! Layout de bloco mínimo.
 //! Empilha blocos verticalmente e quebra o texto em linhas por palavras.
-//! Tabelas (`<table>`) viram linhas e colunas: células lado a lado, com `colspan`.
+//! Tabelas (`<table>`) viram linhas e colunas: células lado a lado, com `colspan`,
+//! e legenda (`<caption>`) acima das linhas.
 //! Links (`<a href>`) viram comandos com o destino preenchido.
 //! Aplica CSS básico (tamanho, negrito, margens, display: none e cor), lido das tags
 //! <style> e dos atributos style, id e class. Seletores compostos (descendente, filho,
@@ -353,11 +354,29 @@ fn tratar_elemento(
     }
 }
 
-/// Desenha uma tabela. Cada linha ocupa a altura da célula mais alta.
+/// Desenha uma tabela. A legenda (caption) vai primeiro, na largura toda.
+/// Depois, cada linha ocupa a altura da célula mais alta.
 /// Colunas são dimensionadas pelo texto de cada uma, dentro da largura disponível.
 fn layout_table(el: &Element, style: Style, link: Option<&str>, ctx: &mut Ctx<'_>) {
     let mut linhas: Vec<Linha<'_>> = Vec::new();
-    coletar_linhas(&el.children, None, style, &mut linhas, ctx);
+    let mut legendas: Vec<(&Element, Style)> = Vec::new();
+    coletar_linhas(&el.children, None, style, &mut linhas, &mut legendas, ctx);
+
+    let x_base = ctx.x0;
+    let w_base = ctx.width;
+
+    for &(legenda, estilo) in legendas.iter() {
+        let info = info_do_elemento(legenda, ctx.folha.nomes_atributos());
+        ctx.pais.push(info);
+        let mut buf: Vec<Span> = Vec::new();
+        layout_children(&legenda.children, estilo, link, &mut buf, ctx);
+        flush_inline(&mut buf, estilo, ctx);
+        ctx.pais.pop();
+    }
+    if !legendas.is_empty() {
+        ctx.y += LINHA_FOLGA;
+    }
+
     if linhas.is_empty() {
         return;
     }
@@ -366,8 +385,6 @@ fn layout_table(el: &Element, style: Style, link: Option<&str>, ctx: &mut Ctx<'_
         return;
     }
 
-    let x_base = ctx.x0;
-    let w_base = ctx.width;
     for linha in &linhas {
         let topo = ctx.y;
         let mut fundo = topo;
@@ -409,12 +426,14 @@ fn layout_table(el: &Element, style: Style, link: Option<&str>, ctx: &mut Ctx<'_
 }
 
 /// Junta as linhas de uma tabela, descendo por thead, tbody e tfoot.
+/// Legendas (caption) vão para `legendas`, com o estilo já calculado.
 /// Linhas e células ocultas pelo CSS ficam de fora. Linhas sem texto também.
 fn coletar_linhas<'a>(
     nodes: &'a [Node],
     grupo: Option<&'a Element>,
     style: Style,
     linhas: &mut Vec<Linha<'a>>,
+    legendas: &mut Vec<(&'a Element, Style)>,
     ctx: &mut Ctx<'_>,
 ) {
     let guarda_irmaos = ctx.folha.precisa_irmaos();
@@ -435,8 +454,11 @@ fn coletar_linhas<'a>(
             info
         } else if is_row_group(tag) {
             ctx.pais.push(info);
-            coletar_linhas(&el.children, Some(el), style, linhas, ctx);
+            coletar_linhas(&el.children, Some(el), style, linhas, legendas, ctx);
             ctx.pais.pop().unwrap_or_default()
+        } else if tag == "caption" {
+            legendas.push((el, aplicar(style, &css)));
+            info
         } else if tag == "tr" {
             ctx.pais.push(info);
             let celulas = coletar_celulas(el, aplicar(style, &css), ctx);
@@ -499,10 +521,15 @@ fn span_da_celula(el: &Element) -> usize {
         .clamp(1, MAX_COLUNAS)
 }
 
-/// Mede o texto da célula: (maior palavra, texto numa linha, sem texto).
-fn medir_celula(el: &Element, estilo: Style, ctx: &Ctx<'_>) -> (f32, f32, bool) {
+/// Mede o texto visível da célula: (maior palavra, texto numa linha, sem texto).
+/// Texto escondido pelo CSS não entra na conta, para não inflar a coluna.
+fn medir_celula(el: &Element, estilo: Style, ctx: &mut Ctx<'_>) -> (f32, f32, bool) {
+    let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+    ctx.pais.push(info);
     let mut texto = String::new();
-    texto_do_no(&el.children, &mut texto);
+    texto_visivel(&el.children, ctx, &mut texto);
+    ctx.pais.pop();
+
     let palavras: Vec<&str> = texto.split_whitespace().collect();
     if palavras.is_empty() {
         return (0.0, 0.0, true);
@@ -515,18 +542,33 @@ fn medir_celula(el: &Element, estilo: Style, ctx: &Ctx<'_>) -> (f32, f32, bool) 
     (minimo, ideal, false)
 }
 
-/// Junta o texto de uma subárvore, sem o conteúdo de script e style.
+/// Junta o texto que aparece de uma subárvore, respeitando o CSS e sem script e style.
 /// Usado só para medir: o desenho passa pelo layout normal.
-fn texto_do_no(nodes: &[Node], saida: &mut String) {
-    for node in nodes {
+fn texto_visivel(nodes: &[Node], ctx: &mut Ctx<'_>, saida: &mut String) {
+    let guarda_irmaos = ctx.folha.precisa_irmaos();
+    let ultimo_idx = nodes.iter().rposition(|n| matches!(n, Node::Element(_)));
+    let mut irmaos: Vec<Info> = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
         match node {
             Node::Text(t) => {
                 saida.push_str(t);
                 saida.push(' ');
             }
             Node::Element(el) => {
-                if !SKIP_TAGS.contains(&el.tag.as_str()) {
-                    texto_do_no(&el.children, saida);
+                let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+                let ultimo = Some(i) == ultimo_idx;
+                let css = estilo_do_elemento(el, &info, &irmaos, ultimo, ctx);
+                let visivel = !SKIP_TAGS.contains(&el.tag.as_str()) && !css.oculto;
+                if visivel {
+                    if el.tag == "br" {
+                        saida.push(' ');
+                    }
+                    ctx.pais.push(info.clone());
+                    texto_visivel(&el.children, ctx, saida);
+                    ctx.pais.pop();
+                }
+                if guarda_irmaos {
+                    irmaos.push(info);
                 }
             }
         }
@@ -1046,5 +1088,43 @@ mod tests {
         );
         let textos: Vec<&str> = cmds.iter().map(text_of).collect();
         assert_eq!(textos, vec!["antes", "meio", "depois"]);
+    }
+
+    #[test]
+    fn caption_is_drawn_above_the_rows() {
+        let cmds = run(
+            "<table><caption>Título</caption><tr><td>a</td></tr></table>",
+            400.0,
+        );
+        let pos: Vec<(&str, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { text, y, .. } => (text.as_str(), *y),
+            })
+            .collect();
+        assert_eq!(pos.len(), 2);
+        assert_eq!(pos[0].0, "Título");
+        assert_eq!(pos[1].0, "a");
+        assert!(pos[0].1 < pos[1].1);
+    }
+
+    #[test]
+    fn hidden_text_does_not_widen_the_column() {
+        // "b" fica na segunda coluna. Se o texto escondido contasse,
+        // a primeira coluna ocuparia quase toda a largura e "b" sairia longe.
+        let cmds = run(
+            r#"<style>.x { display: none }</style><table><tr><td><span class="x">muito longo texto aqui</span>a</td><td>b</td></tr></table>"#,
+            400.0,
+        );
+        let pos: Vec<(&str, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { text, x, .. } => (text.as_str(), *x),
+            })
+            .collect();
+        assert_eq!(pos.len(), 2);
+        assert_eq!(pos[0].0, "a");
+        assert_eq!(pos[1].0, "b");
+        assert!(pos[1].1 < 300.0);
     }
 }
