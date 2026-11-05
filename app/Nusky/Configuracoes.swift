@@ -45,11 +45,11 @@ struct Configuracoes: View {
                 }
 
                 Section {
-                    Toggle(versaoDesktop ? "Solicitar versão mobile" : "Solicitar versão desktop", isOn: $versaoDesktop)
+                    Toggle("Solicitar versão desktop", isOn: $versaoDesktop)
                 } header: {
                     Text("Site")
                 } footer: {
-                    Text("Vale para as próximas páginas baixadas. Para aplicar na página aberta, recarregue.")
+                    Text("Ligado: pede a versão desktop. Desligado: pede a versão para celular. Ao fechar esta tela, a página aberta recarrega se a opção mudou.")
                 }
 
                 Section {
