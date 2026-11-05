@@ -4,6 +4,7 @@
 
 //! Layout de bloco mínimo.
 //! Empilha blocos verticalmente e quebra o texto em linhas por palavras.
+//! Tabelas (`<table>`) viram linhas e colunas: células lado a lado, com `colspan`.
 //! Links (`<a href>`) viram comandos com o destino preenchido.
 //! Aplica CSS básico (tamanho, negrito, margens, display: none e cor), lido das tags
 //! <style> e dos atributos style, id e class. Seletores compostos (descendente, filho,
@@ -40,6 +41,12 @@ pub enum DrawCommand {
 const PAGE_MARGIN: f32 = 8.0;
 const BASE_FONT: f32 = 16.0;
 const LINE_HEIGHT: f32 = 1.3;
+/// Espaço entre colunas de uma tabela.
+const CELL_GAP: f32 = 8.0;
+/// Folga vertical entre linhas de uma tabela.
+const LINHA_FOLGA: f32 = 4.0;
+/// Limite de colunas, para uma tabela malformada não ocupar memória demais.
+const MAX_COLUNAS: usize = 50;
 
 /// Elementos cujo conteúdo não aparece na página.
 const SKIP_TAGS: &[&str] = &["head", "script", "style", "title"];
@@ -78,6 +85,11 @@ fn is_block(tag: &str) -> bool {
             | "ol"
             | "li"
     )
+}
+
+/// Grupos de linhas de uma tabela. Não criam caixa própria.
+fn is_row_group(tag: &str) -> bool {
+    matches!(tag, "thead" | "tbody" | "tfoot")
 }
 
 /// Estilo padrão por tag. Valores em pontos. Sem cor: a cor vem do pai ou do CSS.
@@ -130,6 +142,27 @@ struct Ctx<'a> {
     y: f32,
     width: f32,
     commands: Vec<DrawCommand>,
+}
+
+/// Célula de tabela já resolvida: CSS calculado, colunas que ocupa e medidas do texto.
+struct Celula<'a> {
+    el: &'a Element,
+    estilo: Style,
+    span: usize,
+    /// Maior palavra, em pontos: a coluna não pode ficar menor que isso.
+    minimo: f32,
+    /// Texto inteiro numa linha, em pontos: largura ideal.
+    ideal: f32,
+    /// Sem texto visível: não ocupa largura nem altura.
+    vazia: bool,
+}
+
+/// Linha de tabela já resolvida.
+struct Linha<'a> {
+    el: &'a Element,
+    /// Grupo (thead, tbody ou tfoot) que contém a linha, se houver.
+    grupo: Option<&'a Element>,
+    celulas: Vec<Celula<'a>>,
 }
 
 /// Gera os comandos de desenho para uma lista de nós de topo.
@@ -276,6 +309,17 @@ fn tratar_elemento(
         return info;
     }
 
+    if el.tag == "table" {
+        flush_inline(buf, style, ctx);
+        let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
+        ctx.y += block.margin_top;
+        ctx.pais.push(info);
+        layout_table(el, block, link, ctx);
+        let info = ctx.pais.pop().unwrap_or_default();
+        ctx.y += block.margin_bottom;
+        return info;
+    }
+
     // Âncoras sem destino real (vazias ou "#topo") não viram links.
     let own_link = if el.tag == "a" {
         el.attr("href")
@@ -307,6 +351,254 @@ fn tratar_elemento(
         layout_children(&el.children, inline, child_link, buf, ctx);
         ctx.pais.pop().unwrap_or_default()
     }
+}
+
+/// Desenha uma tabela. Cada linha ocupa a altura da célula mais alta.
+/// Colunas são dimensionadas pelo texto de cada uma, dentro da largura disponível.
+fn layout_table(el: &Element, style: Style, link: Option<&str>, ctx: &mut Ctx<'_>) {
+    let mut linhas: Vec<Linha<'_>> = Vec::new();
+    coletar_linhas(&el.children, None, style, &mut linhas, ctx);
+    if linhas.is_empty() {
+        return;
+    }
+    let larguras = larguras_das_colunas(&linhas, ctx.width);
+    if larguras.is_empty() {
+        return;
+    }
+
+    let x_base = ctx.x0;
+    let w_base = ctx.width;
+    for linha in &linhas {
+        let topo = ctx.y;
+        let mut fundo = topo;
+        if let Some(grupo) = linha.grupo {
+            let info = info_do_elemento(grupo, ctx.folha.nomes_atributos());
+            ctx.pais.push(info);
+        }
+        let info = info_do_elemento(linha.el, ctx.folha.nomes_atributos());
+        ctx.pais.push(info);
+
+        let mut col = 0usize;
+        for celula in &linha.celulas {
+            let fim = col + celula.span;
+            let x_rel: f32 = larguras[..col].iter().sum();
+            let largura: f32 = larguras[col..fim].iter().sum::<f32>() - CELL_GAP;
+            ctx.x0 = x_base + x_rel;
+            ctx.width = largura.max(0.0);
+            ctx.y = topo;
+
+            let info = info_do_elemento(celula.el, ctx.folha.nomes_atributos());
+            ctx.pais.push(info);
+            let mut buf_celula: Vec<Span> = Vec::new();
+            layout_children(&celula.el.children, celula.estilo, link, &mut buf_celula, ctx);
+            flush_inline(&mut buf_celula, celula.estilo, ctx);
+            let _ = ctx.pais.pop();
+
+            fundo = fundo.max(ctx.y);
+            col = fim;
+        }
+
+        let _ = ctx.pais.pop();
+        if linha.grupo.is_some() {
+            let _ = ctx.pais.pop();
+        }
+        ctx.x0 = x_base;
+        ctx.width = w_base;
+        ctx.y = fundo + LINHA_FOLGA;
+    }
+}
+
+/// Junta as linhas de uma tabela, descendo por thead, tbody e tfoot.
+/// Linhas e células ocultas pelo CSS ficam de fora. Linhas sem texto também.
+fn coletar_linhas<'a>(
+    nodes: &'a [Node],
+    grupo: Option<&'a Element>,
+    style: Style,
+    linhas: &mut Vec<Linha<'a>>,
+    ctx: &mut Ctx<'_>,
+) {
+    let guarda_irmaos = ctx.folha.precisa_irmaos();
+    let ultimo_idx = nodes.iter().rposition(|n| matches!(n, Node::Element(_)));
+    let mut irmaos: Vec<Info> = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        let el: &'a Element = match node {
+            Node::Element(el) => el,
+            Node::Text(_) => continue,
+        };
+        let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+        let ultimo = Some(i) == ultimo_idx;
+        let css = estilo_do_elemento(el, &info, &irmaos, ultimo, ctx);
+        let tag = el.tag.as_str();
+        let visivel = !SKIP_TAGS.contains(&tag) && !css.oculto;
+
+        let info = if !visivel {
+            info
+        } else if is_row_group(tag) {
+            ctx.pais.push(info);
+            coletar_linhas(&el.children, Some(el), style, linhas, ctx);
+            ctx.pais.pop().unwrap_or_default()
+        } else if tag == "tr" {
+            ctx.pais.push(info);
+            let celulas = coletar_celulas(el, aplicar(style, &css), ctx);
+            if !celulas.iter().all(|c| c.vazia) {
+                linhas.push(Linha { el, grupo, celulas });
+            }
+            ctx.pais.pop().unwrap_or_default()
+        } else {
+            info
+        };
+
+        if guarda_irmaos {
+            irmaos.push(info);
+        }
+    }
+}
+
+/// Junta as células de uma linha, com CSS e medidas de cada uma.
+fn coletar_celulas<'a>(
+    linha: &'a Element,
+    estilo_linha: Style,
+    ctx: &mut Ctx<'_>,
+) -> Vec<Celula<'a>> {
+    let guarda_irmaos = ctx.folha.precisa_irmaos();
+    let ultimo_idx = linha.children.iter().rposition(|n| matches!(n, Node::Element(_)));
+    let mut irmaos: Vec<Info> = Vec::new();
+    let mut celulas: Vec<Celula<'a>> = Vec::new();
+    for (i, node) in linha.children.iter().enumerate() {
+        let el: &'a Element = match node {
+            Node::Element(el) => el,
+            Node::Text(_) => continue,
+        };
+        let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+        let ultimo = Some(i) == ultimo_idx;
+        let css = estilo_do_elemento(el, &info, &irmaos, ultimo, ctx);
+        let tag = el.tag.as_str();
+        let visivel = !SKIP_TAGS.contains(&tag) && !css.oculto;
+
+        if visivel && (tag == "td" || tag == "th") {
+            // Cabeçalho (th) sai em negrito, como no navegador.
+            let base = if tag == "th" { Style { bold: true, ..estilo_linha } } else { estilo_linha };
+            let estilo = aplicar(base, &css);
+            let span = span_da_celula(el);
+            let (minimo, ideal, vazia) = medir_celula(el, estilo, ctx);
+            celulas.push(Celula { el, estilo, span, minimo, ideal, vazia });
+        }
+
+        if guarda_irmaos {
+            irmaos.push(info);
+        }
+    }
+    celulas
+}
+
+/// Quantas colunas a célula ocupa. Valor inválido vira 1.
+fn span_da_celula(el: &Element) -> usize {
+    el.attr("colspan")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, MAX_COLUNAS)
+}
+
+/// Mede o texto da célula: (maior palavra, texto numa linha, sem texto).
+fn medir_celula(el: &Element, estilo: Style, ctx: &Ctx<'_>) -> (f32, f32, bool) {
+    let mut texto = String::new();
+    texto_do_no(&el.children, &mut texto);
+    let palavras: Vec<&str> = texto.split_whitespace().collect();
+    if palavras.is_empty() {
+        return (0.0, 0.0, true);
+    }
+    let ideal = ctx.measurer.measure(&palavras.join(" "), estilo.font_size, estilo.bold);
+    let minimo = palavras
+        .iter()
+        .map(|p| ctx.measurer.measure(p, estilo.font_size, estilo.bold))
+        .fold(0.0_f32, f32::max);
+    (minimo, ideal, false)
+}
+
+/// Junta o texto de uma subárvore, sem o conteúdo de script e style.
+/// Usado só para medir: o desenho passa pelo layout normal.
+fn texto_do_no(nodes: &[Node], saida: &mut String) {
+    for node in nodes {
+        match node {
+            Node::Text(t) => {
+                saida.push_str(t);
+                saida.push(' ');
+            }
+            Node::Element(el) => {
+                if !SKIP_TAGS.contains(&el.tag.as_str()) {
+                    texto_do_no(&el.children, saida);
+                }
+            }
+        }
+    }
+}
+
+/// Largura de cada coluna. A soma fica igual à largura disponível.
+/// Com espaço de sobra, a sobra é repartida pelo tamanho do texto.
+/// Sem espaço, cada coluna fica entre a maior palavra e o texto inteiro.
+fn larguras_das_colunas(linhas: &[Linha<'_>], largura: f32) -> Vec<f32> {
+    let n = linhas
+        .iter()
+        .map(|l| l.celulas.iter().map(|c| c.span).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut minimas = vec![0.0_f32; n];
+    let mut ideais = vec![0.0_f32; n];
+    for linha in linhas {
+        let mut col = 0usize;
+        for c in &linha.celulas {
+            if c.span == 1 && !c.vazia {
+                minimas[col] = minimas[col].max(c.minimo + CELL_GAP);
+                ideais[col] = ideais[col].max(c.ideal + CELL_GAP);
+            }
+            col += c.span;
+        }
+    }
+
+    // Célula que cobre várias colunas: a diferença é repartida entre elas.
+    for linha in linhas {
+        let mut col = 0usize;
+        for c in &linha.celulas {
+            if c.span > 1 && !c.vazia {
+                let fim = col + c.span;
+                let k = c.span as f32;
+                let atual_min: f32 = minimas[col..fim].iter().sum();
+                let atual_ideal: f32 = ideais[col..fim].iter().sum();
+                let falta_min = (c.minimo + CELL_GAP - atual_min).max(0.0) / k;
+                let falta_ideal = (c.ideal + CELL_GAP - atual_ideal).max(0.0) / k;
+                for i in col..fim {
+                    minimas[i] += falta_min;
+                    ideais[i] += falta_ideal;
+                }
+            }
+            col += c.span;
+        }
+    }
+
+    let soma_min: f32 = minimas.iter().sum();
+    let soma_ideal: f32 = ideais.iter().sum();
+    if soma_ideal <= 0.0 {
+        return vec![largura / n as f32; n];
+    }
+    if soma_ideal <= largura {
+        let sobra = largura - soma_ideal;
+        return ideais.iter().map(|i| *i + sobra * *i / soma_ideal).collect();
+    }
+    if soma_min <= largura {
+        let folga = largura - soma_min;
+        let faixa = soma_ideal - soma_min;
+        return minimas
+            .iter()
+            .zip(ideais.iter())
+            .map(|(m, i)| *m + folga * (*i - *m) / faixa)
+            .collect();
+    }
+    let k = largura / soma_min;
+    minimas.iter().map(|m| *m * k).collect()
 }
 
 /// Divide os trechos em palavras, mantendo o link e a cor de cada uma.
@@ -668,5 +960,91 @@ mod tests {
             400.0,
         );
         assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn table_puts_cells_side_by_side() {
+        let cmds = run(
+            r#"<table><tr><th>Capital</th><td>Brasília</td></tr></table>"#,
+            400.0,
+        );
+        let pos: Vec<(&str, f32, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { text, x, y, .. } => (text.as_str(), *x, *y),
+            })
+            .collect();
+        assert_eq!(pos.len(), 2);
+        assert_eq!(pos[0].0, "Capital");
+        assert_eq!(pos[1].0, "Brasília");
+        assert_eq!(pos[0].2, pos[1].2);
+        assert!(pos[1].1 > pos[0].1);
+    }
+
+    #[test]
+    fn table_rows_stack_vertically() {
+        let cmds = run(
+            r#"<table><tr><td>a</td></tr><tr><td>b</td></tr></table>"#,
+            400.0,
+        );
+        let ys: Vec<f32> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { y, .. } => *y,
+            })
+            .collect();
+        assert_eq!(ys.len(), 2);
+        assert!(ys[1] > ys[0]);
+    }
+
+    #[test]
+    fn th_is_bold_and_td_is_not() {
+        let cmds = run(r#"<table><tr><th>a</th><td>b</td></tr></table>"#, 400.0);
+        match (&cmds[0], &cmds[1]) {
+            (DrawCommand::Text { bold: a, .. }, DrawCommand::Text { bold: b, .. }) => {
+                assert!(*a);
+                assert!(!*b);
+            }
+        }
+    }
+
+    #[test]
+    fn colspan_cell_covers_the_row() {
+        let cmds = run(
+            r#"<table><tr><th colspan="2">Título</th></tr><tr><td>a</td><td>b</td></tr></table>"#,
+            400.0,
+        );
+        let pos: Vec<(&str, f32, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { text, x, y, .. } => (text.as_str(), *x, *y),
+            })
+            .collect();
+        let textos: Vec<&str> = pos.iter().map(|p| p.0).collect();
+        assert_eq!(textos, vec!["Título", "a", "b"]);
+        // "a" fica embaixo do título; "b" fica depois de "a" na mesma linha.
+        assert!(pos[1].2 > pos[0].2);
+        assert!(pos[2].1 > pos[1].1);
+        assert_eq!(pos[2].2, pos[1].2);
+    }
+
+    #[test]
+    fn hidden_row_takes_no_space() {
+        let cmds = run(
+            r#"<style>.oculta { display: none }</style><table><tr class="oculta"><td>a</td></tr><tr><td>b</td></tr></table>"#,
+            400.0,
+        );
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["b"]);
+    }
+
+    #[test]
+    fn text_around_table_keeps_order() {
+        let cmds = run(
+            "<p>antes</p><table><tr><td>meio</td></tr></table><p>depois</p>",
+            400.0,
+        );
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["antes", "meio", "depois"]);
     }
 }
