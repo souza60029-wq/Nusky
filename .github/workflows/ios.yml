@@ -10,6 +10,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Preparar ícone (recorte e 1024 × 1024)
+        run: |
+          ICONE=app/Nusky/Assets.xcassets/AppIcon.appiconset/icon.png
+          sips -g pixelWidth -g pixelHeight "$ICONE"
+          sips -c 1000 1000 --cropOffset 127 127 "$ICONE"
+          sips -z 1024 1024 "$ICONE"
+          sips -g pixelWidth -g pixelHeight "$ICONE"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
