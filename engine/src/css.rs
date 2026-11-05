@@ -8,7 +8,10 @@
 //! descendente (`div p`), filho direto (`div > p`) e `:not(...)`.
 //! Pseudo-classes de interação (`:hover`, `:focus`, `:active`, `:visited`) nunca casam,
 //! porque o motor não tem mouse nem estado de foco.
-//! Blocos `@media`, `@import` e `@font-face` são ignorados por inteiro.
+//! Blocos `@media` entram quando a condição casa com a largura da tela
+//! (`min-width` e `max-width`, com os tipos `screen` e `all`).
+//! Outras condições de `@media` (cor, orientação, impressão) não casam.
+//! `@import` e `@font-face` são ignorados por inteiro.
 //! Seletores com `+`, `~`, `[atributo]`, `::before` ou `:first-child` são ignorados.
 //!
 //! Propriedades: color, font-size, font-weight, margin, margin-top, margin-bottom
@@ -18,6 +21,9 @@
 //! `estilo_para` equivale a `estilo_com_pais` sem pais.
 
 use std::collections::HashMap;
+
+/// Largura usada quando o chamador não informa. É a largura do iPhone 6s (375 pt).
+pub const LARGURA_PADRAO: f32 = 375.0;
 
 /// Dados de um elemento usados para casar seletores.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -103,38 +109,109 @@ const PSEUDO_IMPOSSIVEIS: &[&str] = &[
 ];
 
 impl Folha {
+    /// Analisa o CSS com a largura padrão da tela (375 pt).
     pub fn parse(css: &str) -> Folha {
+        Folha::parse_largura(css, LARGURA_PADRAO)
+    }
+
+    /// Analisa o CSS com a largura da tela informada.
+    /// Blocos `@media` só entram se a condição casar com essa largura.
+    pub fn parse_largura(css: &str, largura: f32) -> Folha {
         let limpo = remover_comentarios(css);
         let mut regras = Vec::new();
-        let mut resto = limpo.as_str();
-
-        while let Some(abre) = resto.find('{') {
-            // Em "@import url(x); p", o seletor começa depois do último ';'.
-            let cabeca = resto[..abre].rsplit(';').next().unwrap_or("").trim();
-            let depois = &resto[abre + 1..];
-            let fim = fim_do_bloco(depois);
-            let corpo = &depois[..fim];
-            resto = depois.get(fim + 1..).unwrap_or("");
-
-            if cabeca.starts_with('@') {
-                continue;
-            }
-
-            let declaracoes = parse_declaracoes(corpo);
-            for parte in cabeca.split(',') {
-                if let Some(seletor) = parse_seletor(parte) {
-                    let ordem = regras.len();
-                    regras.push(Regra {
-                        seletor,
-                        declaracoes: declaracoes.clone(),
-                        ordem,
-                    });
-                }
-            }
-        }
-
+        ler_blocos(&limpo, largura, &mut regras);
         let indice = construir_indice(&regras);
         Folha { regras, indice }
+    }
+}
+
+/// Lê regras e blocos `@media` de um trecho de CSS. Chamado de novo dentro de cada `@media`
+/// que casa, então regras aninhadas também entram.
+fn ler_blocos(texto: &str, largura: f32, regras: &mut Vec<Regra>) {
+    let mut resto = texto;
+
+    while let Some(abre) = resto.find('{') {
+        // Em "@import url(x); p", o seletor começa depois do último ';'.
+        let cabeca = resto[..abre].rsplit(';').next().unwrap_or("").trim();
+        let depois = &resto[abre + 1..];
+        let fim = fim_do_bloco(depois);
+        let corpo = &depois[..fim];
+        resto = depois.get(fim + 1..).unwrap_or("");
+
+        if let Some(condicao) = cabeca.strip_prefix("@media") {
+            if media_casa(condicao, largura) {
+                ler_blocos(corpo, largura, regras);
+            }
+            continue;
+        }
+
+        if cabeca.starts_with('@') {
+            continue;
+        }
+
+        let declaracoes = parse_declaracoes(corpo);
+        for parte in cabeca.split(',') {
+            if let Some(seletor) = parse_seletor(parte) {
+                let ordem = regras.len();
+                regras.push(Regra {
+                    seletor,
+                    declaracoes: declaracoes.clone(),
+                    ordem,
+                });
+            }
+        }
+    }
+}
+
+/// Diz se uma lista de consultas de mídia (`screen, (max-width: 999px)`) casa com a largura.
+fn media_casa(lista: &str, largura: f32) -> bool {
+    lista
+        .split(',')
+        .any(|consulta| consulta_casa(consulta, largura))
+}
+
+/// Uma consulta de mídia, com `and`, `not` ou `only` opcionais.
+fn consulta_casa(consulta: &str, largura: f32) -> bool {
+    let minuscula = consulta.trim().to_ascii_lowercase();
+    let (negada, sem_prefixo) = if let Some(resto) = minuscula.strip_prefix("not ") {
+        (true, resto)
+    } else {
+        (false, minuscula.strip_prefix("only ").unwrap_or(minuscula.as_str()))
+    };
+    let casa = sem_prefixo
+        .split(" and ")
+        .all(|parte| condicao_casa(parte.trim(), largura));
+    casa != negada
+}
+
+/// Uma condição de uma consulta: `(min-width: 320px)`, `(max-width: 999px)` ou um tipo de mídia.
+/// Qualquer condição desconhecida não casa.
+fn condicao_casa(parte: &str, largura: f32) -> bool {
+    if let Some(dentro) = parte.strip_prefix('(').and_then(|p| p.strip_suffix(')')) {
+        let Some((nome, valor)) = dentro.split_once(':') else {
+            return false;
+        };
+        let Some(medida) = comprimento_media(valor) else {
+            return false;
+        };
+        return match nome.trim() {
+            "min-width" => largura >= medida,
+            "max-width" => largura <= medida,
+            _ => false,
+        };
+    }
+    matches!(parte, "all" | "screen")
+}
+
+/// Lê um comprimento de consulta de mídia em px ou em em (16 px por em).
+fn comprimento_media(valor: &str) -> Option<f32> {
+    let v = valor.trim();
+    if let Some(numero) = v.strip_suffix("px") {
+        numero.trim().parse::<f32>().ok()
+    } else if let Some(numero) = v.strip_suffix("em") {
+        numero.trim().parse::<f32>().ok().map(|n| n * 16.0)
+    } else {
+        None
     }
 }
 
@@ -718,5 +795,61 @@ mod testes {
     #[test]
     fn comentarios_sao_ignorados() {
         assert_eq!(estilo("/* x { */ span { color: blue }", "span").cor, Some([0, 0, 255]));
+    }
+
+    #[test]
+    fn media_max_width_casa_em_tela_pequena() {
+        let css = "@media screen and (max-width: 999px) { nav { display: none } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert!(estilo_para(&folha, "nav", None, &[], None).oculto);
+    }
+
+    #[test]
+    fn media_min_width_nao_casa_em_tela_pequena() {
+        let css = "@media (min-width: 720px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
+    }
+
+    #[test]
+    fn media_min_width_casa_em_tela_grande() {
+        let css = "@media (min-width: 320px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn media_lista_com_virgula_casa_se_uma_casar() {
+        let css = "@media print, (max-width: 500px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn media_not_inverte_a_consulta() {
+        let css = "@media not all and (min-width: 720px) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn media_condicao_desconhecida_fica_de_fora() {
+        let css = "@media (prefers-color-scheme: dark) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, None);
+    }
+
+    #[test]
+    fn media_com_em_usa_16_px() {
+        // 30em = 480 px, então 375 pt casa com max-width.
+        let css = "@media (max-width: 30em) { p { color: red } }";
+        let folha = Folha::parse_largura(css, 375.0);
+        assert_eq!(estilo_para(&folha, "p", None, &[], None).cor, Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn parse_padrao_usa_375_pt() {
+        let css = "@media (max-width: 400px) { p { color: red } }";
+        assert_eq!(estilo(css, "p").cor, Some([255, 0, 0]));
     }
 }
