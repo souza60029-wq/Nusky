@@ -7,8 +7,8 @@
 //! Links (`<a href>`) viram comandos com o destino preenchido.
 //! Aplica CSS básico (tamanho, negrito, margens, display: none e cor), lido das tags
 //! <style> e dos atributos style, id e class. Seletores compostos (descendente, filho,
-//! irmãos `+` e `~`, atributos e `:first-child`) usam a cadeia de pais e os irmãos
-//! anteriores de cada elemento.
+//! irmãos `+` e `~`, atributos, `:first-child` e `:last-child`) usam a cadeia de pais
+//! e os irmãos de cada elemento.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
 use crate::css::{self, Estilo, Folha, Info};
@@ -198,13 +198,20 @@ fn info_do_elemento(el: &Element, nomes: &[String]) -> Info {
     }
 }
 
-/// Calcula o CSS que vale para um elemento, considerando pais e irmãos anteriores.
-/// Sem <style> na página, só o atributo style pode trazer CSS.
-fn estilo_do_elemento(el: &Element, info: &Info, irmaos: &[Info], ctx: &Ctx<'_>) -> Estilo {
+/// Calcula o CSS que vale para um elemento, considerando pais, irmãos anteriores
+/// e se é o último elemento da lista. Sem <style> na página, só o atributo style
+/// pode trazer CSS.
+fn estilo_do_elemento(
+    el: &Element,
+    info: &Info,
+    irmaos: &[Info],
+    ultimo: bool,
+    ctx: &Ctx<'_>,
+) -> Estilo {
     if !ctx.tem_css && el.attr("style").is_none() {
         return Estilo::default();
     }
-    css::estilo_completo(&ctx.folha, info, &ctx.pais, irmaos, el.attr("style"))
+    css::estilo_completo_ultimo(&ctx.folha, info, &ctx.pais, irmaos, ultimo, el.attr("style"))
 }
 
 /// Percorre os filhos. Texto e elementos inline vão para `buf`.
@@ -218,8 +225,10 @@ fn layout_children(
 ) {
     // Irmãos anteriores só são guardados quando alguma regra os usa.
     let guarda_irmaos = ctx.folha.precisa_irmaos();
+    // Último elemento da lista. Texto não conta, como no CSS.
+    let ultimo_idx = nodes.iter().rposition(|n| matches!(n, Node::Element(_)));
     let mut irmaos: Vec<Info> = Vec::new();
-    for node in nodes {
+    for (i, node) in nodes.iter().enumerate() {
         match node {
             Node::Text(t) => buf.push(Span {
                 text: t.clone(),
@@ -228,7 +237,8 @@ fn layout_children(
             }),
             Node::Element(el) => {
                 let info = info_do_elemento(el, ctx.folha.nomes_atributos());
-                let info = tratar_elemento(el, info, &irmaos, style, link, buf, ctx);
+                let ultimo = Some(i) == ultimo_idx;
+                let info = tratar_elemento(el, info, &irmaos, ultimo, style, link, buf, ctx);
                 if guarda_irmaos {
                     irmaos.push(info);
                 }
@@ -243,6 +253,7 @@ fn tratar_elemento(
     el: &Element,
     info: Info,
     irmaos: &[Info],
+    ultimo: bool,
     style: Style,
     link: Option<&str>,
     buf: &mut Vec<Span>,
@@ -251,7 +262,7 @@ fn tratar_elemento(
     if SKIP_TAGS.contains(&el.tag.as_str()) {
         return info;
     }
-    let css = estilo_do_elemento(el, &info, irmaos, ctx);
+    let css = estilo_do_elemento(el, &info, irmaos, ultimo, ctx);
     if css.oculto {
         return info;
     }
@@ -628,5 +639,34 @@ mod tests {
         );
         let textos: Vec<&str> = cmds.iter().map(text_of).collect();
         assert_eq!(textos, vec!["dois"]);
+    }
+
+    #[test]
+    fn last_child_hides_only_the_last_item() {
+        let cmds = run(
+            "<style>li:last-child { display: none }</style><ul><li>um</li><li>dois</li></ul>",
+            400.0,
+        );
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["um"]);
+    }
+
+    #[test]
+    fn script_depois_do_item_conta_como_irmao() {
+        let cmds = run(
+            "<style>li:last-child { display: none }</style><ul><li>um</li><li>dois</li><script></script></ul>",
+            400.0,
+        );
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["um", "dois"]);
+    }
+
+    #[test]
+    fn texto_depois_do_icone_some_como_no_botao_da_wikipedia() {
+        let cmds = run(
+            r#"<style>.b span + span:last-child { clip: rect(1px,1px,1px,1px) }</style><a class="b"><span></span><span>Idioma</span></a>"#,
+            400.0,
+        );
+        assert!(cmds.is_empty());
     }
 }
