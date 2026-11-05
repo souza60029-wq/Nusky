@@ -7,6 +7,8 @@
 //! o que aconteceu: quanto texto o HTML tem, quanto foi ocultado por CSS, quanto foi
 //! desenhado, quais blocos de texto não chegaram à tela, onde estão os elementos ocultos
 //! e quais regras `display: none` o motor não aplicou, com o motivo.
+//! Usa a mesma lista de irmãos anteriores do layout, para que seletores `+`, `~`
+//! e `:first-child` deem o mesmo resultado na tela e no relatório.
 //! Só lê: não altera a renderização.
 
 use std::collections::BTreeMap;
@@ -77,7 +79,7 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
     let desenhado_limpo: String = desenhado.chars().filter(|c| !c.is_whitespace()).collect();
 
     let mut d = Diagnostico {
-        folha: Folha::parse(&css_texto),
+        folha: Folha::parse_largura(&css_texto, largura),
         tem_css: !css_texto.trim().is_empty(),
         pais: Vec::new(),
         abertos: Vec::new(),
@@ -178,7 +180,11 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
 }
 
 impl Diagnostico {
+    /// Percorre os filhos de um nó. Guarda a lista de irmãos anteriores só quando
+    /// alguma regra da página precisa dela, como o layout faz.
     fn percorrer(&mut self, nos: &[Node], profundidade: usize) {
+        let guarda_irmaos = self.folha.precisa_irmaos();
+        let mut irmaos: Vec<Info> = Vec::new();
         for no in nos {
             match no {
                 Node::Text(t) => {
@@ -187,21 +193,27 @@ impl Diagnostico {
                         acrescentar(&mut quadro.texto, t, LIMITE_TEXTO_QUADRO);
                     }
                 }
-                Node::Element(el) => self.elemento(el, profundidade),
+                Node::Element(el) => {
+                    let info = info_do_elemento(el, self.folha.nomes_atributos());
+                    let info = self.elemento(el, info, &irmaos, profundidade);
+                    if guarda_irmaos {
+                        irmaos.push(info);
+                    }
+                }
             }
         }
     }
 
-    fn elemento(&mut self, el: &Element, profundidade: usize) {
+    /// Trata um elemento e devolve a sua identificação, para entrar na lista de irmãos.
+    fn elemento(&mut self, el: &Element, info: Info, irmaos: &[Info], profundidade: usize) -> Info {
         if SKIP_TAGS.contains(&el.tag.as_str()) {
-            return;
+            return info;
         }
         self.total_elementos += 1;
         self.profundidade_max = self.profundidade_max.max(profundidade);
 
-        let info = info_do_elemento(el);
         let caminho = caminho_de(&self.pais, &info);
-        let estilo = self.estilo(el, &info);
+        let estilo = self.estilo(el, &info, irmaos);
         let e_bloco = BLOCK_TAGS.contains(&el.tag.as_str());
 
         if estilo.oculto {
@@ -217,7 +229,7 @@ impl Diagnostico {
                     oculto: true,
                 });
             }
-            return;
+            return info;
         }
 
         if e_bloco {
@@ -233,7 +245,7 @@ impl Diagnostico {
 
         self.pais.push(info);
         self.percorrer(&el.children, profundidade + 1);
-        self.pais.pop();
+        let info = self.pais.pop().unwrap_or_default();
 
         if e_bloco {
             if let Some(quadro) = self.abertos.pop() {
@@ -242,14 +254,15 @@ impl Diagnostico {
                 bloco.chave = texto_conferido(&quadro.texto);
             }
         }
+        info
     }
 
-    /// Mesmo cálculo de CSS que o layout faz para cada elemento.
-    fn estilo(&self, el: &Element, info: &Info) -> Estilo {
+    /// Mesmo cálculo de CSS que o layout faz para cada elemento, com pais e irmãos anteriores.
+    fn estilo(&self, el: &Element, info: &Info, irmaos: &[Info]) -> Estilo {
         if !self.tem_css && el.attr("style").is_none() {
             return Estilo::default();
         }
-        css::estilo_com_pais(&self.folha, info, &self.pais, el.attr("style"))
+        css::estilo_completo(&self.folha, info, &self.pais, irmaos, el.attr("style"))
     }
 }
 
@@ -274,25 +287,32 @@ fn coletar_css(nos: &[Node], saida: &mut String) {
     }
 }
 
-fn info_do_elemento(el: &Element) -> Info {
+/// Monta a identificação do elemento (tag, id, classes e atributos citados no CSS).
+/// Só lê os atributos listados em `nomes`, igual ao layout.
+fn info_do_elemento(el: &Element, nomes: &[String]) -> Info {
+    let atributos = nomes
+        .iter()
+        .filter_map(|nome| el.attr(nome).map(|v| (nome.clone(), v.to_string())))
+        .collect();
     Info {
         tag: el.tag.clone(),
-        id: el.attr("id").map(str::to_string),
+        id: el.attr("id").unwrap_or("").to_string(),
         classes: el
             .attr("class")
             .unwrap_or("")
             .split_whitespace()
             .map(str::to_string)
             .collect(),
+        atributos,
     }
 }
 
 /// Nome curto do elemento: tag, id e primeira classe. Ex.: `div#toc`, `p.x`.
 fn rotulo(info: &Info) -> String {
     let mut s = info.tag.clone();
-    if let Some(id) = &info.id {
+    if !info.id.is_empty() {
         s.push('#');
-        s.push_str(id);
+        s.push_str(&info.id);
     }
     if let Some(classe) = info.classes.first() {
         s.push('.');
@@ -407,7 +427,7 @@ fn arvore_de(nos: &[Node], nivel: usize, saida: &mut Vec<String>) {
             if SKIP_TAGS.contains(&el.tag.as_str()) || nivel >= PROFUNDIDADE_ARVORE {
                 continue;
             }
-            let info = info_do_elemento(el);
+            let info = info_do_elemento(el, &[]);
             let filhos = el
                 .children
                 .iter()
@@ -477,8 +497,15 @@ mod tests {
 
     #[test]
     fn ignored_hide_rules_are_listed() {
-        let r = rel("<style>.a ~ .b { display: none }</style><p>x</p>");
+        let r = rel("<style>.a ~ .b .c { display: none }</style><p>x</p>");
         assert!(r.contains("REGRAS COM display: none NÃO APLICADAS: 1"));
-        assert!(r.contains(".a ~ .b"));
+        assert!(r.contains(".a ~ .b .c"));
+    }
+
+    #[test]
+    fn attribute_rule_hides_by_attribute() {
+        let r = rel("<style>[data-x] { display: none }</style><div data-x=\"1\">abc</div><p>de</p>");
+        assert!(r.contains("Oculto por CSS: 3 caracteres"));
+        assert!(r.contains("Desenhado: 2 caracteres"));
     }
 }
