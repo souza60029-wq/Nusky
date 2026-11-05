@@ -3,18 +3,19 @@
 // https://mozilla.org/MPL/2.0/.
 
 //! Diagnóstico de página.
-//! Passa o HTML pelo mesmo parser, CSS e layout do motor e descreve em texto curto
-//! o que aconteceu: quanto texto o HTML tem, quanto foi ocultado por CSS, quanto foi
-//! desenhado, quais blocos de texto não chegaram à tela, onde estão os elementos ocultos,
-//! quais regras `display: none` o motor não aplicou (com o motivo), quais regras que
-//! casam com um bloco de texto têm declarações que costumam esconder texto
-//! (posição fora da tela, tamanho zero, cor transparente etc.) e, para textos curtos
-//! visíveis (menus e rótulos), todas as regras que casam com eles, com as declarações.
-//! Usa a mesma lista de irmãos anteriores do layout, para que seletores `+`, `~`
-//! e `:first-child` deem o mesmo resultado na tela e no relatório.
+//! Passa o HTML pelo mesmo parser, CSS e layout do motor e descreve em texto o que aconteceu:
+//! quanto texto o HTML tem, quanto foi ocultado por CSS, quanto foi desenhado, quais blocos
+//! de texto não chegaram à tela, onde estão os elementos ocultos e quais regras `display: none`
+//! o motor não aplicou.
+//! Para cada bloco de texto, lista todas as regras que casam com ele, com os ancestrais e com
+//! os elementos dentro dele. Para textos curtos visíveis, numera as regras num catálogo, marca
+//! as que têm declarações de ocultação e as que o motor ignora.
+//! Também inventaria as declarações de ocultação de todo o CSS da página, com a quantidade de
+//! regras e se o motor as lê. Usa a mesma lista de irmãos anteriores do layout, para que
+//! seletores `+`, `~` e `:first-child` deem o mesmo resultado na tela e no relatório.
 //! Só lê: não altera a renderização.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::css::{self, Estilo, Folha, Ignorada, Info};
 use crate::html::{parse, Element, Node};
@@ -28,21 +29,69 @@ const BLOCK_TAGS: &[&str] = &[
     "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "figcaption", "blockquote", "td", "th", "dd", "dt",
 ];
 
-const MAX_BLOCOS: usize = 60;
-const MAX_OCULTOS: usize = 30;
+/// Propriedades que podem esconder texto. Entram no inventário e, quando o motor não as lê,
+/// são marcadas no catálogo de regras dos textos curtos.
+const PROPRIEDADES_DE_OCULTAR: &[&str] = &[
+    "display",
+    "visibility",
+    "clip",
+    "clip-path",
+    "transform",
+    "filter",
+    "opacity",
+    "font-size",
+    "color",
+    "-webkit-text-fill-color",
+    "position",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "inset",
+    "text-indent",
+    "width",
+    "height",
+    "max-width",
+    "max-height",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "margin",
+    "margin-left",
+    "margin-right",
+    "margin-top",
+    "margin-bottom",
+    "padding",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "padding-bottom",
+];
+
+const MAX_BLOCOS: usize = 80;
+const MAX_OCULTOS: usize = 200;
 const MAX_LINHAS_ARVORE: usize = 40;
 const PROFUNDIDADE_ARVORE: usize = 4;
 const CHARS_EXIBIDOS: usize = 50;
 const CHARS_CONFERIDOS: usize = 40;
 const LIMITE_TEXTO_QUADRO: usize = 300;
-const MAX_IGNORADAS_POR_MOTIVO: usize = 6;
-const LIMITE_SELETOR: usize = 140;
-const MAX_REGRAS_BLOCO: usize = 6;
-const MAX_ACHADOS: usize = 30;
-const MAX_BLOCOS_CURTOS: usize = 8;
-const MAX_REGRAS_CURTAS: usize = 10;
+const MAX_IGNORADAS_POR_MOTIVO: usize = 50;
+const LIMITE_SELETOR: usize = 200;
+const MAX_ACHADOS: usize = 60;
+const MAX_BLOCOS_CURTOS: usize = 40;
 const LIMITE_TEXTO_CURTO: usize = 40;
-const LIMITE_DECLARACAO: usize = 120;
+const LIMITE_DECLARACAO: usize = 300;
+const MAX_GRUPOS_INVENTARIO: usize = 150;
+const MAX_EXEMPLOS_INVENTARIO: usize = 5;
+
+/// Uma regra que casa com um elemento, com onde ela casa.
+#[derive(Clone)]
+struct Achado {
+    seletor: String,
+    corpo: String,
+    /// Onde casa: "próprio", "ancestral div.x" ou "descendente span.y".
+    local: String,
+}
 
 /// Bloco de texto encontrado no HTML.
 struct Bloco {
@@ -51,11 +100,11 @@ struct Bloco {
     /// Início do texto sem espaços, usado para conferir se foi desenhado.
     chave: String,
     oculto: bool,
-    /// Regras (do próprio bloco ou de ancestrais) com declarações que costumam esconder texto.
-    achados: Vec<String>,
-    /// Todas as regras que casam com o bloco ou com ancestrais, com as declarações.
-    /// Ordem: o próprio bloco, depois os ancestrais do mais próximo para o mais distante.
-    regras: Vec<String>,
+    /// Regras do próprio bloco e dos ancestrais. Ordem: o próprio, depois os ancestrais
+    /// do mais próximo para o mais distante.
+    regras: Vec<Achado>,
+    /// Regras dos elementos dentro do bloco (com texto ou não), na ordem em que aparecem.
+    descendentes: Vec<Achado>,
 }
 
 /// Bloco aberto durante a percorrida. Acumula o texto visível dele.
@@ -79,6 +128,20 @@ struct Diagnostico {
     profundidade_max: usize,
 }
 
+/// Regra lida direto do texto do CSS, com o @media (ou @supports) que a envolve.
+/// Não passa pelo motor: serve para o inventário de todo o CSS.
+struct RegraBruta {
+    seletor: String,
+    midia: String,
+    corpo: String,
+}
+
+/// Tipo de declaração de ocultação, com quantas regras a usam e alguns exemplos.
+struct Grupo {
+    quantidade: usize,
+    exemplos: Vec<String>,
+}
+
 /// Gera o relatório de diagnóstico em texto, uma linha por item.
 pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String {
     let nos = parse(html);
@@ -93,6 +156,8 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
     }
     let desenhado_chars = contar(&desenhado);
     let desenhado_limpo: String = desenhado.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let regras_css = regras_do_css(&css_texto);
 
     let mut d = Diagnostico {
         folha: Folha::parse_largura(&css_texto, largura),
@@ -150,6 +215,9 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
     ));
     linhas.extend(resumo_ignoradas(&d.folha.ignoradas));
 
+    linhas.push(String::new());
+    linhas.extend(inventario(&regras_css));
+
     // Problemas primeiro (prioridade 0), depois ocultos (1), depois os que foram desenhados (2).
     let mut blocos: Vec<(u8, &Bloco)> = d
         .blocos
@@ -187,14 +255,28 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         linhas.push(format!("… e mais {} blocos", blocos.len() - MAX_BLOCOS));
     }
 
-    // Blocos com texto e regras que podem esconder o texto. Os visíveis vêm primeiro,
-    // porque são a diferença entre o Nusky e o Safari.
-    let mut com_regras: Vec<&Bloco> = d
-        .blocos
-        .iter()
-        .filter(|b| !b.achados.is_empty() && !b.chave.is_empty())
-        .collect();
-    com_regras.sort_by_key(|b| if b.oculto { 1 } else { 0 });
+    // Blocos com regras (do próprio bloco, de ancestrais ou de elementos dentro dele) que têm
+    // declaração de ocultação. Os visíveis vêm primeiro.
+    let mut com_regras: Vec<(&Bloco, Vec<String>)> = Vec::new();
+    for b in &d.blocos {
+        if b.chave.is_empty() {
+            continue;
+        }
+        let mut linhas_bloco: Vec<String> = Vec::new();
+        for a in b.regras.iter().chain(b.descendentes.iter()) {
+            let sus = declaracoes_suspeitas(&a.corpo);
+            if !sus.is_empty() {
+                let linha = format!("{}  ({})  →  {}", a.seletor, a.local, sus.join("; "));
+                if !linhas_bloco.contains(&linha) {
+                    linhas_bloco.push(linha);
+                }
+            }
+        }
+        if !linhas_bloco.is_empty() {
+            com_regras.push((b, linhas_bloco));
+        }
+    }
+    com_regras.sort_by_key(|(b, _)| if b.oculto { 1u8 } else { 0u8 });
 
     linhas.push(String::new());
     linhas.push(format!(
@@ -202,38 +284,53 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         com_regras.len()
     ));
     linhas.push(
-        "  Regras do próprio bloco ou de ancestrais com declaração de ocultação.".to_string(),
+        "  Regras do bloco, de ancestrais ou de elementos dentro dele com declaração de ocultação."
+            .to_string(),
     );
-    linhas.push(
-        "  Outra regra pode tê-las desfeito depois; confira no Safari.".to_string(),
-    );
-    for b in com_regras.iter().take(MAX_ACHADOS) {
+    linhas.push("  Outra regra pode tê-las desfeito depois; confira no Safari.".to_string());
+    for (b, linhas_bloco) in com_regras.iter().take(MAX_ACHADOS) {
         let estado = if b.oculto {
             "oculto no Nusky"
         } else {
             "VISÍVEL no Nusky"
         };
         linhas.push(format!("[{}] {}: \"{}\"", estado, b.caminho, b.exibir));
-        for achado in &b.achados {
-            linhas.push(format!("    {}", achado));
+        for linha in linhas_bloco {
+            linhas.push(format!("    {}", linha));
         }
     }
     if com_regras.len() > MAX_ACHADOS {
         linhas.push(format!("… e mais {} blocos", com_regras.len() - MAX_ACHADOS));
     }
 
-    // Textos curtos visíveis (menus, rótulos, títulos). Mostra todas as regras que casam,
-    // com as declarações, mesmo as que o diagnóstico não reconhece como suspeitas.
+    // Textos curtos visíveis (menus, rótulos, títulos). Cada regra recebe um número no catálogo;
+    // o bloco lista os números, com o lugar onde a regra casa.
     let curtos: Vec<&Bloco> = d
         .blocos
         .iter()
         .filter(|b| {
             !b.oculto
                 && !b.chave.is_empty()
-                && !b.regras.is_empty()
+                && (!b.regras.is_empty() || !b.descendentes.is_empty())
                 && b.exibir.chars().count() <= LIMITE_TEXTO_CURTO
         })
         .collect();
+
+    let mut catalogo: Vec<(String, String)> = Vec::new();
+    let mut indice: HashMap<(String, String), usize> = HashMap::new();
+    let mut linhas_blocos: Vec<String> = Vec::new();
+    for b in curtos.iter().take(MAX_BLOCOS_CURTOS) {
+        linhas_blocos.push(format!("[VISÍVEL no Nusky] {}: \"{}\"", b.caminho, b.exibir));
+        let mut ja: Vec<String> = Vec::new();
+        for a in b.regras.iter().chain(b.descendentes.iter()) {
+            let n = numerar(a, &mut catalogo, &mut indice);
+            let linha = format!("    R{}  ({})", n, a.local);
+            if !ja.contains(&linha) {
+                ja.push(linha.clone());
+                linhas_blocos.push(linha);
+            }
+        }
+    }
 
     linhas.push(String::new());
     linhas.push(format!(
@@ -241,19 +338,43 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         curtos.len()
     ));
     linhas.push(
-        "  Regras que casam com o bloco ou com ancestrais, da mais próxima para a mais distante.".to_string(),
+        "  Cada regra tem um número (R1, R2…). Entre parênteses, onde ela casa: próprio, ancestral ou descendente."
+            .to_string(),
     );
-    for b in curtos.iter().take(MAX_BLOCOS_CURTOS) {
-        linhas.push(format!("[VISÍVEL no Nusky] {}: \"{}\"", b.caminho, b.exibir));
-        for regra in b.regras.iter().take(MAX_REGRAS_CURTAS) {
-            linhas.push(format!("    {}", regra));
-        }
-        if b.regras.len() > MAX_REGRAS_CURTAS {
-            linhas.push(format!("    … e mais {}", b.regras.len() - MAX_REGRAS_CURTAS));
-        }
-    }
+    linhas.push(
+        "  No catálogo: [suspeita] = tem declaração que costuma esconder texto; [motor não lê: …] = propriedades de ocultação que o Nusky ignora."
+            .to_string(),
+    );
+    linhas.extend(linhas_blocos);
     if curtos.len() > MAX_BLOCOS_CURTOS {
         linhas.push(format!("… e mais {} blocos", curtos.len() - MAX_BLOCOS_CURTOS));
+    }
+
+    linhas.push(String::new());
+    linhas.push(format!(
+        "CATÁLOGO DAS REGRAS DOS TEXTOS CURTOS: {} regras",
+        catalogo.len()
+    ));
+    for (n, (seletor, corpo)) in catalogo.iter().enumerate() {
+        let suspeita = if declaracoes_suspeitas(corpo).is_empty() {
+            ""
+        } else {
+            " [suspeita]"
+        };
+        let nao = nao_lidas(corpo);
+        let motor = if nao.is_empty() {
+            String::new()
+        } else {
+            format!(" [motor não lê: {}]", nao.join(", "))
+        };
+        linhas.push(format!(
+            "  R{}  {}  →  {}{}{}",
+            n + 1,
+            seletor,
+            cortar(corpo, LIMITE_DECLARACAO),
+            suspeita,
+            motor
+        ));
     }
 
     linhas.push(String::new());
@@ -301,10 +422,23 @@ impl Diagnostico {
         let caminho = caminho_de(&self.pais, &info);
         let estilo = self.estilo(el, &info, irmaos);
         let e_bloco = BLOCK_TAGS.contains(&el.tag.as_str());
-        let (achados, regras) = if e_bloco {
+
+        // Regras do próprio elemento entram em todos os blocos abertos (ele está dentro deles).
+        // Vale também para elementos ocultos, que costumam ser a causa do que sumiu.
+        if self.tem_css && !self.abertos.is_empty() {
+            let de_dentro = self.regras_do_elemento(&info, irmaos);
+            for k in 0..self.abertos.len() {
+                let idx = self.abertos[k].indice;
+                self.blocos[idx]
+                    .descendentes
+                    .extend(de_dentro.iter().cloned());
+            }
+        }
+
+        let regras = if e_bloco {
             self.regras_do_bloco(&info, irmaos)
         } else {
-            (Vec::new(), Vec::new())
+            Vec::new()
         };
 
         if estilo.oculto {
@@ -318,8 +452,8 @@ impl Diagnostico {
                     exibir: texto_exibido(&texto),
                     chave: texto_conferido(&texto),
                     oculto: true,
-                    achados,
                     regras,
+                    descendentes: Vec::new(),
                 });
             }
             return info;
@@ -327,15 +461,18 @@ impl Diagnostico {
 
         if e_bloco {
             self.blocos.push(Bloco {
-                caminho: caminho.clone(),
+                caminho,
                 exibir: String::new(),
                 chave: String::new(),
                 oculto: false,
-                achados,
                 regras,
+                descendentes: Vec::new(),
             });
             let indice = self.blocos.len() - 1;
-            self.abertos.push(Quadro { indice, texto: String::new() });
+            self.abertos.push(Quadro {
+                indice,
+                texto: String::new(),
+            });
         }
 
         self.pais.push(info);
@@ -362,38 +499,62 @@ impl Diagnostico {
         css::estilo_completo(&self.folha, info, &self.pais, irmaos, el.attr("style"))
     }
 
-    /// Regras que casam com o bloco ou com algum ancestral. Devolve duas listas:
-    /// as que têm declaração que costuma esconder texto, e todas, com as declarações.
-    fn regras_do_bloco(&self, info: &Info, irmaos: &[Info]) -> (Vec<String>, Vec<String>) {
-        let mut suspeitas: Vec<String> = Vec::new();
-        let mut todas: Vec<String> = Vec::new();
+    /// Regras que casam com o bloco e com cada ancestral. O próprio bloco vem primeiro.
+    fn regras_do_bloco(&self, info: &Info, irmaos: &[Info]) -> Vec<Achado> {
+        let mut saida: Vec<Achado> = Vec::new();
         if !self.tem_css {
-            return (suspeitas, todas);
+            return saida;
         }
-
-        let mut regras: Vec<(String, String)> = Vec::new();
         for c in css::regras_casadas(&self.folha, info, &self.pais, irmaos) {
-            regras.push((seletor_exibido(&c.seletor), c.declaracoes));
+            saida.push(Achado {
+                seletor: seletor_exibido(&c.seletor),
+                corpo: c.declaracoes,
+                local: "próprio".to_string(),
+            });
         }
         for (k, anc) in self.pais.iter().enumerate().rev() {
+            let local = format!("ancestral {}", rotulo(anc));
             for c in css::regras_casadas(&self.folha, anc, &self.pais[..k], &self.pais_irmaos[k]) {
-                regras.push((
-                    format!("{}  (ancestral {})", seletor_exibido(&c.seletor), rotulo(anc)),
-                    c.declaracoes,
-                ));
+                saida.push(Achado {
+                    seletor: seletor_exibido(&c.seletor),
+                    corpo: c.declaracoes,
+                    local: local.clone(),
+                });
             }
         }
-
-        for (seletor, corpo) in &regras {
-            let sus = declaracoes_suspeitas(corpo);
-            if !sus.is_empty() {
-                suspeitas.push(format!("{}  →  {}", seletor, sus.join("; ")));
-            }
-            todas.push(format!("{}  →  {}", seletor, cortar(corpo, LIMITE_DECLARACAO)));
-        }
-        suspeitas.truncate(MAX_REGRAS_BLOCO);
-        (suspeitas, todas)
+        saida
     }
+
+    /// Regras que casam com um elemento dentro de bloco. Só o próprio elemento;
+    /// os ancestrais já entram pela lista do bloco.
+    fn regras_do_elemento(&self, info: &Info, irmaos: &[Info]) -> Vec<Achado> {
+        let mut saida: Vec<Achado> = Vec::new();
+        let local = format!("descendente {}", rotulo(info));
+        for c in css::regras_casadas(&self.folha, info, &self.pais, irmaos) {
+            saida.push(Achado {
+                seletor: seletor_exibido(&c.seletor),
+                corpo: c.declaracoes,
+                local: local.clone(),
+            });
+        }
+        saida
+    }
+}
+
+/// Número do catálogo de uma regra. Mesma regra (seletor e declarações) ganha o mesmo número.
+fn numerar(
+    a: &Achado,
+    catalogo: &mut Vec<(String, String)>,
+    indice: &mut HashMap<(String, String), usize>,
+) -> usize {
+    let chave = (a.seletor.clone(), a.corpo.clone());
+    if let Some(n) = indice.get(&chave) {
+        return *n;
+    }
+    catalogo.push(chave.clone());
+    let n = catalogo.len();
+    indice.insert(chave, n);
+    n
 }
 
 /// Junta o texto de todas as tags <style>, como o layout faz.
@@ -417,6 +578,202 @@ fn coletar_css(nos: &[Node], saida: &mut String) {
     }
 }
 
+/// Lê todas as regras do CSS, sem passar pelo motor. Entram também as que o motor ignora.
+fn regras_do_css(css: &str) -> Vec<RegraBruta> {
+    let limpo = tirar_comentarios(css);
+    let mut saida = Vec::new();
+    varrer_blocos(&limpo, "", &mut saida);
+    saida
+}
+
+/// Tira comentários /* ... */ do CSS.
+fn tirar_comentarios(css: &str) -> String {
+    let mut saida = String::with_capacity(css.len());
+    let mut resto = css;
+    loop {
+        match resto.find("/*") {
+            Some(i) => {
+                saida.push_str(&resto[..i]);
+                match resto[i + 2..].find("*/") {
+                    Some(j) => resto = &resto[i + 2 + j + 2..],
+                    None => break,
+                }
+            }
+            None => {
+                saida.push_str(resto);
+                break;
+            }
+        }
+    }
+    saida
+}
+
+/// Percorre um bloco de CSS e junta as regras. Entra em @media e @supports; ignora o resto
+/// (@font-face, @keyframes, @import etc.).
+fn varrer_blocos(css: &str, midia: &str, saida: &mut Vec<RegraBruta>) {
+    let bytes = css.as_bytes();
+    let mut inicio = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b';' => {
+                inicio = i + 1;
+                i += 1;
+            }
+            b'{' => {
+                let cabecalho = css[inicio..i].trim();
+                let mut profundidade = 1usize;
+                let mut j = i + 1;
+                while j < bytes.len() && profundidade > 0 {
+                    match bytes[j] {
+                        b'{' => profundidade += 1,
+                        b'}' => profundidade -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                let fim = if profundidade == 0 { j - 1 } else { bytes.len() };
+                let corpo = &css[i + 1..fim];
+                if let Some(at) = cabecalho.strip_prefix('@') {
+                    let nome = at
+                        .split(|c: char| c.is_whitespace() || c == '(')
+                        .next()
+                        .unwrap_or("");
+                    if nome == "media" || nome == "supports" {
+                        let nova = if midia.is_empty() {
+                            cabecalho.to_string()
+                        } else {
+                            format!("{} {}", midia, cabecalho)
+                        };
+                        varrer_blocos(corpo, &nova, saida);
+                    }
+                } else if !cabecalho.is_empty() {
+                    saida.push(RegraBruta {
+                        seletor: cabecalho.to_string(),
+                        midia: midia.to_string(),
+                        corpo: corpo.to_string(),
+                    });
+                }
+                i = j;
+                inicio = j;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Inventário das declarações de ocultação de todo o CSS: cada tipo aparece uma vez,
+/// com a quantidade de regras, se o motor lê e alguns exemplos com o @media.
+fn inventario(regras: &[RegraBruta]) -> Vec<String> {
+    let mut grupos: BTreeMap<String, Grupo> = BTreeMap::new();
+    for regra in regras {
+        let sel = seletor_exibido(&regra.seletor);
+        let exemplo = if regra.midia.is_empty() {
+            sel
+        } else {
+            format!("{}  [{}]", sel, regra.midia)
+        };
+        for decl in declaracoes_suspeitas(&regra.corpo) {
+            let grupo = grupos.entry(decl).or_insert_with(|| Grupo {
+                quantidade: 0,
+                exemplos: Vec::new(),
+            });
+            grupo.quantidade += 1;
+            if grupo.exemplos.len() < MAX_EXEMPLOS_INVENTARIO {
+                grupo.exemplos.push(exemplo.clone());
+            }
+        }
+    }
+
+    let mut ordenados: Vec<(String, Grupo)> = grupos.into_iter().collect();
+    ordenados.sort_by(|a, b| b.1.quantidade.cmp(&a.1.quantidade));
+
+    let mut linhas: Vec<String> = Vec::new();
+    linhas.push(format!(
+        "DECLARAÇÕES DE OCULTAÇÃO NO CSS: {} tipos",
+        ordenados.len()
+    ));
+    linhas.push(format!(
+        "  Regras lidas no CSS da página: {}. Cada tipo aparece uma vez, com a quantidade de regras.",
+        regras.len()
+    ));
+    linhas.push("  motor lê: sim (aplica), parcial (só alguns valores), não (ignora).".to_string());
+    for (decl, grupo) in ordenados.iter().take(MAX_GRUPOS_INVENTARIO) {
+        let nome = decl.split_once(':').map(|(n, _)| n.trim()).unwrap_or("");
+        linhas.push(format!(
+            "  {}  ({} regras; motor lê: {})",
+            decl,
+            grupo.quantidade,
+            motor_le(nome)
+        ));
+        for exemplo in &grupo.exemplos {
+            linhas.push(format!("    {}", exemplo));
+        }
+        if grupo.quantidade > grupo.exemplos.len() {
+            linhas.push(format!(
+                "    … e mais {}",
+                grupo.quantidade - grupo.exemplos.len()
+            ));
+        }
+    }
+    if ordenados.len() > MAX_GRUPOS_INVENTARIO {
+        linhas.push(format!(
+            "  … e mais {} tipos",
+            ordenados.len() - MAX_GRUPOS_INVENTARIO
+        ));
+    }
+    linhas.push(String::new());
+    linhas
+}
+
+/// Diz se o motor lê uma propriedade: "sim", "parcial" (só alguns valores) ou "não".
+fn motor_le(nome: &str) -> &'static str {
+    match nome {
+        "font-size" | "margin" | "margin-top" | "margin-bottom" => "sim",
+        "display" | "visibility" | "clip" | "clip-path" | "transform" | "color" => "parcial",
+        _ => "não",
+    }
+}
+
+/// Propriedades de ocultação que a regra usa e o motor não lê, quando a regra parece
+/// esconder texto (valor suspeito) ou posiciona o elemento fora do fluxo.
+fn nao_lidas(corpo: &str) -> Vec<String> {
+    let mut saida: Vec<String> = Vec::new();
+    for par in corpo.split(';') {
+        let (nome, valor) = match par.split_once(':') {
+            Some(x) => x,
+            None => continue,
+        };
+        let nome = nome.trim().to_ascii_lowercase();
+        let valor = valor.trim();
+        let valor = valor.strip_suffix("!important").unwrap_or(valor).trim();
+        let valor = valor.to_ascii_lowercase();
+        if !PROPRIEDADES_DE_OCULTAR.contains(&nome.as_str()) || motor_le(&nome) != "não" {
+            continue;
+        }
+        let posiciona = matches!(nome.as_str(), "position" | "overflow" | "overflow-x" | "overflow-y")
+            && matches!(valor.as_str(), "absolute" | "fixed" | "hidden");
+        if (e_suspeita(&nome, &valor) || posiciona) && !saida.contains(&nome) {
+            saida.push(nome);
+        }
+    }
+    saida
+}
+
+/// Rótulo curto do elemento: tag, id e primeira classe. Ex.: `div#toc`, `p.x`.
+fn rotulo(info: &Info) -> String {
+    let mut s = info.tag.clone();
+    if !info.id.is_empty() {
+        s.push('#');
+        s.push_str(&info.id);
+    }
+    if let Some(classe) = info.classes.first() {
+        s.push('.');
+        s.push_str(classe);
+    }
+    s
+}
+
 /// Monta a identificação do elemento (tag, id, classes e atributos citados no CSS).
 /// Só lê os atributos listados em `nomes`, igual ao layout.
 fn info_do_elemento(el: &Element, nomes: &[String]) -> Info {
@@ -435,20 +792,6 @@ fn info_do_elemento(el: &Element, nomes: &[String]) -> Info {
             .collect(),
         atributos,
     }
-}
-
-/// Nome curto do elemento: tag, id e primeira classe. Ex.: `div#toc`, `p.x`.
-fn rotulo(info: &Info) -> String {
-    let mut s = info.tag.clone();
-    if !info.id.is_empty() {
-        s.push('#');
-        s.push_str(&info.id);
-    }
-    if let Some(classe) = info.classes.first() {
-        s.push('.');
-        s.push_str(classe);
-    }
-    s
 }
 
 /// Caminho até o elemento, com no máximo os últimos 4 níveis. Ex.: `div#toc > p`.
@@ -582,16 +925,18 @@ fn e_suspeita(nome: &str, v: &str) -> bool {
         "display" => v == "none",
         "visibility" => v == "hidden" || v == "collapse",
         "clip" | "clip-path" => v != "auto" && v != "none",
-        "transform" => v.contains("scale(0") || v.contains("-100%") || v.contains("-999"),
+        "transform" => {
+            v.contains("scale(0") || v.contains("scalex(0") || v.contains("scaley(0") || grande(v)
+        }
+        "filter" => v.contains("opacity(0)") || v.contains("opacity(0%)"),
         "opacity" | "font-size" => numero(v) == Some(0.0),
         "color" | "-webkit-text-fill-color" => {
             let sem = v.replace(' ', "");
             v == "transparent" || (sem.starts_with("rgba(") && sem.ends_with(",0)"))
         }
-        "text-indent" | "left" | "right" | "top" | "bottom" | "margin" | "margin-left"
-        | "margin-right" | "margin-top" | "margin-bottom" => {
-            numero(v).map_or(false, |n| n.abs() >= 999.0)
-        }
+        "text-indent" | "left" | "right" | "top" | "bottom" | "inset" | "margin" | "margin-left"
+        | "margin-right" | "margin-top" | "margin-bottom" | "padding" | "padding-left"
+        | "padding-right" | "padding-top" | "padding-bottom" => grande(v),
         "width" | "height" | "max-width" | "max-height" => {
             numero(v).map_or(false, |n| n <= 1.0)
         }
@@ -599,13 +944,29 @@ fn e_suspeita(nome: &str, v: &str) -> bool {
     }
 }
 
-/// Número de um valor simples (px, em, rem, pt ou %). Sem unidade também vale.
+/// Valor de posicionamento ou recuo grande o bastante para tirar o texto da tela.
+fn grande(v: &str) -> bool {
+    if v.contains("-999") || v.contains("-100%") {
+        return true;
+    }
+    match numero(v) {
+        Some(n) => {
+            n.abs() >= 999.0
+                || (n.abs() >= 100.0 && (v.ends_with('%') || v.ends_with("vw") || v.ends_with("vh")))
+        }
+        None => false,
+    }
+}
+
+/// Número de um valor simples (px, em, rem, pt, vw, vh ou %). Sem unidade também vale.
 fn numero(v: &str) -> Option<f32> {
     let limpo = v
         .trim_end_matches("px")
         .trim_end_matches("rem")
         .trim_end_matches("em")
         .trim_end_matches("pt")
+        .trim_end_matches("vw")
+        .trim_end_matches("vh")
         .trim_end_matches('%');
     limpo.trim().parse::<f32>().ok()
 }
@@ -622,7 +983,12 @@ fn arvore_de(nos: &[Node], nivel: usize, saida: &mut Vec<String>) {
                 .iter()
                 .filter(|c| matches!(c, Node::Element(_)))
                 .count();
-            saida.push(format!("{}{} ({} filhos)", "  ".repeat(nivel), rotulo(&info), filhos));
+            saida.push(format!(
+                "{}{} ({} filhos)",
+                "  ".repeat(nivel),
+                rotulo(&info),
+                filhos
+            ));
             arvore_de(&el.children, nivel + 1, saida);
         }
     }
@@ -712,6 +1078,13 @@ mod tests {
     }
 
     #[test]
+    fn regra_de_filho_com_texto_aparece_no_bloco() {
+        let r = rel("<style>span.x { position: absolute; left: -9999px }</style><ul><li><span class=\"x\">Idioma</span></li></ul>");
+        assert!(r.contains("(descendente span.x)"));
+        assert!(r.contains("left: -9999px"));
+    }
+
+    #[test]
     fn texto_curto_mostra_todas_as_regras_que_casam() {
         let r = rel("<style>li.x { color: red }</style><ul><li class=\"x\">Idioma</li></ul>");
         assert!(r.contains("REGRAS QUE ATINGEM TEXTOS CURTOS VISÍVEIS: 1 blocos"));
@@ -719,11 +1092,38 @@ mod tests {
     }
 
     #[test]
+    fn catalogo_marca_regras_suspeitas_e_nao_lidas() {
+        let r = rel("<style>li.x { position: absolute; left: -9999px }</style><ul><li class=\"x\">Idioma</li></ul>");
+        assert!(r.contains("CATÁLOGO DAS REGRAS DOS TEXTOS CURTOS"));
+        assert!(r.contains("[suspeita]"));
+        assert!(r.contains("[motor não lê: position, left]"));
+    }
+
+    #[test]
+    fn inventario_lista_declaracoes_de_ocultacao_com_midia() {
+        let r = rel("<style>@media print { .a { display: none } } .b { left: -9999px }</style><p>x</p>");
+        assert!(r.contains("DECLARAÇÕES DE OCULTAÇÃO NO CSS"));
+        assert!(r.contains("display: none"));
+        assert!(r.contains("[@media print]"));
+        assert!(r.contains("left: -9999px"));
+    }
+
+    #[test]
+    fn comentarios_nao_entram_no_inventario() {
+        let r = rel("<style>/* .x { left: -9999px } */ .y { color: red }</style><p>a</p>");
+        assert!(!r.contains("left: -9999px"));
+    }
+
+    #[test]
     fn declaracao_suspeita_e_reconhecida() {
         assert!(e_suspeita("text-indent", "-9999px"));
+        assert!(e_suspeita("left", "calc(-9999px)"));
+        assert!(e_suspeita("left", "100vw"));
         assert!(e_suspeita("color", "transparent"));
         assert!(e_suspeita("font-size", "0"));
+        assert!(e_suspeita("filter", "opacity(0)"));
         assert!(!e_suspeita("color", "red"));
         assert!(!e_suspeita("margin", "0 auto"));
+        assert!(!e_suspeita("width", "100%"));
     }
 }
