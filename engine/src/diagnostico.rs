@@ -5,8 +5,10 @@
 //! Diagnóstico de página.
 //! Passa o HTML pelo mesmo parser, CSS e layout do motor e descreve em texto curto
 //! o que aconteceu: quanto texto o HTML tem, quanto foi ocultado por CSS, quanto foi
-//! desenhado, quais blocos de texto não chegaram à tela, onde estão os elementos ocultos
-//! e quais regras `display: none` o motor não aplicou, com o motivo.
+//! desenhado, quais blocos de texto não chegaram à tela, onde estão os elementos ocultos,
+//! quais regras `display: none` o motor não aplicou (com o motivo) e quais regras que
+//! casam com um bloco de texto têm declarações que costumam esconder texto
+//! (posição fora da tela, tamanho zero, cor transparente etc.), com o texto da regra.
 //! Usa a mesma lista de irmãos anteriores do layout, para que seletores `+`, `~`
 //! e `:first-child` deem o mesmo resultado na tela e no relatório.
 //! Só lê: não altera a renderização.
@@ -34,6 +36,8 @@ const CHARS_CONFERIDOS: usize = 40;
 const LIMITE_TEXTO_QUADRO: usize = 300;
 const MAX_IGNORADAS_POR_MOTIVO: usize = 6;
 const LIMITE_SELETOR: usize = 140;
+const MAX_REGRAS_BLOCO: usize = 6;
+const MAX_ACHADOS: usize = 30;
 
 /// Bloco de texto encontrado no HTML.
 struct Bloco {
@@ -42,6 +46,8 @@ struct Bloco {
     /// Início do texto sem espaços, usado para conferir se foi desenhado.
     chave: String,
     oculto: bool,
+    /// Regras (do próprio bloco ou de ancestrais) com declarações que costumam esconder texto.
+    achados: Vec<String>,
 }
 
 /// Bloco aberto durante a percorrida. Acumula o texto visível dele.
@@ -54,6 +60,8 @@ struct Diagnostico {
     folha: Folha,
     tem_css: bool,
     pais: Vec<Info>,
+    /// Irmãos anteriores de cada nível de `pais`, na mesma ordem.
+    pais_irmaos: Vec<Vec<Info>>,
     abertos: Vec<Quadro>,
     blocos: Vec<Bloco>,
     ocultos: Vec<String>,
@@ -82,6 +90,7 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         folha: Folha::parse_largura(&css_texto, largura),
         tem_css: !css_texto.trim().is_empty(),
         pais: Vec::new(),
+        pais_irmaos: Vec::new(),
         abertos: Vec::new(),
         blocos: Vec::new(),
         ocultos: Vec::new(),
@@ -170,6 +179,41 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         linhas.push(format!("… e mais {} blocos", blocos.len() - MAX_BLOCOS));
     }
 
+    // Blocos com texto e regras que podem esconder o texto. Os visíveis vêm primeiro,
+    // porque são a diferença entre o Nusky e o Safari.
+    let mut com_regras: Vec<&Bloco> = d
+        .blocos
+        .iter()
+        .filter(|b| !b.achados.is_empty() && !b.chave.is_empty())
+        .collect();
+    com_regras.sort_by_key(|b| if b.oculto { 1 } else { 0 });
+
+    linhas.push(String::new());
+    linhas.push(format!(
+        "REGRAS QUE PODEM ESCONDER TEXTO: {} blocos",
+        com_regras.len()
+    ));
+    linhas.push(
+        "  Regras do próprio bloco ou de ancestrais com declaração de ocultação.".to_string(),
+    );
+    linhas.push(
+        "  Outra regra pode tê-las desfeito depois; confira no Safari.".to_string(),
+    );
+    for b in com_regras.iter().take(MAX_ACHADOS) {
+        let estado = if b.oculto {
+            "oculto no Nusky"
+        } else {
+            "VISÍVEL no Nusky"
+        };
+        linhas.push(format!("[{}] {}: \"{}\"", estado, b.caminho, b.exibir));
+        for achado in &b.achados {
+            linhas.push(format!("    {}", achado));
+        }
+    }
+    if com_regras.len() > MAX_ACHADOS {
+        linhas.push(format!("… e mais {} blocos", com_regras.len() - MAX_ACHADOS));
+    }
+
     linhas.push(String::new());
     linhas.push("ÁRVORE (até nível 4)".to_string());
     let mut arvore: Vec<String> = Vec::new();
@@ -215,6 +259,11 @@ impl Diagnostico {
         let caminho = caminho_de(&self.pais, &info);
         let estilo = self.estilo(el, &info, irmaos);
         let e_bloco = BLOCK_TAGS.contains(&el.tag.as_str());
+        let achados = if e_bloco {
+            self.achados(&info, irmaos)
+        } else {
+            Vec::new()
+        };
 
         if estilo.oculto {
             let mut texto = String::new();
@@ -227,6 +276,7 @@ impl Diagnostico {
                     exibir: texto_exibido(&texto),
                     chave: texto_conferido(&texto),
                     oculto: true,
+                    achados,
                 });
             }
             return info;
@@ -238,13 +288,16 @@ impl Diagnostico {
                 exibir: String::new(),
                 chave: String::new(),
                 oculto: false,
+                achados,
             });
             let indice = self.blocos.len() - 1;
             self.abertos.push(Quadro { indice, texto: String::new() });
         }
 
         self.pais.push(info);
+        self.pais_irmaos.push(irmaos.to_vec());
         self.percorrer(&el.children, profundidade + 1);
+        self.pais_irmaos.pop();
         let info = self.pais.pop().unwrap_or_default();
 
         if e_bloco {
@@ -263,6 +316,40 @@ impl Diagnostico {
             return Estilo::default();
         }
         css::estilo_completo(&self.folha, info, &self.pais, irmaos, el.attr("style"))
+    }
+
+    /// Regras que casam com o elemento ou com algum ancestral e têm declarações que
+    /// costumam esconder texto. Mostra o texto da regra, não só o nome do elemento.
+    fn achados(&self, info: &Info, irmaos: &[Info]) -> Vec<String> {
+        let mut linhas: Vec<String> = Vec::new();
+        if !self.tem_css {
+            return linhas;
+        }
+        for c in css::regras_casadas(&self.folha, info, &self.pais, irmaos) {
+            let sus = declaracoes_suspeitas(&c.declaracoes);
+            if !sus.is_empty() {
+                linhas.push(format!(
+                    "{}  →  {}",
+                    seletor_exibido(&c.seletor),
+                    sus.join("; ")
+                ));
+            }
+        }
+        for (k, anc) in self.pais.iter().enumerate() {
+            for c in css::regras_casadas(&self.folha, anc, &self.pais[..k], &self.pais_irmaos[k]) {
+                let sus = declaracoes_suspeitas(&c.declaracoes);
+                if !sus.is_empty() {
+                    linhas.push(format!(
+                        "{}  (ancestral {})  →  {}",
+                        seletor_exibido(&c.seletor),
+                        rotulo(anc),
+                        sus.join("; ")
+                    ));
+                }
+            }
+        }
+        linhas.truncate(MAX_REGRAS_BLOCO);
+        linhas
     }
 }
 
@@ -421,6 +508,60 @@ fn resumo_ignoradas(ignoradas: &[Ignorada]) -> Vec<String> {
     linhas
 }
 
+/// Declarações que costumam esconder texto, no formato `nome: valor`.
+/// O Nusky aplica algumas delas (display, visibility, clip, clip-path, transform)
+/// e ignora as outras. Aqui só se lê o texto da regra.
+fn declaracoes_suspeitas(corpo: &str) -> Vec<String> {
+    let mut saida = Vec::new();
+    for par in corpo.split(';') {
+        let (nome, valor) = match par.split_once(':') {
+            Some(x) => x,
+            None => continue,
+        };
+        let nome = nome.trim().to_ascii_lowercase();
+        let valor = valor.trim();
+        let valor = valor.strip_suffix("!important").unwrap_or(valor).trim();
+        if e_suspeita(&nome, &valor.to_ascii_lowercase()) {
+            saida.push(format!("{}: {}", nome, valor));
+        }
+    }
+    saida
+}
+
+/// Diz se uma declaração (nome e valor já em minúsculas) costuma esconder texto.
+fn e_suspeita(nome: &str, v: &str) -> bool {
+    match nome {
+        "display" => v == "none",
+        "visibility" => v == "hidden" || v == "collapse",
+        "clip" | "clip-path" => v != "auto" && v != "none",
+        "transform" => v.contains("scale(0") || v.contains("-100%") || v.contains("-999"),
+        "opacity" | "font-size" => numero(v) == Some(0.0),
+        "color" | "-webkit-text-fill-color" => {
+            let sem = v.replace(' ', "");
+            v == "transparent" || (sem.starts_with("rgba(") && sem.ends_with(",0)"))
+        }
+        "text-indent" | "left" | "right" | "top" | "bottom" | "margin" | "margin-left"
+        | "margin-right" | "margin-top" | "margin-bottom" => {
+            numero(v).map_or(false, |n| n.abs() >= 999.0)
+        }
+        "width" | "height" | "max-width" | "max-height" => {
+            numero(v).map_or(false, |n| n <= 1.0)
+        }
+        _ => false,
+    }
+}
+
+/// Número de um valor simples (px, em, rem, pt ou %). Sem unidade também vale.
+fn numero(v: &str) -> Option<f32> {
+    let limpo = v
+        .trim_end_matches("px")
+        .trim_end_matches("rem")
+        .trim_end_matches("em")
+        .trim_end_matches("pt")
+        .trim_end_matches('%');
+    limpo.trim().parse::<f32>().ok()
+}
+
 fn arvore_de(nos: &[Node], nivel: usize, saida: &mut Vec<String>) {
     for no in nos {
         if let Node::Element(el) = no {
@@ -507,5 +648,27 @@ mod tests {
         let r = rel("<style>[data-x] { display: none }</style><div data-x=\"1\">abc</div><p>de</p>");
         assert!(r.contains("Oculto por CSS: 3 caracteres"));
         assert!(r.contains("Desenhado: 2 caracteres"));
+    }
+
+    #[test]
+    fn regra_que_tira_o_texto_da_tela_aparece_no_bloco_visivel() {
+        let r = rel("<style>.x { position: absolute; left: -9999px }</style><li class=\"x\">Idioma</li>");
+        assert!(r.contains("VISÍVEL no Nusky"));
+        assert!(r.contains("left: -9999px"));
+    }
+
+    #[test]
+    fn regra_de_ancestral_aparece_no_bloco() {
+        let r = rel("<style>div.x { text-indent: -9999px }</style><div class=\"x\"><p>abc</p></div>");
+        assert!(r.contains("(ancestral div.x)"));
+    }
+
+    #[test]
+    fn declaracao_suspeita_e_reconhecida() {
+        assert!(e_suspeita("text-indent", "-9999px"));
+        assert!(e_suspeita("color", "transparent"));
+        assert!(e_suspeita("font-size", "0"));
+        assert!(!e_suspeita("color", "red"));
+        assert!(!e_suspeita("margin", "0 auto"));
     }
 }
