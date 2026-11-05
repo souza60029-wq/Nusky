@@ -94,6 +94,11 @@ fn style_for(tag: &str) -> Style {
     }
 }
 
+/// Converte a cor do CSS (tupla) para a cor do comando de desenho (vetor).
+fn cor_do_css(cor: Option<(u8, u8, u8)>) -> Option<[u8; 3]> {
+    cor.map(|(r, g, b)| [r, g, b])
+}
+
 /// Sobrepõe o CSS ao estilo base. Só o que o CSS definiu muda.
 fn aplicar(base: Style, css: &Estilo) -> Style {
     Style {
@@ -101,7 +106,7 @@ fn aplicar(base: Style, css: &Estilo) -> Style {
         bold: css.negrito.unwrap_or(base.bold),
         margin_top: css.margem_topo.unwrap_or(base.margin_top),
         margin_bottom: css.margem_base.unwrap_or(base.margin_bottom),
-        color: css.cor.or(base.color),
+        color: cor_do_css(css.cor).or(base.color),
     }
 }
 
@@ -285,7 +290,7 @@ fn tratar_elemento(
         let mut inline = aplicar(style, &css);
         // Link não herda a cor do texto ao redor: sem cor própria, fica com a cor de link.
         if el.tag == "a" {
-            inline.color = css.cor;
+            inline.color = cor_do_css(css.cor);
         }
         ctx.pais.push(info);
         layout_children(&el.children, inline, child_link, buf, ctx);
