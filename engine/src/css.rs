@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, You can obtain one at
+// https://mozilla.org/MPL/2.0/.
+
 //! Motor de CSS do Nusky.
 //!
 //! Suporta: seletores de tipo, `.classe`, `#id`, `*`, listas com vírgula,
@@ -10,6 +14,8 @@
 //! zero (texto de leitor de tela), `clip-path: inset(50%)` e
 //! `transform: translate(-100%)` (gaveta fora da tela).
 //! Regras com `display: none` que o motor não aplica ficam em `ignoradas`.
+//! `regras_casadas` devolve, para o diagnóstico, as regras que casam com um
+//! elemento e o texto das suas declarações. Não altera a renderização.
 
 use std::collections::HashMap;
 
@@ -40,6 +46,14 @@ pub struct Estilo {
 pub struct Ignorada {
     pub seletor: String,
     pub motivo: String,
+}
+
+/// Regra que casa com um elemento, com o texto original das declarações.
+/// Usada pelo diagnóstico para mostrar a regra que esconde (ou deveria esconder) o texto.
+#[derive(Debug, Clone)]
+pub struct Casada {
+    pub seletor: String,
+    pub declaracoes: String,
 }
 
 /// Folha de estilo já analisada.
@@ -117,6 +131,31 @@ pub fn estilo_completo(
     irmaos: &[Info],
     inline: Option<&str>,
 ) -> Estilo {
+    let cand = casam(folha, alvo, pais, irmaos);
+    let mut d = Decl::default();
+    for &i in &cand {
+        aplica(&mut d, &folha.regras[i].decl);
+    }
+    if let Some(texto) = inline {
+        aplica(&mut d, &declaracoes(texto));
+    }
+    para_estilo(d)
+}
+
+/// Regras que casam com o elemento, na ordem em que são aplicadas.
+/// Não inclui o `style` do próprio elemento.
+pub fn regras_casadas(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> Vec<Casada> {
+    casam(folha, alvo, pais, irmaos)
+        .into_iter()
+        .map(|i| Casada {
+            seletor: folha.regras[i].origem.clone(),
+            declaracoes: folha.regras[i].corpo.clone(),
+        })
+        .collect()
+}
+
+/// Índices das regras que casam com o elemento, em ordem de especificidade.
+fn casam(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> Vec<usize> {
     let ind = &folha.indice;
     let mut cand: Vec<usize> = Vec::new();
     if !alvo.id.is_empty() {
@@ -138,15 +177,7 @@ pub fn estilo_completo(
     cand.dedup();
     cand.retain(|&i| casa_seletor(&folha.regras[i].seletor, alvo, pais, irmaos));
     cand.sort_by_key(|&i| (folha.regras[i].seletor.especificidade, i));
-
-    let mut d = Decl::default();
-    for &i in &cand {
-        aplica(&mut d, &folha.regras[i].decl);
-    }
-    if let Some(texto) = inline {
-        aplica(&mut d, &declaracoes(texto));
-    }
-    para_estilo(d)
+    cand
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +200,10 @@ struct Decl {
 struct Regra {
     seletor: Seletor,
     decl: Decl,
+    /// Texto do seletor, como foi escrito (um por regra, depois da vírgula).
+    origem: String,
+    /// Declarações com espaços normalizados, para o diagnóstico.
+    corpo: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -283,6 +318,7 @@ fn regra(
     media: Option<(&str, bool)>,
 ) {
     let decl = declaracoes(corpo);
+    let corpo_limpo = corpo.split_whitespace().collect::<Vec<&str>>().join(" ");
     let oculta = decl.oculto == Some(true);
     let ativa = media.map_or(true, |(_, a)| a);
     for parte in divide_seletores(seletor_txt) {
@@ -310,7 +346,12 @@ fn regra(
                     f.usa_irmaos = true;
                 }
                 colhe_atributos(&s, &mut f.nomes_atributos);
-                f.regras.push(Regra { seletor: s, decl });
+                f.regras.push(Regra {
+                    seletor: s,
+                    decl,
+                    origem: parte.to_string(),
+                    corpo: corpo_limpo.clone(),
+                });
             }
             Err(m) => {
                 if oculta {
@@ -1400,5 +1441,22 @@ mod testes {
         assert!(oculto("nav { transform: translate3d(-100%, 0, 0) }", &nav, &[], &[]));
         assert!(!oculto("nav { transform: translate3d(20%, 0, 0) }", &nav, &[], &[]));
         assert!(!oculto("nav { transform: rotate(90deg) }", &nav, &[], &[]));
+    }
+
+    #[test]
+    fn regras_casadas_devolvem_o_texto_da_regra() {
+        let f = Folha::parse(".x { text-indent: -9999px }");
+        let alvo = info("span", "", &["x"], &[]);
+        let r = regras_casadas(&f, &alvo, &[], &[]);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].seletor, ".x");
+        assert!(r[0].declaracoes.contains("text-indent: -9999px"));
+    }
+
+    #[test]
+    fn regras_casadas_nao_incluem_regra_que_nao_casa() {
+        let f = Folha::parse(".x { text-indent: -9999px }");
+        let alvo = info("span", "", &["y"], &[]);
+        assert!(regras_casadas(&f, &alvo, &[], &[]).is_empty());
     }
 }
