@@ -7,7 +7,7 @@
 //! Suporta: seletores de tipo, `.classe`, `#id`, `*`, listas com vírgula,
 //! atributos (`[a]`, `[a=v]`, `[a~=v]`, `[a|=v]`, `[a^=v]`, `[a$=v]`, `[a*=v]`),
 //! descendente, `>`, `+` e `~` (só ao lado do alvo), `:not(...)`,
-//! `:first-child` (só no alvo ou no irmão ao lado).
+//! `:first-child` (só no alvo ou no irmão ao lado) e `:last-child` (só no alvo).
 //! Pseudo de interação (hover, focus etc.) nunca casa.
 //! `@media` por largura, com px, em e calc(a + b) / calc(a - b).
 //! Esconde texto com `display: none`, `visibility: hidden`, `clip` de área
@@ -16,6 +16,9 @@
 //! Regras com `display: none` que o motor não aplica ficam em `ignoradas`.
 //! `regras_casadas` devolve, para o diagnóstico, as regras que casam com um
 //! elemento e o texto das suas declarações. Não altera a renderização.
+//! `:last-child` precisa saber se o elemento é o último da lista. Quem não
+//! informa isso (`estilo_completo`, `regras_casadas`) faz a regra não casar;
+//! quem informa usa `estilo_completo_ultimo` ou `regras_casadas_ultimo`.
 
 use std::collections::HashMap;
 
@@ -123,7 +126,8 @@ pub fn estilo_com_pais(
 }
 
 /// Estilo completo. `pais` vai da raiz até o pai. `irmaos` vai do primeiro
-/// até o irmão imediatamente anterior.
+/// até o irmão imediatamente anterior. Sem informação sobre o fim da lista,
+/// `:last-child` não casa; para isso, use `estilo_completo_ultimo`.
 pub fn estilo_completo(
     folha: &Folha,
     alvo: &Info,
@@ -131,7 +135,19 @@ pub fn estilo_completo(
     irmaos: &[Info],
     inline: Option<&str>,
 ) -> Estilo {
-    let cand = casam(folha, alvo, pais, irmaos);
+    estilo_completo_ultimo(folha, alvo, pais, irmaos, false, inline)
+}
+
+/// Como `estilo_completo`, mas informa se o elemento é o último elemento do pai.
+pub fn estilo_completo_ultimo(
+    folha: &Folha,
+    alvo: &Info,
+    pais: &[Info],
+    irmaos: &[Info],
+    e_ultimo: bool,
+    inline: Option<&str>,
+) -> Estilo {
+    let cand = casam(folha, alvo, pais, irmaos, e_ultimo);
     let mut d = Decl::default();
     for &i in &cand {
         aplica(&mut d, &folha.regras[i].decl);
@@ -143,9 +159,21 @@ pub fn estilo_completo(
 }
 
 /// Regras que casam com o elemento, na ordem em que são aplicadas.
-/// Não inclui o `style` do próprio elemento.
+/// Não inclui o `style` do próprio elemento. Sem informação sobre o fim da
+/// lista, `:last-child` não casa; para isso, use `regras_casadas_ultimo`.
 pub fn regras_casadas(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> Vec<Casada> {
-    casam(folha, alvo, pais, irmaos)
+    regras_casadas_ultimo(folha, alvo, pais, irmaos, false)
+}
+
+/// Como `regras_casadas`, mas informa se o elemento é o último elemento do pai.
+pub fn regras_casadas_ultimo(
+    folha: &Folha,
+    alvo: &Info,
+    pais: &[Info],
+    irmaos: &[Info],
+    e_ultimo: bool,
+) -> Vec<Casada> {
+    casam(folha, alvo, pais, irmaos, e_ultimo)
         .into_iter()
         .map(|i| Casada {
             seletor: folha.regras[i].origem.clone(),
@@ -155,7 +183,7 @@ pub fn regras_casadas(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info]
 }
 
 /// Índices das regras que casam com o elemento, em ordem de especificidade.
-fn casam(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> Vec<usize> {
+fn casam(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info], e_ultimo: bool) -> Vec<usize> {
     let ind = &folha.indice;
     let mut cand: Vec<usize> = Vec::new();
     if !alvo.id.is_empty() {
@@ -175,7 +203,7 @@ fn casam(folha: &Folha, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> Vec<usiz
     cand.extend_from_slice(&ind.universais);
     cand.sort_unstable();
     cand.dedup();
-    cand.retain(|&i| casa_seletor(&folha.regras[i].seletor, alvo, pais, irmaos));
+    cand.retain(|&i| casa_seletor(&folha.regras[i].seletor, alvo, pais, irmaos, e_ultimo));
     cand.sort_by_key(|&i| (folha.regras[i].seletor.especificidade, i));
     cand
 }
@@ -239,6 +267,7 @@ struct Simples {
     classes: Vec<String>,
     atributos: Vec<Atributo>,
     primeiro_filho: bool,
+    ultimo_filho: bool,
     negados: Vec<Simples>,
 }
 
@@ -878,6 +907,13 @@ fn parse_seletor(texto: &str) -> Result<Seletor, String> {
         }
     }
 
+    // :last-child só no alvo.
+    for s in compostos.iter().take(n - 1) {
+        if s.ultimo_filho {
+            return Err("last-child fora do alvo".to_string());
+        }
+    }
+
     let usa_primeiro = compostos.iter().any(|s| s.primeiro_filho);
     let alvo = match compostos.pop() {
         Some(a) => a,
@@ -960,13 +996,15 @@ fn parse_composto(texto: &str) -> Result<Simples, String> {
                 let so_interacao = interno.strip_prefix(':').map_or(false, eh_interacao);
                 if !so_interacao {
                     let negado = parse_composto(interno)?;
-                    if negado.primeiro_filho {
-                        return Err("first-child dentro de :not não suportado".to_string());
+                    if negado.primeiro_filho || negado.ultimo_filho {
+                        return Err("first-child ou last-child dentro de :not não suportado".to_string());
                     }
                     s.negados.push(negado);
                 }
             } else if nome == "first-child" {
                 s.primeiro_filho = true;
+            } else if nome == "last-child" {
+                s.ultimo_filho = true;
             } else if eh_interacao(&nome) {
                 return Err("pseudo de interação (hover, focus etc.): nunca casa".to_string());
             } else {
@@ -1069,7 +1107,8 @@ fn soma_especificidade(s: &Simples, t: &mut (u32, u32, u32)) {
     }
     t.1 += s.classes.len() as u32
         + s.atributos.len() as u32
-        + (if s.primeiro_filho { 1 } else { 0 });
+        + (s.primeiro_filho as u32)
+        + (s.ultimo_filho as u32);
     if s.tag.is_some() {
         t.2 += 1;
     }
@@ -1141,7 +1180,9 @@ fn casa_atributo(a: &Atributo, info: &Info) -> bool {
     }
 }
 
-fn casa_simples(s: &Simples, info: &Info, e_primeiro: bool) -> bool {
+/// `primeiro` e `ultimo` dizem a posição do elemento entre seus irmãos.
+/// Ancestrais não têm essa informação; quem chama passa `false` para eles.
+fn casa_simples(s: &Simples, info: &Info, primeiro: bool, ultimo: bool) -> bool {
     if let Some(t) = &s.tag {
         if !info.tag.eq_ignore_ascii_case(t) {
             return false;
@@ -1155,13 +1196,18 @@ fn casa_simples(s: &Simples, info: &Info, e_primeiro: bool) -> bool {
     if !s.classes.iter().all(|c| info.classes.iter().any(|ic| ic == c)) {
         return false;
     }
-    if s.primeiro_filho && !e_primeiro {
+    if s.primeiro_filho && !primeiro {
+        return false;
+    }
+    if s.ultimo_filho && !ultimo {
         return false;
     }
     if !s.atributos.iter().all(|a| casa_atributo(a, info)) {
         return false;
     }
-    s.negados.iter().all(|n| !casa_simples(n, info, e_primeiro))
+    s.negados
+        .iter()
+        .all(|n| !casa_simples(n, info, primeiro, ultimo))
 }
 
 /// Casa a cadeia de ancestrais. `topo` é o limite exclusivo de `pais`:
@@ -1172,19 +1218,25 @@ fn casa_ancestrais(rest: &[(Combinador, Simples)], pais: &[Info], topo: usize) -
         Some((comb, s)) => match comb {
             Combinador::Filho => {
                 topo > 0
-                    && casa_simples(s, &pais[topo - 1], false)
+                    && casa_simples(s, &pais[topo - 1], false, false)
                     && casa_ancestrais(&rest[1..], pais, topo - 1)
             }
             Combinador::Descendente => (0..topo).rev().any(|i| {
-                casa_simples(s, &pais[i], false) && casa_ancestrais(&rest[1..], pais, i)
+                casa_simples(s, &pais[i], false, false) && casa_ancestrais(&rest[1..], pais, i)
             }),
             _ => false,
         },
     }
 }
 
-fn casa_seletor(sel: &Seletor, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> bool {
-    if !casa_simples(&sel.alvo, alvo, irmaos.is_empty()) {
+fn casa_seletor(
+    sel: &Seletor,
+    alvo: &Info,
+    pais: &[Info],
+    irmaos: &[Info],
+    e_ultimo: bool,
+) -> bool {
+    if !casa_simples(&sel.alvo, alvo, irmaos.is_empty(), e_ultimo) {
         return false;
     }
     match sel.anteriores.first() {
@@ -1198,7 +1250,7 @@ fn casa_seletor(sel: &Seletor, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> b
                     0
                 };
                 (inicio..n).any(|c| {
-                    casa_simples(s, &irmaos[c], c == 0)
+                    casa_simples(s, &irmaos[c], c == 0, false)
                         && casa_ancestrais(&sel.anteriores[1..], pais, pais.len())
                 })
             }
@@ -1351,6 +1403,38 @@ mod testes {
     }
 
     #[test]
+    fn last_child_casa_so_no_ultimo_elemento() {
+        let f = Folha::parse("li:last-child { display: none }");
+        let li = info("li", "", &[], &[]);
+        let x = info("span", "", &[], &[]);
+        assert!(estilo_completo_ultimo(&f, &li, &[], &[x.clone()], true, None).oculto);
+        assert!(!estilo_completo_ultimo(&f, &li, &[], &[x], false, None).oculto);
+    }
+
+    #[test]
+    fn last_child_sem_informacao_de_fim_nao_casa() {
+        let f = Folha::parse("li:last-child { display: none }");
+        let li = info("li", "", &[], &[]);
+        assert!(!estilo_completo(&f, &li, &[], &[], None).oculto);
+    }
+
+    #[test]
+    fn last_child_em_ancestral_fica_de_fora() {
+        let f = Folha::parse("ul:last-child li { display: none }");
+        assert_eq!(f.ignoradas.len(), 1);
+    }
+
+    #[test]
+    fn texto_depois_do_icone_some_com_span_last_child() {
+        let f = Folha::parse(".b span + span:last-child { clip: rect(1px,1px,1px,1px) }");
+        let texto = info("span", "", &[], &[]);
+        let icone = info("span", "", &["minerva-icon"], &[]);
+        let a = info("a", "", &["b"], &[]);
+        assert!(estilo_completo_ultimo(&f, &texto, &[a.clone()], &[icone.clone()], true, None).oculto);
+        assert!(!estilo_completo_ultimo(&f, &texto, &[a], &[icone], false, None).oculto);
+    }
+
+    #[test]
     fn irmao_depois_de_ancestral_fica_de_fora() {
         let f = Folha::parse(".a + .b p { display: none }");
         assert_eq!(f.ignoradas.len(), 1);
@@ -1460,3 +1544,4 @@ mod testes {
         assert!(regras_casadas(&f, &alvo, &[], &[]).is_empty());
     }
 }
+
