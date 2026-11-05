@@ -132,11 +132,30 @@ fn fim_do_texto_puro(texto: &str, nome: &str) -> usize {
 }
 
 /// Separa o conteúdo de uma tag (sem o '<' ou '</') do restante da entrada.
+/// Um '>' dentro de aspas no valor de um atributo não encerra a tag.
 fn split_tag(rest: &str, skip: usize) -> (&str, &str) {
-    match rest[skip..].find('>') {
-        Some(i) => (&rest[skip..skip + i], &rest[skip + i + 1..]),
-        None => (&rest[skip..], ""),
+    let corpo = &rest[skip..];
+    let mut aspas: Option<char> = None;
+    let mut anterior = ' ';
+    for (i, c) in corpo.char_indices() {
+        match aspas {
+            Some(q) => {
+                if c == q {
+                    aspas = None;
+                }
+            }
+            None => match c {
+                // Aspas só abrem valor logo depois de '='.
+                '"' | '\'' if anterior == '=' => aspas = Some(c),
+                '>' => return (&corpo[..i], &corpo[i + 1..]),
+                _ => {}
+            },
+        }
+        if !c.is_whitespace() {
+            anterior = c;
+        }
     }
+    (corpo, "")
 }
 
 /// Extrai o nome da tag em minúsculas, ignorando atributos e a barra final.
@@ -437,6 +456,18 @@ mod tests {
         let nodes = parse(r#"<a href="/busca?a=1&amp;b=2">x</a>"#);
         match &nodes[0] {
             Node::Element(e) => assert_eq!(e.attr("href"), Some("/busca?a=1&b=2")),
+            _ => panic!("esperava um elemento"),
+        }
+    }
+
+    #[test]
+    fn gt_inside_quoted_attribute_does_not_end_tag() {
+        let nodes = parse(r#"<span data-x='{"a":"</span>"}'>t</span>"#);
+        match &nodes[0] {
+            Node::Element(e) => {
+                assert_eq!(e.attr("data-x"), Some(r#"{"a":"</span>"}"#));
+                assert_eq!(e.children, vec![text("t")]);
+            }
             _ => panic!("esperava um elemento"),
         }
     }
