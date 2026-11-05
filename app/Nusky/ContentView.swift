@@ -8,6 +8,7 @@ struct ContentView: View {
     @AppStorage("themeAuto") private var automatico = true
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage("useButtons") private var botoes = true
+    @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var sistema
@@ -17,6 +18,7 @@ struct ContentView: View {
     @State private var bolhasAbertas = false
     @State private var mostrarConfiguracoes = false
     @State private var mostrarAbas = false
+    @State private var versaoNaAbertura = false
 
     private let altura: CGFloat = 56      // espaço reservado para a barra
     private let fade: CGFloat = 14
@@ -85,6 +87,14 @@ struct ContentView: View {
         .onAppear { model.start() }
         .onChange(of: scenePhase) { fase in
             if fase != .active { model.saveSession() }
+        }
+        // Ao fechar Ajustes, recarrega a página só se a opção de versão desktop mudou.
+        .onChange(of: mostrarConfiguracoes) { aberta in
+            if aberta {
+                versaoNaAbertura = versaoDesktop
+            } else if versaoDesktop != versaoNaAbertura {
+                model.reload()
+            }
         }
     }
 
