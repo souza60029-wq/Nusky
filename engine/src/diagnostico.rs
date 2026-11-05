@@ -5,10 +5,13 @@
 //! Diagnóstico de página.
 //! Passa o HTML pelo mesmo parser, CSS e layout do motor e descreve em texto curto
 //! o que aconteceu: quanto texto o HTML tem, quanto foi ocultado por CSS, quanto foi
-//! desenhado, quais blocos de texto não chegaram à tela e onde estão os elementos ocultos.
+//! desenhado, quais blocos de texto não chegaram à tela, onde estão os elementos ocultos
+//! e quais regras `display: none` o motor não aplicou, com o motivo.
 //! Só lê: não altera a renderização.
 
-use crate::css::{self, Estilo, Folha, Info};
+use std::collections::BTreeMap;
+
+use crate::css::{self, Estilo, Folha, Ignorada, Info};
 use crate::html::{parse, Element, Node};
 use crate::layout::{layout, DrawCommand, TextMeasurer};
 
@@ -27,6 +30,8 @@ const PROFUNDIDADE_ARVORE: usize = 4;
 const CHARS_EXIBIDOS: usize = 50;
 const CHARS_CONFERIDOS: usize = 40;
 const LIMITE_TEXTO_QUADRO: usize = 300;
+const MAX_IGNORADAS_POR_MOTIVO: usize = 6;
+const LIMITE_SELETOR: usize = 140;
 
 /// Bloco de texto encontrado no HTML.
 struct Bloco {
@@ -118,6 +123,13 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
     if d.ocultos.len() > MAX_OCULTOS {
         linhas.push(format!("  … e mais {}", d.ocultos.len() - MAX_OCULTOS));
     }
+
+    linhas.push(String::new());
+    linhas.push(format!(
+        "REGRAS COM display: none NÃO APLICADAS: {}",
+        d.folha.ignoradas.len()
+    ));
+    linhas.extend(resumo_ignoradas(&d.folha.ignoradas));
 
     // Problemas primeiro (prioridade 0), depois ocultos (1), depois os que foram desenhados (2).
     let mut blocos: Vec<(u8, &Bloco)> = d
@@ -349,6 +361,46 @@ fn texto_conferido(texto: &str) -> String {
         .collect()
 }
 
+/// Seletor com espaços normalizados, cortado para caber numa linha.
+fn seletor_exibido(s: &str) -> String {
+    let junto = s.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if junto.chars().count() > LIMITE_SELETOR {
+        let curto: String = junto.chars().take(LIMITE_SELETOR).collect();
+        format!("{}…", curto)
+    } else {
+        junto
+    }
+}
+
+/// Agrupa as regras ignoradas pelo motivo. Grupos maiores vêm primeiro.
+fn resumo_ignoradas(ignoradas: &[Ignorada]) -> Vec<String> {
+    let mut grupos: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for item in ignoradas {
+        grupos
+            .entry(item.motivo.as_str())
+            .or_default()
+            .push(item.seletor.as_str());
+    }
+
+    let mut ordenados: Vec<(&str, Vec<&str>)> = grupos.into_iter().collect();
+    ordenados.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    let mut linhas = Vec::new();
+    for (motivo, seletores) in ordenados {
+        linhas.push(format!("  {} ({}):", motivo, seletores.len()));
+        for sel in seletores.iter().take(MAX_IGNORADAS_POR_MOTIVO) {
+            linhas.push(format!("    {}", seletor_exibido(sel)));
+        }
+        if seletores.len() > MAX_IGNORADAS_POR_MOTIVO {
+            linhas.push(format!(
+                "    … e mais {}",
+                seletores.len() - MAX_IGNORADAS_POR_MOTIVO
+            ));
+        }
+    }
+    linhas
+}
+
 fn arvore_de(nos: &[Node], nivel: usize, saida: &mut Vec<String>) {
     for no in nos {
         if let Node::Element(el) = no {
@@ -421,5 +473,12 @@ mod tests {
     fn hidden_block_is_marked() {
         let r = rel("<style>.x { display: none }</style><p class=\"x\">oculto aqui</p>");
         assert!(r.contains("[oculto] p.x: \"oculto aqui\""));
+    }
+
+    #[test]
+    fn ignored_hide_rules_are_listed() {
+        let r = rel("<style>.a ~ .b { display: none }</style><p>x</p>");
+        assert!(r.contains("REGRAS COM display: none NÃO APLICADAS: 1"));
+        assert!(r.contains(".a ~ .b"));
     }
 }
