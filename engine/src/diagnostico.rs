@@ -11,8 +11,8 @@
 //! os elementos dentro dele. Para textos curtos visíveis, numera as regras num catálogo, marca
 //! as que têm declarações de ocultação e as que o motor ignora.
 //! Também inventaria as declarações de ocultação de todo o CSS da página, com a quantidade de
-//! regras e se o motor as lê. Usa a mesma lista de irmãos anteriores do layout, para que
-//! seletores `+`, `~` e `:first-child` deem o mesmo resultado na tela e no relatório.
+//! regras e se o motor as lê. Usa a mesma lista de irmãos anteriores e o mesmo fim da lista
+//! (`:last-child`) do layout, para que os seletores deem o mesmo resultado na tela e no relatório.
 //! Só lê: não altera a renderização.
 
 use std::collections::{BTreeMap, HashMap};
@@ -119,6 +119,8 @@ struct Diagnostico {
     pais: Vec<Info>,
     /// Irmãos anteriores de cada nível de `pais`, na mesma ordem.
     pais_irmaos: Vec<Vec<Info>>,
+    /// Se cada nível de `pais` é o último filho do seu pai, na mesma ordem.
+    pais_ultimo: Vec<bool>,
     abertos: Vec<Quadro>,
     blocos: Vec<Bloco>,
     ocultos: Vec<String>,
@@ -164,6 +166,7 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
         tem_css: !css_texto.trim().is_empty(),
         pais: Vec::new(),
         pais_irmaos: Vec::new(),
+        pais_ultimo: Vec::new(),
         abertos: Vec::new(),
         blocos: Vec::new(),
         ocultos: Vec::new(),
@@ -388,11 +391,13 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
 
 impl Diagnostico {
     /// Percorre os filhos de um nó. Guarda a lista de irmãos anteriores só quando
-    /// alguma regra da página precisa dela, como o layout faz.
+    /// alguma regra da página precisa dela, como o layout faz. Calcula qual é o último
+    /// elemento da lista (texto não conta; script conta), igual ao layout.
     fn percorrer(&mut self, nos: &[Node], profundidade: usize) {
         let guarda_irmaos = self.folha.precisa_irmaos();
+        let ultimo_idx = nos.iter().rposition(|no| matches!(no, Node::Element(_)));
         let mut irmaos: Vec<Info> = Vec::new();
-        for no in nos {
+        for (indice, no) in nos.iter().enumerate() {
             match no {
                 Node::Text(t) => {
                     self.visivel += contar(t);
@@ -402,7 +407,8 @@ impl Diagnostico {
                 }
                 Node::Element(el) => {
                     let info = info_do_elemento(el, self.folha.nomes_atributos());
-                    let info = self.elemento(el, info, &irmaos, profundidade);
+                    let ultimo = ultimo_idx == Some(indice);
+                    let info = self.elemento(el, info, &irmaos, ultimo, profundidade);
                     if guarda_irmaos {
                         irmaos.push(info);
                     }
@@ -412,7 +418,14 @@ impl Diagnostico {
     }
 
     /// Trata um elemento e devolve a sua identificação, para entrar na lista de irmãos.
-    fn elemento(&mut self, el: &Element, info: Info, irmaos: &[Info], profundidade: usize) -> Info {
+    fn elemento(
+        &mut self,
+        el: &Element,
+        info: Info,
+        irmaos: &[Info],
+        ultimo: bool,
+        profundidade: usize,
+    ) -> Info {
         if SKIP_TAGS.contains(&el.tag.as_str()) {
             return info;
         }
@@ -420,13 +433,13 @@ impl Diagnostico {
         self.profundidade_max = self.profundidade_max.max(profundidade);
 
         let caminho = caminho_de(&self.pais, &info);
-        let estilo = self.estilo(el, &info, irmaos);
+        let estilo = self.estilo(el, &info, irmaos, ultimo);
         let e_bloco = BLOCK_TAGS.contains(&el.tag.as_str());
 
         // Regras do próprio elemento entram em todos os blocos abertos (ele está dentro deles).
         // Vale também para elementos ocultos, que costumam ser a causa do que sumiu.
         if self.tem_css && !self.abertos.is_empty() {
-            let de_dentro = self.regras_do_elemento(&info, irmaos);
+            let de_dentro = self.regras_do_elemento(&info, irmaos, ultimo);
             for k in 0..self.abertos.len() {
                 let idx = self.abertos[k].indice;
                 self.blocos[idx]
@@ -436,7 +449,7 @@ impl Diagnostico {
         }
 
         let regras = if e_bloco {
-            self.regras_do_bloco(&info, irmaos)
+            self.regras_do_bloco(&info, irmaos, ultimo)
         } else {
             Vec::new()
         };
@@ -477,7 +490,9 @@ impl Diagnostico {
 
         self.pais.push(info);
         self.pais_irmaos.push(irmaos.to_vec());
+        self.pais_ultimo.push(ultimo);
         self.percorrer(&el.children, profundidade + 1);
+        self.pais_ultimo.pop();
         self.pais_irmaos.pop();
         let info = self.pais.pop().unwrap_or_default();
 
@@ -491,21 +506,29 @@ impl Diagnostico {
         info
     }
 
-    /// Mesmo cálculo de CSS que o layout faz para cada elemento, com pais e irmãos anteriores.
-    fn estilo(&self, el: &Element, info: &Info, irmaos: &[Info]) -> Estilo {
+    /// Mesmo cálculo de CSS que o layout faz para cada elemento, com pais, irmãos anteriores
+    /// e a informação de fim da lista.
+    fn estilo(&self, el: &Element, info: &Info, irmaos: &[Info], ultimo: bool) -> Estilo {
         if !self.tem_css && el.attr("style").is_none() {
             return Estilo::default();
         }
-        css::estilo_completo(&self.folha, info, &self.pais, irmaos, el.attr("style"))
+        css::estilo_completo_ultimo(
+            &self.folha,
+            info,
+            &self.pais,
+            irmaos,
+            ultimo,
+            el.attr("style"),
+        )
     }
 
     /// Regras que casam com o bloco e com cada ancestral. O próprio bloco vem primeiro.
-    fn regras_do_bloco(&self, info: &Info, irmaos: &[Info]) -> Vec<Achado> {
+    fn regras_do_bloco(&self, info: &Info, irmaos: &[Info], ultimo: bool) -> Vec<Achado> {
         let mut saida: Vec<Achado> = Vec::new();
         if !self.tem_css {
             return saida;
         }
-        for c in css::regras_casadas(&self.folha, info, &self.pais, irmaos) {
+        for c in css::regras_casadas_ultimo(&self.folha, info, &self.pais, irmaos, ultimo) {
             saida.push(Achado {
                 seletor: seletor_exibido(&c.seletor),
                 corpo: c.declaracoes,
@@ -514,7 +537,13 @@ impl Diagnostico {
         }
         for (k, anc) in self.pais.iter().enumerate().rev() {
             let local = format!("ancestral {}", rotulo(anc));
-            for c in css::regras_casadas(&self.folha, anc, &self.pais[..k], &self.pais_irmaos[k]) {
+            for c in css::regras_casadas_ultimo(
+                &self.folha,
+                anc,
+                &self.pais[..k],
+                &self.pais_irmaos[k],
+                self.pais_ultimo[k],
+            ) {
                 saida.push(Achado {
                     seletor: seletor_exibido(&c.seletor),
                     corpo: c.declaracoes,
@@ -527,10 +556,10 @@ impl Diagnostico {
 
     /// Regras que casam com um elemento dentro de bloco. Só o próprio elemento;
     /// os ancestrais já entram pela lista do bloco.
-    fn regras_do_elemento(&self, info: &Info, irmaos: &[Info]) -> Vec<Achado> {
+    fn regras_do_elemento(&self, info: &Info, irmaos: &[Info], ultimo: bool) -> Vec<Achado> {
         let mut saida: Vec<Achado> = Vec::new();
         let local = format!("descendente {}", rotulo(info));
-        for c in css::regras_casadas(&self.folha, info, &self.pais, irmaos) {
+        for c in css::regras_casadas_ultimo(&self.folha, info, &self.pais, irmaos, ultimo) {
             saida.push(Achado {
                 seletor: seletor_exibido(&c.seletor),
                 corpo: c.declaracoes,
@@ -1112,6 +1141,23 @@ mod tests {
     fn comentarios_nao_entram_no_inventario() {
         let r = rel("<style>/* .x { left: -9999px } */ .y { color: red }</style><p>a</p>");
         assert!(!r.contains("left: -9999px"));
+    }
+
+    #[test]
+    fn ultimo_filho_esconde_so_o_ultimo_texto() {
+        let r = rel("<style>span:last-child { display: none }</style><p><span>ab</span><span>cd</span></p>");
+        assert!(r.contains("Oculto por CSS: 2 caracteres"));
+        assert!(r.contains("Desenhado: 2 caracteres"));
+    }
+
+    #[test]
+    fn ultimo_filho_aparece_no_bloco_com_o_seletor_completo() {
+        let r = rel(
+            "<style>.cdx-button.cdx-button--icon-only span + span:last-child { width: 1px; height: 1px; clip: rect(1px,1px,1px,1px) }</style>\
+             <ul><li><a class=\"cdx-button cdx-button--icon-only\"><span class=\"minerva-icon\"></span><span>Idioma</span></a></li></ul>",
+        );
+        assert!(r.contains("span + span:last-child"));
+        assert!(r.contains("(descendente span)"));
     }
 
     #[test]
