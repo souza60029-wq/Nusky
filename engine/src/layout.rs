@@ -167,6 +167,7 @@ struct Linha<'a> {
 }
 
 /// Gera os comandos de desenho para uma lista de nós de topo.
+/// Os comandos saem ordenados de cima para baixo e da esquerda para a direita.
 pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) -> Vec<DrawCommand> {
     let mut css_texto = String::new();
     coletar_css(nodes, &mut css_texto);
@@ -191,7 +192,28 @@ pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) 
     let mut buf: Vec<Span> = Vec::new();
     layout_children(nodes, root, None, &mut buf, &mut ctx);
     flush_inline(&mut buf, root, &mut ctx);
+    ordenar_por_posicao(&mut ctx.commands);
     ctx.commands
+}
+
+/// Ordena os comandos de cima para baixo e, na mesma altura, da esquerda para a direita.
+/// Tabelas desenham célula por célula, então sem isso a ordem sai misturada.
+/// A janela de desenho da casca depende dessa ordem para achar o que está visível.
+fn ordenar_por_posicao(commands: &mut [DrawCommand]) {
+    commands.sort_by(|a, b| {
+        let (ax, ay) = posicao(a);
+        let (bx, by) = posicao(b);
+        ay.partial_cmp(&by)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
+    });
+}
+
+/// Posição (x, y) de um comando de desenho.
+fn posicao(cmd: &DrawCommand) -> (f32, f32) {
+    match cmd {
+        DrawCommand::Text { x, y, .. } => (*x, *y),
+    }
 }
 
 /// Junta o texto de todas as tags <style> do documento, na ordem em que aparecem.
@@ -1126,5 +1148,23 @@ mod tests {
         assert_eq!(pos[0].0, "a");
         assert_eq!(pos[1].0, "b");
         assert!(pos[1].1 < 300.0);
+    }
+
+    #[test]
+    fn comandos_saem_em_ordem_de_altura() {
+        // A primeira coluna quebra em duas linhas; a segunda ("b") fica numa só.
+        // Sem ordenar, "b" sairia antes da segunda linha da primeira coluna.
+        let cmds = run(
+            "<table><tr><td>palavra palavra palavra palavra palavra palavra palavra palavra palavra palavra</td><td>b</td></tr></table>",
+            400.0,
+        );
+        let ys: Vec<f32> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { y, .. } => *y,
+            })
+            .collect();
+        assert!(ys.len() > 2);
+        assert!(ys.windows(2).all(|w| w[0] <= w[1]));
     }
 }
