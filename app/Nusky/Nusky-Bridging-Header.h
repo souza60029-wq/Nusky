@@ -8,8 +8,20 @@
 // Medida de texto fornecida pela casca (CoreText).
 typedef float (*nusky_measure_fn)(const char *text, float font_size, int bold);
 
+// Renderização e diagnóstico.
 char *nusky_render(const char *html, float viewport_width, nusky_measure_fn measure);
 char *nusky_diagnose(const char *html, float viewport_width, nusky_measure_fn measure);
 void nusky_free_string(char *s);
+
+// Busca de sites pelo nome.
+// nusky_busca_carregar: json NULL carrega a lista embutida. Retorna 0 se deu certo, 1 se a lista estiver errada.
+int nusky_busca_carregar(const char *json);
+// Texto com uma linha por endereço: endereco<TAB>contagem.
+void nusky_busca_definir_usos(const char *texto);
+void nusky_busca_registrar_uso(const char *endereco);
+// Linhas: endereco<TAB>nome<TAB>título do atalho (vazio se for o site). Liberar com nusky_free_string.
+char *nusky_busca(const char *consulta);
+// Linha: nome<TAB>endereço, ou vazio. Liberar com nusky_free_string.
+char *nusky_busca_sugestao(const char *consulta);
 
 #endif
