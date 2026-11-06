@@ -1,3 +1,4 @@
+// app/Nusky/Engine.swift
 import Foundation
 import UIKit
 import CoreGraphics
@@ -102,13 +103,25 @@ enum Engine {
     /// Chave onde as contagens de abertura ficam salvas no aparelho.
     private static let chaveUsos = "buscaUsos"
 
-    /// Carrega a lista embutida no app e as contagens salvas. Chamar uma vez, ao abrir o app.
-    /// Devolve false se a lista embutida não conseguir ser lida.
+    /// Carrega a lista ao abrir o app. Usa a lista baixada, se existir e estiver certa.
+    /// Senão, usa a lista embutida no app. Devolve false se nem a embutida conseguir ser lida.
     @discardableResult
     static func iniciarBusca() -> Bool {
-        let ok = nusky_busca_carregar(nil) == 0
+        let carregou: Bool
+        if let salva = listaSalva(), nusky_busca_carregar(salva) == 0 {
+            carregou = true
+        } else {
+            carregou = nusky_busca_carregar(nil) == 0
+        }
         nusky_busca_definir_usos(textoDeUsos(usosSalvos()))
-        return ok
+        return carregou
+    }
+
+    /// Texto da lista baixada e guardada no aparelho. Nil se não existir ou não puder ser lido.
+    private static func listaSalva() -> String? {
+        guard let caminho = try? ArquivoLista.caminho(),
+              FileManager.default.fileExists(atPath: caminho.path) else { return nil }
+        return try? String(contentsOf: caminho, encoding: .utf8)
     }
 
     /// Troca a lista em uso pela versão baixada. Se ela estiver errada,
