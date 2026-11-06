@@ -2,6 +2,10 @@ name: iOS
 
 on:
   push:
+    # Mudança só na lista de sites não gera IPA. Para incluir a lista nova no app,
+    # rode manualmente em Actions > iOS > Run workflow.
+    paths-ignore:
+      - "dados/**"
   workflow_dispatch:
 
 jobs:
