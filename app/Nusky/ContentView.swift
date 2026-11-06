@@ -9,6 +9,8 @@ struct ContentView: View {
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage("useButtons") private var botoes = true
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
+    @AppStorage(ChavesTermos.versaoAceita) private var versaoAceita = ""
+    @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var sistema
@@ -19,6 +21,7 @@ struct ContentView: View {
     @State private var mostrarConfiguracoes = false
     @State private var mostrarAbas = false
     @State private var versaoNaAbertura = false
+    @State private var mostrarBoasVindas = false
 
     private let altura: CGFloat = 56      // espaço reservado para a barra
     private let fade: CGFloat = 14
@@ -84,7 +87,15 @@ struct ContentView: View {
             )
             .preferredColorScheme(esquemaPreferido)
         }
-        .onAppear { model.start() }
+        // Boas-vindas e termos: aparecem na primeira abertura e quando a versão dos termos muda.
+        .fullScreenCover(isPresented: $mostrarBoasVindas) {
+            BoasVindas(aoAceitar: aceitarTermos)
+                .preferredColorScheme(esquemaPreferido)
+        }
+        .onAppear {
+            model.start()
+            mostrarBoasVindas = versaoAceita != versaoDosTermos
+        }
         .onChange(of: scenePhase) { fase in
             if fase != .active { model.saveSession() }
         }
@@ -96,6 +107,15 @@ struct ContentView: View {
                 model.reload()
             }
         }
+    }
+
+    // MARK: - Termos
+
+    /// Grava só no aparelho a versão aceita e a data do aceite.
+    private func aceitarTermos() {
+        versaoAceita = versaoDosTermos
+        dataAceite = ISO8601DateFormatter().string(from: Date())
+        mostrarBoasVindas = false
     }
 
     // MARK: - Página
