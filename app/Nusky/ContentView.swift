@@ -107,6 +107,10 @@ struct ContentView: View {
                 model.reload()
             }
         }
+        // Enquanto o campo tem foco, a lista de resultados acompanha o que está sendo digitado.
+        .onChange(of: model.address) { texto in
+            atualizarResultados(texto)
+        }
     }
 
     // MARK: - Termos
@@ -116,6 +120,94 @@ struct ContentView: View {
         versaoAceita = versaoDosTermos
         dataAceite = ISO8601DateFormatter().string(from: Date())
         mostrarBoasVindas = false
+    }
+
+    // MARK: - Busca
+
+    /// Atualiza os resultados enquanto o usuário digita. Fora do campo, limpa tudo.
+    private func atualizarResultados(_ texto: String) {
+        let consulta = texto.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard campoFocado, !consulta.isEmpty else {
+            fecharBusca()
+            return
+        }
+        let achados = Engine.buscar(consulta)
+        model.resultados = achados
+        model.sugestao = achados.isEmpty ? Engine.sugestao(para: consulta) : nil
+    }
+
+    private func fecharBusca() {
+        model.resultados = []
+        model.sugestao = nil
+    }
+
+    /// Abre um site ou atalho da lista. Conta a abertura, que fica só no aparelho.
+    private func abrirResultado(_ r: ResultadoBusca) {
+        guard let url = URL(string: r.endereco) else { return }
+        Engine.registrarUso(endereco: r.endereco)
+        fecharBusca()
+        model.open(url: url)
+        recolher()
+    }
+
+    /// Painel com os resultados, ou a sugestão "você quis dizer…?".
+    /// Fica acima da barra quando ela está embaixo, e abaixo quando está em cima.
+    @ViewBuilder
+    private var painelBusca: some View {
+        if let s = model.sugestao {
+            linhaSugestao(s)
+                .background(RoundedRectangle(cornerRadius: 16).fill(corBarra))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+        } else if expandida && !model.resultados.isEmpty {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(model.resultados) { r in
+                        Button {
+                            abrirResultado(r)
+                        } label: {
+                            linhaResultado(r)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: 300)
+            .background(RoundedRectangle(cornerRadius: 16).fill(corBarra))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    private func linhaResultado(_ r: ResultadoBusca) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(r.titulo.isEmpty ? r.nome : "\(r.nome) · \(r.titulo)")
+                .font(.system(size: 16))
+                .foregroundColor(textoCor)
+                .lineLimit(1)
+            Text(r.endereco)
+                .font(.system(size: 12))
+                .foregroundColor(textoCor.opacity(0.5))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+    }
+
+    private func linhaSugestao(_ s: SugestaoBusca) -> some View {
+        Button {
+            model.abrirSugestao()
+            recolher()
+        } label: {
+            Text("Não encontrei. Você quis dizer \(s.nome)?")
+                .font(.system(size: 15))
+                .foregroundColor(textoCor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Página
@@ -129,7 +221,10 @@ struct ContentView: View {
                 restoreY: CGFloat(model.restoreY),
                 aoRolar: { posicao in model.scrollY = posicao },
                 aoAbrirLink: { link in model.open(href: link) },
-                aoTocarPagina: { if expandida { recolher() } }
+                aoTocarPagina: {
+                    fecharBusca()
+                    if expandida { recolher() }
+                }
             )
 
             if model.items.isEmpty {
@@ -159,9 +254,17 @@ struct ContentView: View {
     // MARK: - Barra
 
     private var barraComBolhas: some View {
-        barra
-            .padding(.horizontal, 12)
-            .padding(barraEmbaixo ? .bottom : .top, 6)
+        VStack(spacing: 6) {
+            if barraEmbaixo {
+                painelBusca
+                barra
+            } else {
+                barra
+                painelBusca
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(barraEmbaixo ? .bottom : .top, 6)
     }
 
     private var barra: some View {
@@ -336,6 +439,7 @@ struct ContentView: View {
 
     private func recolher() {
         campoFocado = false
+        model.resultados = []
         withAnimation(.easeIn(duration: 0.15)) {
             bolhasAbertas = false
         }
