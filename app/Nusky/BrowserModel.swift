@@ -14,6 +14,10 @@ final class BrowserModel: ObservableObject {
     @Published var carregando = false
     /// Progresso de 0 a 1 do carregamento atual.
     @Published var progresso: Double = 0
+    /// Resultados da última busca por nome, do mais relevante para o menos.
+    @Published var resultados: [ResultadoBusca] = []
+    /// Site parecido com o que foi digitado, quando a busca não acha nada.
+    @Published var sugestao: SugestaoBusca?
 
     let historico = Historico()
 
@@ -33,6 +37,8 @@ final class BrowserModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // Carrega a lista de sites fora da thread principal, para não atrasar a primeira tela.
+        Task.detached(priority: .utility) { _ = Engine.iniciarBusca() }
         if historico.sessaoNova {
             open(url: URL(string: "https://example.com")!)
         } else {
@@ -48,15 +54,42 @@ final class BrowserModel: ObservableObject {
 
     // MARK: Entrada do usuário
 
+    /// Chamado ao confirmar o campo de endereço. Decide se é endereço ou nome para buscar.
     func submitAddress() {
         let texto = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !texto.isEmpty else { return }
-        let completo = texto.contains("://") ? texto : "https://" + texto
-        guard let url = URL(string: codificarEndereco(completo)), url.host != nil else {
-            status = "Endereço inválido."
+        if pareceEndereco(texto) {
+            abrirEndereco(texto)
+        } else {
+            buscarPorNome(texto)
+        }
+    }
+
+    /// Busca um site pelo nome na lista embutida e abre o melhor resultado.
+    /// Se nada casar, mostra a mensagem e uma sugestão, sem abrir nada.
+    func buscarPorNome(_ consulta: String) {
+        let achados = Engine.buscar(consulta)
+        resultados = achados
+
+        guard let melhor = achados.first else {
+            sugestao = Engine.sugestao(para: consulta)
+            if let s = sugestao {
+                status = "Não encontrei \"\(consulta)\". Você quis dizer \(s.nome)?"
+            } else {
+                status = "Não encontrei \"\(consulta)\"."
+            }
             return
         }
-        open(url: url)
+
+        sugestao = nil
+        abrirBusca(melhor.endereco)
+    }
+
+    /// Abre a sugestão mostrada quando a busca não acha nada.
+    func abrirSugestao() {
+        guard let s = sugestao else { return }
+        sugestao = nil
+        abrirBusca(s.endereco)
     }
 
     /// Link tocado na página. Resolve relativos pela URL final da página atual.
@@ -118,6 +151,35 @@ final class BrowserModel: ObservableObject {
         if ids.contains(ativaAntes) {
             mostrarAtual()
         }
+    }
+
+    // MARK: Endereço e busca
+
+    /// Endereço se tiver "://" ou um ponto sem espaço (ex.: github.com). Caso contrário, é nome para buscar.
+    private func pareceEndereco(_ texto: String) -> Bool {
+        if texto.contains("://") { return true }
+        if texto.contains(where: { $0.isWhitespace }) { return false }
+        let partes = texto.split(separator: ".", omittingEmptySubsequences: false)
+        return partes.count >= 2
+            && partes.allSatisfy { !$0.isEmpty }
+            && (partes.last?.count ?? 0) >= 2
+    }
+
+    private func abrirEndereco(_ texto: String) {
+        let completo = texto.contains("://") ? texto : "https://" + texto
+        guard let url = URL(string: codificarEndereco(completo)), url.host != nil else {
+            status = "Endereço inválido."
+            return
+        }
+        open(url: url)
+    }
+
+    /// Abre um site ou atalho encontrado pela busca. Conta a abertura, que fica só no aparelho.
+    private func abrirBusca(_ endereco: String) {
+        guard let url = URL(string: endereco) else { return }
+        status = ""
+        Engine.registrarUso(endereco: endereco)
+        open(url: url)
     }
 
     // MARK: Internos
