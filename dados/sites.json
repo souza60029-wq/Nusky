@@ -1,0 +1,90 @@
+{
+  "versao": 1,
+  "data": "2026-11-05",
+  "sites": [
+    {
+      "nome": "Arena",
+      "url": "https://arena.ai",
+      "apelidos": ["arena", "lmarena", "lm arena", "lmsys"],
+      "tags": ["ia", "inteligência artificial", "chat", "comparar modelos"],
+      "atalhos": []
+    },
+    {
+      "nome": "ChatGPT",
+      "url": "https://chatgpt.com",
+      "apelidos": ["chatgpt", "chat gpt", "openai"],
+      "tags": ["ia", "inteligência artificial", "chat", "gratuito", "escrever"],
+      "atalhos": []
+    },
+    {
+      "nome": "Claude",
+      "url": "https://claude.ai",
+      "apelidos": ["claude", "anthropic"],
+      "tags": ["ia", "inteligência artificial", "chat", "escrever", "programação"],
+      "atalhos": []
+    },
+    {
+      "nome": "Discord",
+      "url": "https://discord.com",
+      "apelidos": ["discord"],
+      "tags": ["conversa", "chat", "comunidades", "voz"],
+      "atalhos": []
+    },
+    {
+      "nome": "Wikipédia",
+      "url": "https://pt.wikipedia.org",
+      "apelidos": ["wikipedia", "wikipédia", "wiki"],
+      "tags": ["enciclopédia", "pesquisa", "conhecimento"],
+      "atalhos": [
+        {
+          "titulo": "Esplanada",
+          "caminho": "/wiki/Wikip%C3%A9dia:Esplanada",
+          "apelidos": ["esplanada"]
+        },
+        {
+          "titulo": "Página aleatória",
+          "caminho": "/wiki/Especial:Aleat%C3%B3ria",
+          "apelidos": ["aleatória", "artigo aleatório"]
+        }
+      ]
+    },
+    {
+      "nome": "GitHub",
+      "url": "https://github.com",
+      "apelidos": ["github", "git hub", "gitub"],
+      "tags": ["código", "programação", "repositórios", "desenvolvedores"],
+      "atalhos": [
+        {
+          "titulo": "Explorar",
+          "caminho": "/explore",
+          "apelidos": ["explorar", "explore"]
+        },
+        {
+          "titulo": "Meu perfil",
+          "caminho": "/souza60029-wq",
+          "apelidos": ["meu perfil", "meus repositórios", "perfil"]
+        }
+      ]
+    },
+    {
+      "nome": "YouTube",
+      "url": "https://youtube.com",
+      "apelidos": ["youtube", "you tube", "yt"],
+      "tags": ["vídeo", "vídeos", "assistir", "música"],
+      "atalhos": [
+        {
+          "titulo": "Inscrições",
+          "caminho": "/feed/subscriptions",
+          "apelidos": ["inscrições", "inscricoes", "canais"]
+        }
+      ]
+    },
+    {
+      "nome": "Pinterest",
+      "url": "https://pinterest.com",
+      "apelidos": ["pinterest"],
+      "tags": ["imagens", "inspiração", "ideias", "fotos"],
+      "atalhos": []
+    }
+  ]
+}
