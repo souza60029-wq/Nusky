@@ -1,3 +1,4 @@
+// app/Nusky/Configuracoes.swift
 import SwiftUI
 
 struct Configuracoes: View {
@@ -10,12 +11,19 @@ struct Configuracoes: View {
     @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
     @AppStorage("listaVersao") private var versaoLista = 0
     @AppStorage("listaData") private var dataLista = ""
+    @AppStorage("listaEtag") private var etagLista = ""
 
     /// Página aberta no momento, usada pelo diagnóstico.
     var urlAtual: URL? = nil
 
     /// Mensagem mostrada depois de tocar em "Procurar atualização".
     @State private var mensagemLista = ""
+    /// Verdadeiro enquanto o app consulta o GitHub.
+    @State private var verificando = false
+    /// Lista baixada e pronta para ser aplicada, depois da confirmação.
+    @State private var listaNova: ListaBaixada? = nil
+    /// Controla o aviso de confirmação antes de trocar a lista.
+    @State private var confirmarAtualizacao = false
 
     private var versao: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
@@ -68,7 +76,7 @@ struct Configuracoes: View {
                     HStack {
                         Text("Versão da lista")
                         Spacer()
-                        Text(versaoLista == 0 ? "Nenhuma" : "\(versaoLista)")
+                        Text(versaoLista == 0 ? "Vem com o app" : "\(versaoLista)")
                             .foregroundColor(.secondary)
                     }
                     HStack {
@@ -77,8 +85,19 @@ struct Configuracoes: View {
                         Text(dataLista.isEmpty ? "Nunca" : dataLista)
                             .foregroundColor(.secondary)
                     }
-                    Button("Procurar atualização") {
-                        procurarAtualizacao()
+                    Button {
+                        Task { await verificarAtualizacao() }
+                    } label: {
+                        Text(verificando ? "Verificando…" : "Procurar atualização")
+                    }
+                    .disabled(verificando)
+
+                    if let nova = listaNova {
+                        Text("Versão \(nova.versao), de \(nova.dataTexto).")
+                            .foregroundColor(.secondary)
+                        Button("Atualizar endereços") {
+                            confirmarAtualizacao = true
+                        }
                     }
                     if !mensagemLista.isEmpty {
                         Text(mensagemLista)
@@ -87,7 +106,7 @@ struct Configuracoes: View {
                 } header: {
                     Text("Endereços")
                 } footer: {
-                    Text("A lista de sites serve para achar sites pelo nome. Ela só é atualizada quando você toca em \"Procurar atualização\". Nada é verificado em segundo plano.")
+                    Text("A lista de sites serve para achar sites pelo nome. Ela só é atualizada quando você toca em \"Procurar atualização\" e confirma. Nada é verificado em segundo plano.")
                 }
 
                 Section {
@@ -138,11 +157,145 @@ struct Configuracoes: View {
                     Button("OK") { dismiss() }
                 }
             }
+            .alert("Atualizar endereços?", isPresented: $confirmarAtualizacao) {
+                Button("Cancelar", role: .cancel) {}
+                Button("Atualizar") {
+                    Task { await aplicarAtualizacao() }
+                }
+            } message: {
+                Text("Os sites encontrados pelo nome passam a vir da lista nova.")
+            }
         }
     }
 
-    /// Ainda não há lista publicada. A busca na lista, com o download, entra depois.
-    private func procurarAtualizacao() {
-        mensagemLista = "Ainda não há lista publicada."
+    // MARK: - Atualização da lista
+
+    /// Consulta o GitHub. Não altera a lista em uso; só guarda a lista nova para o usuário confirmar.
+    private func verificarAtualizacao() async {
+        verificando = true
+        mensagemLista = ""
+        listaNova = nil
+        defer { verificando = false }
+
+        var pedido = URLRequest(url: ArquivoLista.endereco)
+        pedido.cachePolicy = .reloadIgnoringLocalCacheData
+        pedido.timeoutInterval = 20
+        if !etagLista.isEmpty {
+            pedido.setValue(etagLista, forHTTPHeaderField: "If-None-Match")
+        }
+
+        do {
+            let (dados, resposta) = try await URLSession.shared.data(for: pedido)
+            guard let http = resposta as? HTTPURLResponse else {
+                mensagemLista = mensagemFalha
+                return
+            }
+
+            // 304: o arquivo não mudou desde a última atualização aplicada.
+            if http.statusCode == 304 {
+                mensagemLista = "Você já tem a lista mais recente."
+                return
+            }
+            guard http.statusCode == 200 else {
+                mensagemLista = mensagemFalha
+                return
+            }
+
+            let cabecalho = try await Task.detached(priority: .utility) {
+                try JSONDecoder().decode(Cabecalho.self, from: dados)
+            }.value
+
+            guard cabecalho.versao > versaoLista else {
+                mensagemLista = "Você já tem a lista mais recente (versão \(versaoLista))."
+                return
+            }
+
+            listaNova = ListaBaixada(
+                texto: String(decoding: dados, as: UTF8.self),
+                versao: cabecalho.versao,
+                dataTexto: formatarData(cabecalho.data),
+                etag: http.value(forHTTPHeaderField: "ETag") ?? ""
+            )
+        } catch {
+            mensagemLista = mensagemFalha
+        }
     }
+
+    /// Aplica a lista confirmada. Só troca a lista se ela passar na verificação do motor.
+    private func aplicarAtualizacao() async {
+        guard let nova = listaNova else { return }
+
+        let aceita = await Task.detached(priority: .utility) {
+            Engine.atualizarLista(json: nova.texto)
+        }.value
+
+        guard aceita else {
+            listaNova = nil
+            mensagemLista = "A lista baixada não passou na verificação. A lista atual foi mantida."
+            return
+        }
+
+        do {
+            try ArquivoLista.salvar(nova.texto)
+        } catch {
+            mensagemLista = "Não consegui salvar a lista no aparelho. Tente de novo."
+            return
+        }
+
+        versaoLista = nova.versao
+        dataLista = nova.dataTexto
+        etagLista = nova.etag
+        listaNova = nil
+        mensagemLista = "Endereços atualizados para a versão \(nova.versao)."
+    }
+
+    private var mensagemFalha: String {
+        "Não consegui verificar agora. Confira a conexão e tente de novo."
+    }
+
+    /// Converte a data da lista (aaaa-mm-dd) para o formato de leitura do aparelho.
+    private func formatarData(_ iso: String) -> String {
+        let formatador = DateFormatter()
+        formatador.locale = Locale(identifier: "en_US_POSIX")
+        formatador.dateFormat = "yyyy-MM-dd"
+        guard let data = formatador.date(from: iso) else { return iso }
+        return data.formatted(date: .numeric, time: .omitted)
+    }
+}
+
+// MARK: - Apoio da atualização da lista
+
+/// Endereço e local de guarda da lista de sites. O Engine vai ler o mesmo arquivo ao abrir o app.
+enum ArquivoLista {
+    static let endereco = URL(string: "https://raw.githubusercontent.com/souza60029-wq/Nusky/main/dados/sites.json")!
+
+    static func caminho() throws -> URL {
+        let suporte = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let pasta = suporte.appendingPathComponent("Nusky", isDirectory: true)
+        try FileManager.default.createDirectory(at: pasta, withIntermediateDirectories: true)
+        return pasta.appendingPathComponent("sites.json")
+    }
+
+    static func salvar(_ texto: String) throws {
+        try texto.write(to: caminho(), atomically: true, encoding: .utf8)
+    }
+}
+
+/// Lista baixada, esperando a confirmação do usuário.
+private struct ListaBaixada {
+    let texto: String
+    let versao: Int
+    let dataTexto: String
+    let etag: String
+}
+
+/// Só os campos de cabeçalho da lista, para comparar a versão sem ler os sites.
+private struct Cabecalho: Decodable {
+    let versao: Int
+    let data: String
 }
