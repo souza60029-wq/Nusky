@@ -7,12 +7,24 @@ struct Configuracoes: View {
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage("useButtons") private var botoes = true
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
+    @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
+    @AppStorage("listaVersao") private var versaoLista = 0
+    @AppStorage("listaData") private var dataLista = ""
 
     /// Página aberta no momento, usada pelo diagnóstico.
     var urlAtual: URL? = nil
 
+    /// Mensagem mostrada depois de tocar em "Procurar atualização".
+    @State private var mensagemLista = ""
+
     private var versao: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
+
+    /// Data do aceite dos termos, em formato de leitura. Vazia se ainda não aceitou.
+    private var dataAceiteTexto: String {
+        guard let data = ISO8601DateFormatter().date(from: dataAceite) else { return "" }
+        return data.formatted(date: .numeric, time: .omitted)
     }
 
     var body: some View {
@@ -53,6 +65,32 @@ struct Configuracoes: View {
                 }
 
                 Section {
+                    HStack {
+                        Text("Versão da lista")
+                        Spacer()
+                        Text(versaoLista == 0 ? "Nenhuma" : "\(versaoLista)")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("Última atualização")
+                        Spacer()
+                        Text(dataLista.isEmpty ? "Nunca" : dataLista)
+                            .foregroundColor(.secondary)
+                    }
+                    Button("Procurar atualização") {
+                        procurarAtualizacao()
+                    }
+                    if !mensagemLista.isEmpty {
+                        Text(mensagemLista)
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("Endereços")
+                } footer: {
+                    Text("A lista de sites serve para achar sites pelo nome. Ela só é atualizada quando você toca em \"Procurar atualização\". Nada é verificado em segundo plano.")
+                }
+
+                Section {
                     NavigationLink {
                         DiagnosticoView(url: urlAtual)
                     } label: {
@@ -78,8 +116,19 @@ struct Configuracoes: View {
                         Text("MPL-2.0")
                             .foregroundColor(.secondary)
                     }
+                    NavigationLink {
+                        TermosDeUso()
+                    } label: {
+                        Text("Termos de uso")
+                    }
                 } header: {
                     Text("Sobre")
+                } footer: {
+                    if dataAceiteTexto.isEmpty {
+                        Text("Versão dos termos: \(versaoDosTermos).")
+                    } else {
+                        Text("Versão dos termos: \(versaoDosTermos). Aceitos em \(dataAceiteTexto).")
+                    }
                 }
             }
             .navigationTitle("Configurações")
@@ -90,5 +139,10 @@ struct Configuracoes: View {
                 }
             }
         }
+    }
+
+    /// Ainda não há lista publicada. A busca na lista, com o download, entra depois.
+    private func procurarAtualizacao() {
+        mensagemLista = "Ainda não há lista publicada."
     }
 }
