@@ -103,18 +103,37 @@ enum Engine {
     /// Chave onde as contagens de abertura ficam salvas no aparelho.
     private static let chaveUsos = "buscaUsos"
 
-    /// Carrega a lista ao abrir o app. Usa a lista baixada, se existir e estiver certa.
-    /// Senão, usa a lista embutida no app. Devolve false se nem a embutida conseguir ser lida.
+    /// Carrega a lista ao abrir o app.
+    /// Usa a lista baixada, se existir e for igual ou mais nova que a embutida.
+    /// Se o app novo trouxer uma lista embutida mais nova, a baixada é apagada e a embutida passa a valer.
+    /// Devolve false se nem a embutida conseguir ser lida.
     @discardableResult
     static func iniciarBusca() -> Bool {
-        let carregou: Bool
+        // Carrega a embutida primeiro, para saber a versão dela.
+        guard nusky_busca_carregar(nil) == 0 else { return false }
+        let versaoEmbutida = nusky_busca_versao()
+
         if let salva = listaSalva(), nusky_busca_carregar(salva) == 0 {
-            carregou = true
-        } else {
-            carregou = nusky_busca_carregar(nil) == 0
+            if nusky_busca_versao() < versaoEmbutida {
+                // A lista baixada é mais antiga que a embutida deste app: volta para a embutida.
+                _ = nusky_busca_carregar(nil)
+                apagarListaSalva()
+            }
         }
         nusky_busca_definir_usos(textoDeUsos(usosSalvos()))
-        return carregou
+        return true
+    }
+
+    /// Versão da lista em uso no motor. Zero se nenhuma lista tiver versão legível.
+    static var versaoEmUso: Int {
+        Int(nusky_busca_versao())
+    }
+
+    /// Data da lista em uso, no formato aaaa-mm-dd. Vazia se não houver.
+    static var dataEmUso: String {
+        guard let raw = nusky_busca_data() else { return "" }
+        defer { nusky_free_string(raw) }
+        return String(cString: raw)
     }
 
     /// Texto da lista baixada e guardada no aparelho. Nil se não existir ou não puder ser lido.
@@ -122,6 +141,12 @@ enum Engine {
         guard let caminho = try? ArquivoLista.caminho(),
               FileManager.default.fileExists(atPath: caminho.path) else { return nil }
         return try? String(contentsOf: caminho, encoding: .utf8)
+    }
+
+    /// Remove a lista baixada do aparelho. Não faz nada se ela não existir.
+    private static func apagarListaSalva() {
+        guard let caminho = try? ArquivoLista.caminho() else { return }
+        try? FileManager.default.removeItem(at: caminho)
     }
 
     /// Troca a lista em uso pela versão baixada. Se ela estiver errada,
