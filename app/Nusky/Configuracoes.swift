@@ -1,6 +1,13 @@
 // app/Nusky/Configuracoes.swift
 import SwiftUI
 
+/// Versão e data da lista que vem dentro do app.
+/// Manter igual ao `versao` e `data` de dados/sites.json sempre que a lista mudar.
+enum ListaEmbutida {
+    static let versao = 1
+    static let data = "2026-11-05"
+}
+
 struct Configuracoes: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("themeAuto") private var automatico = true
@@ -27,6 +34,12 @@ struct Configuracoes: View {
 
     private var versao: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
+
+    /// Versão da lista que o app está usando agora.
+    /// Se nenhuma lista foi baixada, a que está em uso é a que vem com o app.
+    private var versaoEmUso: Int {
+        versaoLista > 0 ? versaoLista : ListaEmbutida.versao
     }
 
     /// Data do aceite dos termos, em formato de leitura. Vazia se ainda não aceitou.
@@ -76,7 +89,7 @@ struct Configuracoes: View {
                     HStack {
                         Text("Versão da lista")
                         Spacer()
-                        Text(versaoLista == 0 ? "Vem com o app" : "\(versaoLista)")
+                        Text("\(versaoEmUso)")
                             .foregroundColor(.secondary)
                     }
                     HStack {
@@ -193,7 +206,7 @@ struct Configuracoes: View {
 
             // 304: o arquivo não mudou desde a última atualização aplicada.
             if http.statusCode == 304 {
-                mensagemLista = "Você já tem a lista mais recente."
+                mensagemLista = "Você já tem a lista mais recente (versão \(versaoEmUso))."
                 return
             }
             guard http.statusCode == 200 else {
@@ -205,8 +218,8 @@ struct Configuracoes: View {
                 try JSONDecoder().decode(Cabecalho.self, from: dados)
             }.value
 
-            guard cabecalho.versao > versaoLista else {
-                mensagemLista = "Você já tem a lista mais recente (versão \(versaoLista))."
+            guard cabecalho.versao > versaoEmUso else {
+                mensagemLista = "Você já tem a lista mais recente (versão \(versaoEmUso))."
                 return
             }
 
@@ -265,7 +278,7 @@ struct Configuracoes: View {
 
 // MARK: - Apoio da atualização da lista
 
-/// Endereço e local de guarda da lista de sites. O Engine vai ler o mesmo arquivo ao abrir o app.
+/// Endereço e local de guarda da lista de sites. O Engine lê este arquivo ao abrir o app.
 enum ArquivoLista {
     static let endereco = URL(string: "https://raw.githubusercontent.com/souza60029-wq/Nusky/main/dados/sites.json")!
 
