@@ -4,6 +4,7 @@
 
 //! Interface C do motor, chamada pela casca Swift.
 //!
+//! Renderização:
 //! `nusky_render` recebe HTML e, opcionalmente, uma função de medição fornecida pela casca.
 //! Formato de saída: uma linha por comando de texto, com campos separados por tab:
 //! `x<TAB>y<TAB>tamanho<TAB>negrito(0/1)<TAB>link<TAB>cor<TAB>texto`.
@@ -15,13 +16,25 @@
 //!
 //! `nusky_diagnose` aceita os mesmos argumentos e devolve um relatório em texto
 //! (ver `diagnostico.rs`). Não altera a renderização.
+//!
+//! Busca de sites:
+//! - `nusky_busca_carregar`: lê a lista (JSON). Sem argumento, usa a lista embutida.
+//!   Se a lista estiver errada, devolve 1 e mantém a lista que já estava carregada.
+//! - `nusky_busca_definir_usos`: recebe as contagens de abertura, uma por linha,
+//!   no formato `endereco<TAB>contagem`. Vêm do aparelho.
+//! - `nusky_busca_registrar_uso`: soma uma abertura a um endereço.
+//! - `nusky_busca`: devolve os resultados, uma linha por item:
+//!   `endereco<TAB>nome do site<TAB>título do atalho (vazio se for o site)`.
+//! - `nusky_busca_sugestao`: devolve `nome<TAB>endereço` do site mais parecido, ou vazio.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
+use std::sync::Mutex;
 
+use crate::busca::{indice_embutido, Indice};
 use crate::diagnostico::relatorio;
 use crate::html::parse;
 use crate::layout::{layout, DrawCommand, TextMeasurer};
@@ -155,7 +168,7 @@ pub extern "C" fn nusky_diagnose(
     }
 }
 
-/// Libera uma string devolvida por `nusky_render` ou `nusky_diagnose`.
+/// Libera uma string devolvida por `nusky_render`, `nusky_diagnose` ou as funções de busca.
 #[no_mangle]
 pub extern "C" fn nusky_free_string(s: *mut c_char) {
     if s.is_null() {
@@ -164,6 +177,146 @@ pub extern "C" fn nusky_free_string(s: *mut c_char) {
     unsafe {
         drop(CString::from_raw(s));
     }
+}
+
+// MARK: - Busca
+
+/// Estado da busca: a lista pronta e as contagens de abertura vindas do aparelho.
+struct Estado {
+    indice: Indice,
+    usos: HashMap<String, u32>,
+}
+
+/// Guardado aqui para a lista ficar na memória entre as chamadas.
+static BUSCA: Mutex<Option<Estado>> = Mutex::new(None);
+
+/// Roda `f` sobre o estado da busca. Se ainda não houver lista, carrega a embutida.
+/// Devolve None se nem a lista embutida conseguir carregar.
+fn com_busca<R>(f: impl FnOnce(&mut Estado) -> R) -> Option<R> {
+    let mut guarda = BUSCA.lock().unwrap_or_else(|e| e.into_inner());
+    if guarda.is_none() {
+        let indice = indice_embutido().ok()?;
+        *guarda = Some(Estado { indice, usos: HashMap::new() });
+    }
+    guarda.as_mut().map(f)
+}
+
+fn ler_texto(p: *const c_char) -> Option<String> {
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
+}
+
+fn devolver(texto: String) -> *mut c_char {
+    match CString::new(texto.replace('\0', " ")) {
+        Ok(s) => s.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Lê linhas `endereco<TAB>contagem`. Linhas fora do formato são ignoradas.
+fn ler_usos(texto: &str) -> HashMap<String, u32> {
+    texto
+        .lines()
+        .filter_map(|linha| {
+            let (endereco, contagem) = linha.split_once('\t')?;
+            Some((endereco.to_string(), contagem.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+/// Texto de resultados da busca, uma linha por item. Separado para poder ser testado.
+fn formatar_busca(indice: &Indice, consulta: &str, usos: &HashMap<String, u32>) -> String {
+    let mut out = String::new();
+    for r in indice.buscar(consulta, usos) {
+        let site = &indice.sites()[r.site];
+        let rotulo = r
+            .atalho
+            .and_then(|k| site.atalhos.get(k))
+            .map(|a| a.titulo.as_str())
+            .unwrap_or("");
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            sanitize(&indice.endereco(&r)),
+            sanitize(&site.nome),
+            sanitize(rotulo),
+        ));
+    }
+    out
+}
+
+/// Texto da sugestão ("você quis dizer…"), ou vazio. Separado para poder ser testado.
+fn formatar_sugestao(indice: &Indice, consulta: &str) -> String {
+    match indice.sugestao(consulta) {
+        Some(i) => {
+            let site = &indice.sites()[i];
+            format!("{}\t{}\n", sanitize(&site.nome), sanitize(&site.url))
+        }
+        None => String::new(),
+    }
+}
+
+/// Carrega a lista de sites. `json` é o conteúdo de `dados/sites.json`, em UTF-8.
+/// Se for null, carrega a lista embutida no app.
+/// Retorna 0 se deu certo, ou 1 se a lista estiver errada (a anterior continua valendo).
+/// As contagens de abertura são mantidas.
+#[no_mangle]
+pub extern "C" fn nusky_busca_carregar(json: *const c_char) -> c_int {
+    let novo = match ler_texto(json) {
+        Some(texto) => Indice::carregar(&texto),
+        None => indice_embutido(),
+    };
+    match novo {
+        Ok(indice) => {
+            let mut guarda = BUSCA.lock().unwrap_or_else(|e| e.into_inner());
+            let usos = guarda.take().map(|e| e.usos).unwrap_or_default();
+            *guarda = Some(Estado { indice, usos });
+            0
+        }
+        Err(_) => 1,
+    }
+}
+
+/// Substitui as contagens de abertura. Texto com uma linha por endereço: `endereco<TAB>contagem`.
+#[no_mangle]
+pub extern "C" fn nusky_busca_definir_usos(texto: *const c_char) {
+    if let Some(t) = ler_texto(texto) {
+        let usos = ler_usos(&t);
+        com_busca(|e| e.usos = usos);
+    }
+}
+
+/// Soma uma abertura ao endereço, quando o site ou atalho é aberto pela busca.
+#[no_mangle]
+pub extern "C" fn nusky_busca_registrar_uso(endereco: *const c_char) {
+    if let Some(e) = ler_texto(endereco) {
+        com_busca(|estado| *estado.usos.entry(e).or_insert(0) += 1);
+    }
+}
+
+/// Busca por nome. Devolve linhas `endereco<TAB>nome<TAB>título do atalho`.
+/// Lista vazia quando nada casa. Retorna null se o texto for null.
+/// Quem chama deve liberar o resultado com `nusky_free_string`.
+#[no_mangle]
+pub extern "C" fn nusky_busca(consulta: *const c_char) -> *mut c_char {
+    let Some(texto) = ler_texto(consulta) else {
+        return ptr::null_mut();
+    };
+    let saida = com_busca(|e| formatar_busca(&e.indice, &texto, &e.usos)).unwrap_or_default();
+    devolver(saida)
+}
+
+/// Sugestão quando a busca não acha nada. Devolve `nome<TAB>endereço`, ou vazio.
+/// Retorna null se o texto for null. Quem chama deve liberar com `nusky_free_string`.
+#[no_mangle]
+pub extern "C" fn nusky_busca_sugestao(consulta: *const c_char) -> *mut c_char {
+    let Some(texto) = ler_texto(consulta) else {
+        return ptr::null_mut();
+    };
+    let saida = com_busca(|e| formatar_sugestao(&e.indice, &texto)).unwrap_or_default();
+    devolver(saida)
 }
 
 #[cfg(test)]
@@ -232,5 +385,46 @@ mod tests {
     #[test]
     fn diagnose_null_input_returns_null() {
         assert!(nusky_diagnose(ptr::null(), 400.0, None).is_null());
+    }
+
+    #[test]
+    fn busca_acha_com_erro_de_digitacao() {
+        let indice = indice_embutido().unwrap();
+        let saida = formatar_busca(&indice, "gitub", &HashMap::new());
+        let primeira = saida.lines().next().unwrap();
+        assert!(primeira.starts_with("https://github.com\tGitHub\t"));
+    }
+
+    #[test]
+    fn busca_mostra_atalho_com_titulo() {
+        let indice = indice_embutido().unwrap();
+        let saida = formatar_busca(&indice, "meu perfil", &HashMap::new());
+        let primeira = saida.lines().next().unwrap();
+        assert_eq!(primeira, "https://github.com/souza60029-wq\tGitHub\tMeu perfil");
+    }
+
+    #[test]
+    fn busca_sem_resultado_fica_vazia() {
+        let indice = indice_embutido().unwrap();
+        assert!(formatar_busca(&indice, "xyzqw", &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn sugestao_traz_nome_e_endereco() {
+        let indice = indice_embutido().unwrap();
+        let saida = formatar_sugestao(&indice, "chatgtp");
+        assert!(saida.starts_with("ChatGPT\thttps://chatgpt.com"));
+    }
+
+    #[test]
+    fn usos_ignoram_linhas_erradas() {
+        let usos = ler_usos("https://a.com\t3\nlinha quebrada\nhttps://b.com\tx\n");
+        assert_eq!(usos.get("https://a.com"), Some(&3));
+        assert_eq!(usos.get("https://b.com"), None);
+    }
+
+    #[test]
+    fn lista_errada_nao_substitui_a_atual() {
+        assert_eq!(nusky_busca_carregar(CString::new("{ isto não é json").unwrap().as_ptr()), 1);
     }
 }
