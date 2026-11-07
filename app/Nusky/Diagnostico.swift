@@ -683,11 +683,12 @@ struct RelatorioTexto: UIViewRepresentable {
 }
 
 struct DiagnosticoView: View {
-    let url: URL
+    /// Nil quando nenhuma página está aberta (por exemplo, a tela inicial).
+    let url: URL?
     @StateObject private var modelo = DiagnosticoModel()
     @State private var copiado = false
 
-    init(url: URL) {
+    init(url: URL?) {
         self.url = url
     }
 
@@ -698,6 +699,12 @@ struct DiagnosticoView: View {
             Text("Quadrado verde: etapa concluída. Símbolo pulsando: etapa em andamento.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+
+            if url == nil {
+                Text("Nenhuma página aberta. Abra um site e volte para cá.")
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
 
             if let erro = modelo.erro {
                 Text(erro)
@@ -720,7 +727,9 @@ struct DiagnosticoView: View {
         .navigationTitle("Diagnóstico")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            modelo.iniciar(url: url)
+            if let url {
+                modelo.iniciar(url: url)
+            }
         }
     }
 }
