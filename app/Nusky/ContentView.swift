@@ -1,3 +1,4 @@
+// app/Nusky/ContentView.swift
 import SwiftUI
 import UIKit
 
@@ -124,10 +125,10 @@ struct ContentView: View {
 
     // MARK: - Busca
 
-    /// Atualiza os resultados enquanto o usuário digita. Fora do campo, limpa tudo.
+    /// Atualiza os resultados enquanto o usuário digita. Fora do campo, ou com a barra recolhida, limpa tudo.
     private func atualizarResultados(_ texto: String) {
         let consulta = texto.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard campoFocado, !consulta.isEmpty else {
+        guard expandida, campoFocado, !consulta.isEmpty else {
             fecharBusca()
             return
         }
@@ -141,6 +142,16 @@ struct ContentView: View {
         model.sugestao = nil
     }
 
+    /// Envia o campo. Se a busca não achar nada, a barra fica aberta para mostrar a sugestão.
+    /// Se abrir um site ou endereço, a barra recolhe.
+    private func enviarCampo() {
+        model.sugestao = nil
+        model.submitAddress()
+        if model.sugestao == nil || !model.resultados.isEmpty {
+            recolher()
+        }
+    }
+
     /// Abre um site ou atalho da lista. Conta a abertura, que fica só no aparelho.
     private func abrirResultado(_ r: ResultadoBusca) {
         guard let url = URL(string: r.endereco) else { return }
@@ -151,10 +162,10 @@ struct ContentView: View {
     }
 
     /// Painel com os resultados, ou a sugestão "você quis dizer…?".
-    /// Fica acima da barra quando ela está embaixo, e abaixo quando está em cima.
+    /// Só aparece com a barra expandida. Fica acima da barra quando ela está embaixo, e abaixo quando está em cima.
     @ViewBuilder
     private var painelBusca: some View {
-        if let s = model.sugestao {
+        if expandida, let s = model.sugestao {
             linhaSugestao(s)
                 .background(RoundedRectangle(cornerRadius: 16).fill(corBarra))
                 .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -329,8 +340,7 @@ struct ContentView: View {
                 .disableAutocorrection(true)
                 .submitLabel(.go)
                 .onSubmit {
-                    model.submitAddress()
-                    recolher()
+                    enviarCampo()
                 }
                 .mask(bordasEsmaecidas)
 
@@ -437,9 +447,10 @@ struct ContentView: View {
         }
     }
 
+    /// Recolhe a barra e limpa a busca na hora, para nenhum resultado ou sugestão sobrar na tela.
     private func recolher() {
         campoFocado = false
-        model.resultados = []
+        fecharBusca()
         withAnimation(.easeIn(duration: 0.15)) {
             bolhasAbertas = false
         }
@@ -447,6 +458,7 @@ struct ContentView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 expandida = false
             }
+            fecharBusca()
         }
     }
 }
