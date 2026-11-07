@@ -1,13 +1,6 @@
 // app/Nusky/Configuracoes.swift
 import SwiftUI
 
-/// Versão e data da lista que vem dentro do app.
-/// Manter igual ao `versao` e `data` de dados/sites.json sempre que a lista mudar.
-enum ListaEmbutida {
-    static let versao = 1
-    static let data = "2026-11-05"
-}
-
 struct Configuracoes: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("themeAuto") private var automatico = true
@@ -16,8 +9,6 @@ struct Configuracoes: View {
     @AppStorage("useButtons") private var botoes = true
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
     @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
-    @AppStorage("listaVersao") private var versaoLista = 0
-    @AppStorage("listaData") private var dataLista = ""
     @AppStorage("listaEtag") private var etagLista = ""
 
     /// Página aberta no momento, usada pelo diagnóstico.
@@ -36,16 +27,16 @@ struct Configuracoes: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
     }
 
-    /// Versão da lista que o app está usando agora.
-    /// Se nenhuma lista foi baixada, a que está em uso é a que vem com o app.
-    private var versaoEmUso: Int {
-        versaoLista > 0 ? versaoLista : ListaEmbutida.versao
-    }
-
     /// Data do aceite dos termos, em formato de leitura. Vazia se ainda não aceitou.
     private var dataAceiteTexto: String {
         guard let data = ISO8601DateFormatter().date(from: dataAceite) else { return "" }
         return data.formatted(date: .numeric, time: .omitted)
+    }
+
+    /// Data da lista que o motor está usando agora, em formato de leitura.
+    private var dataListaTexto: String {
+        let iso = Engine.dataEmUso
+        return iso.isEmpty ? "Desconhecida" : formatarData(iso)
     }
 
     var body: some View {
@@ -89,13 +80,13 @@ struct Configuracoes: View {
                     HStack {
                         Text("Versão da lista")
                         Spacer()
-                        Text("\(versaoEmUso)")
+                        Text("\(Engine.versaoEmUso)")
                             .foregroundColor(.secondary)
                     }
                     HStack {
-                        Text("Última atualização")
+                        Text("Data da lista")
                         Spacer()
-                        Text(dataLista.isEmpty ? "Nunca" : dataLista)
+                        Text(dataListaTexto)
                             .foregroundColor(.secondary)
                     }
                     Button {
@@ -206,7 +197,7 @@ struct Configuracoes: View {
 
             // 304: o arquivo não mudou desde a última atualização aplicada.
             if http.statusCode == 304 {
-                mensagemLista = "Você já tem a lista mais recente (versão \(versaoEmUso))."
+                mensagemLista = "Você já tem a lista mais recente (versão \(Engine.versaoEmUso))."
                 return
             }
             guard http.statusCode == 200 else {
@@ -218,8 +209,8 @@ struct Configuracoes: View {
                 try JSONDecoder().decode(Cabecalho.self, from: dados)
             }.value
 
-            guard cabecalho.versao > versaoEmUso else {
-                mensagemLista = "Você já tem a lista mais recente (versão \(versaoEmUso))."
+            guard cabecalho.versao > Engine.versaoEmUso else {
+                mensagemLista = "Você já tem a lista mais recente (versão \(Engine.versaoEmUso))."
                 return
             }
 
@@ -235,6 +226,7 @@ struct Configuracoes: View {
     }
 
     /// Aplica a lista confirmada. Só troca a lista se ela passar na verificação do motor.
+    /// Se não conseguir salvar no aparelho, volta a carregar a lista anterior.
     private func aplicarAtualizacao() async {
         guard let nova = listaNova else { return }
 
@@ -251,12 +243,15 @@ struct Configuracoes: View {
         do {
             try ArquivoLista.salvar(nova.texto)
         } catch {
-            mensagemLista = "Não consegui salvar a lista no aparelho. Tente de novo."
+            // Sem salvar, a lista nova não pode ficar só na memória: recarrega a anterior.
+            _ = await Task.detached(priority: .utility) {
+                Engine.iniciarBusca()
+            }.value
+            listaNova = nil
+            mensagemLista = "Não consegui salvar a lista no aparelho. A lista atual foi mantida. Tente de novo."
             return
         }
 
-        versaoLista = nova.versao
-        dataLista = nova.dataTexto
         etagLista = nova.etag
         listaNova = nil
         mensagemLista = "Endereços atualizados para a versão \(nova.versao)."
