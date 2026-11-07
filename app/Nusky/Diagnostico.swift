@@ -456,4 +456,271 @@ final class DiagnosticoModel: ObservableObject {
                 self?.amostrar()
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
-        
+        }
+    }
+
+    private func pararAmostragem() {
+        amostragem?.cancel()
+        amostragem = nil
+    }
+
+    private func amostrar() {
+        let usada = Memoria.usada()
+        let disponivel = Memoria.disponivel()
+        contagemAmostras += 1
+        picoUsada = max(picoUsada, usada)
+        if disponivel > 0 {
+            menorDisponivel = min(menorDisponivel, disponivel)
+        }
+    }
+
+    private func marcar(_ etapa: Etapa) {
+        concluidas.insert(etapa)
+        usadaAposEtapa[etapa] = Memoria.usada()
+    }
+
+    private func executar(url: URL) async {
+        erro = nil
+        texto = ""
+        tempos = [:]
+        concluidas = []
+        usadaAposEtapa = [:]
+        contagemAmostras = 0
+        usadaInicio = Memoria.usada()
+        picoUsada = usadaInicio
+        menorDisponivel = UInt64.max
+
+        iniciarAmostragem()
+        defer { pararAmostragem() }
+
+        let inicioTotal = CFAbsoluteTimeGetCurrent()
+        let largura = Float(UIScreen.main.bounds.width)
+
+        do {
+            atual = .baixar
+            let inicioBaixar = CFAbsoluteTimeGetCurrent()
+            let (html, base) = try await DiagnosticoPagina.baixar(url)
+            tempos[.baixar] = CFAbsoluteTimeGetCurrent() - inicioBaixar
+            marcar(.baixar)
+
+            atual = .folhas
+            let inicioFolhas = CFAbsoluteTimeGetCurrent()
+            let comFolhas = await FolhasExternas.incluir(em: html, base: base)
+            tempos[.folhas] = CFAbsoluteTimeGetCurrent() - inicioFolhas
+            marcar(.folhas)
+
+            atual = .scripts
+            let (scripts, tempoScripts) = cronometrar { DiagnosticoScripts.analisar(html: comFolhas) }
+            let (dados, tempoDados) = cronometrar { DiagnosticoDados.analisar(html: comFolhas) }
+            tempos[.scripts] = tempoScripts + tempoDados
+            marcar(.scripts)
+
+            atual = .montar
+            let saida = await DiagnosticoPagina.montarERelatorio(html: comFolhas, largura: largura)
+            tempos[.montar] = saida.tempoMontagem
+            tempos[.relatorio] = saida.tempoRelatorio
+            marcar(.montar)
+            marcar(.relatorio)
+
+            atual = .janela
+            let (janela, tempoJanela) = cronometrar { DiagnosticoJanela.analisar(itens: saida.itens) }
+            tempos[.janela] = tempoJanela
+            marcar(.janela)
+
+            let total = CFAbsoluteTimeGetCurrent() - inicioTotal
+            texto = montarTexto(
+                url: url,
+                relatorio: saida.relatorio,
+                scripts: scripts,
+                dados: dados,
+                janela: janela,
+                total: total
+            )
+        } catch {
+            erro = "Não consegui baixar a página: \(error.localizedDescription)"
+        }
+        atual = nil
+    }
+
+    private func montarTexto(url: URL, relatorio: String, scripts: String, dados: String, janela: String, total: Double) -> String {
+        amostrar()
+        let blocos = [
+            "URL: \(url.absoluteString)",
+            relatorio,
+            scripts,
+            dados,
+            janela,
+            montarTempos(total: total),
+            montarMemoria()
+        ]
+        return blocos.joined(separator: "\n\n")
+    }
+
+    private func montarTempos(total: Double) -> String {
+        var linhas = ["TEMPOS DO APP"]
+        for etapa in Etapa.allCases {
+            if let tempo = tempos[etapa] {
+                linhas.append("\(etapa.linhaTempo): \(formatarSegundos(tempo))")
+            }
+        }
+        linhas.append("Total: \(formatarSegundos(total))")
+        return linhas.joined(separator: "\n")
+    }
+
+    private func montarMemoria() -> String {
+        var linhas = ["MEMÓRIA DO APP"]
+        linhas.append("Memória física do aparelho: \(Memoria.texto(Memoria.fisica))")
+        linhas.append("Uso antes da análise: \(Memoria.texto(usadaInicio))")
+        linhas.append("Pico durante a análise: \(Memoria.texto(picoUsada))")
+        linhas.append("Uso no fim da análise: \(Memoria.texto(Memoria.usada()))")
+        if menorDisponivel != UInt64.max {
+            linhas.append("Menor disponível para o iOS: \(Memoria.texto(menorDisponivel))")
+        } else {
+            linhas.append("Menor disponível para o iOS: o iOS não informou")
+        }
+        linhas.append("Amostras: \(contagemAmostras), a cada 50 ms")
+        linhas.append("Uso ao fim de cada etapa:")
+        for etapa in Etapa.allCases {
+            if let uso = usadaAposEtapa[etapa] {
+                linhas.append("  \(etapa.linhaTempo): \(Memoria.texto(uso))")
+            }
+        }
+        return linhas.joined(separator: "\n")
+    }
+}
+
+// MARK: - Telas
+
+/// Um passo da análise: símbolo em um quadrado. Verde quando concluído; pulsa quando é o atual.
+struct PassoEtapa: View {
+    let etapa: Etapa
+    let atual: Bool
+    let concluida: Bool
+    @State private var pulsando = false
+
+    var body: some View {
+        VStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(concluida ? Color.green.opacity(0.18) : Color(UIColor.tertiarySystemFill))
+                .frame(width: 44, height: 44)
+                .overlay(
+                    Image(systemName: etapa.simbolo)
+                        .font(.system(size: 18))
+                        .foregroundColor(concluida ? .green : .primary)
+                        .scaleEffect(pulsando ? 1.2 : 1.0)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(concluida ? Color.green : Color.clear, lineWidth: 2)
+                )
+            Text(etapa.rotulo)
+                .font(.caption2)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity)
+        .onChange(of: atual) { ativo in
+            if ativo {
+                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
+                    pulsando = true
+                }
+            } else {
+                withAnimation(.default) {
+                    pulsando = false
+                }
+            }
+        }
+    }
+}
+
+/// Linha com as seis etapas e a frase da etapa atual.
+struct PainelEtapas: View {
+    let atual: Etapa?
+    let concluidas: Set<Etapa>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 4) {
+                ForEach(Etapa.allCases, id: \.self) { etapa in
+                    PassoEtapa(
+                        etapa: etapa,
+                        atual: atual == etapa,
+                        concluida: concluidas.contains(etapa)
+                    )
+                }
+            }
+            if let atual = atual {
+                Text(atual.titulo)
+                    .font(.subheadline)
+            } else if concluidas.count == Etapa.allCases.count {
+                Text("Análise concluída")
+                    .font(.subheadline)
+            }
+        }
+    }
+}
+
+/// Texto do relatório em UITextView, rolável e selecionável.
+struct RelatorioTexto: UIViewRepresentable {
+    let texto: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let visao = UITextView()
+        visao.isEditable = false
+        visao.isSelectable = true
+        visao.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        visao.backgroundColor = UIColor.secondarySystemBackground
+        visao.layer.cornerRadius = 10
+        visao.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
+        return visao
+    }
+
+    func updateUIView(_ visao: UITextView, context: Context) {
+        if visao.text != texto {
+            visao.text = texto
+        }
+    }
+}
+
+struct DiagnosticoView: View {
+    let url: URL
+    @StateObject private var modelo = DiagnosticoModel()
+    @State private var copiado = false
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            PainelEtapas(atual: modelo.atual, concluidas: modelo.concluidas)
+
+            Text("Quadrado verde: etapa concluída. Símbolo pulsando: etapa em andamento.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if let erro = modelo.erro {
+                Text(erro)
+                    .font(.callout)
+                    .foregroundColor(.red)
+            }
+
+            RelatorioTexto(texto: modelo.texto)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Button(copiado ? "Relatório copiado" : "Copiar relatório") {
+                UIPasteboard.general.string = modelo.texto
+                copiado = true
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(modelo.texto.isEmpty)
+            .frame(maxWidth: .infinity)
+        }
+        .padding()
+        .navigationTitle("Diagnóstico")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            modelo.iniciar(url: url)
+        }
+    }
+}
