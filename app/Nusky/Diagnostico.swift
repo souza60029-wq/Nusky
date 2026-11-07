@@ -36,6 +36,43 @@ private func numero(_ valor: Int) -> String {
     return formatador.string(from: NSNumber(value: valor)) ?? String(valor)
 }
 
+// MARK: - Memória
+
+/// Leituras de memória do próprio app. O iOS encerra o app quando o uso (phys_footprint)
+/// chega perto do limite; "disponível" diz quanto ainda falta para esse limite.
+enum Memoria {
+    /// Memória que conta para o limite do iOS, em bytes.
+    static func usada() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var contagem = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let resultado = withUnsafeMutablePointer(to: &info) { ponteiro in
+            ponteiro.withMemoryRebound(to: integer_t.self, capacity: Int(contagem)) { inteiros in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), inteiros, &contagem)
+            }
+        }
+        return resultado == KERN_SUCCESS ? UInt64(info.phys_footprint) : 0
+    }
+
+    /// Quanto ainda cabe antes de o iOS encerrar o app, em bytes. Zero se o iOS não informar.
+    static func disponivel() -> UInt64 {
+        UInt64(os_proc_available_memory())
+    }
+
+    /// Memória RAM total do aparelho, em bytes.
+    static var fisica: UInt64 {
+        ProcessInfo.processInfo.physicalMemory
+    }
+
+    /// "312,4 MB" ou "1,95 GB", com vírgula.
+    static func texto(_ bytes: UInt64) -> String {
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1024 {
+            return String(format: "%.2f GB", mb / 1024).replacingOccurrences(of: ".", with: ",")
+        }
+        return String(format: "%.1f MB", mb).replacingOccurrences(of: ".", with: ",")
+    }
+}
+
 // MARK: - Etapas
 
 enum Etapa: CaseIterable, Hashable {
@@ -65,7 +102,7 @@ enum Etapa: CaseIterable, Hashable {
         }
     }
 
-    /// Nome da linha em TEMPOS DO APP.
+    /// Nome da linha em TEMPOS DO APP e MEMÓRIA DO APP.
     var linhaTempo: String {
         switch self {
         case .baixar: return "Baixar a página"
@@ -153,6 +190,107 @@ enum DiagnosticoScripts {
             }
         }
         return linhas.joined(separator: "\n")
+    }
+}
+
+// MARK: - Dados dentro dos scripts e trechos escondidos
+
+/// Seção DADOS NOS SCRIPTS: procura, sem rodar JavaScript, sinais de dados e de
+/// renderização em partes (Next.js e React) dentro do próprio HTML.
+enum DiagnosticoDados {
+    static func analisar(html: String) -> String {
+        var linhas = ["DADOS NOS SCRIPTS"]
+
+        let inline = scriptsInline(html)
+        let bytes = inline.reduce(0) { $0 + $1.utf8.count }
+        linhas.append("Scripts inline: \(inline.count), \(numero(bytes)) bytes")
+
+        let juntos = inline.joined(separator: "\n")
+        linhas.append("Chamadas __next_f.push (dados do Next): \(ocorrencias("__next_f.push", em: juntos))")
+        linhas.append("Chamadas $RC (troca de trechos do React): \(ocorrencias("$RC(", em: juntos))")
+        linhas.append("Ocorrências de \"model\" nos scripts inline: \(ocorrencias("model", em: juntos.lowercased()))")
+
+        let escondidos = trechosEscondidos(html)
+        linhas.append("Elementos com atributo hidden: \(escondidos.count)")
+        let maior = escondidos.map { $0.count }.max() ?? 0
+        linhas.append("Maior trecho escondido (texto aproximado): \(numero(maior)) caracteres")
+
+        let comTexto = escondidos.filter { !$0.isEmpty }
+        if !comTexto.isEmpty {
+            linhas.append("Início dos trechos escondidos com texto (até 5):")
+            linhas += comTexto.prefix(5).map { "  \"" + String($0.prefix(80)) + "\"" }
+        }
+
+        if !inline.isEmpty {
+            linhas.append("Início dos scripts inline (até 4):")
+            linhas += inline.prefix(4).map { "  " + resumir($0, 100) }
+        }
+        return linhas.joined(separator: "\n")
+    }
+
+    /// Conteúdo de cada <script> sem atributo src.
+    private static func scriptsInline(_ html: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<script\\b([^>]*)>([\\s\\S]*?)</script\\s*>",
+            options: [.caseInsensitive]
+        ) else { return [] }
+
+        let ns = html as NSString
+        return regex.matches(in: html, range: NSRange(location: 0, length: ns.length)).compactMap { achado in
+            let atributos = ns.substring(with: achado.range(at: 1))
+            if (" " + atributos).range(of: "\\ssrc\\s*=", options: [.regularExpression, .caseInsensitive]) != nil {
+                return nil
+            }
+            return ns.substring(with: achado.range(at: 2))
+        }
+    }
+
+    /// Para cada tag com o atributo hidden (não o da classe CSS), o texto que vem logo depois,
+    /// até o próximo <script>. Valor aproximado: pode incluir texto que não está escondido.
+    private static func trechosEscondidos(_ html: String) -> [String] {
+        guard let tags = try? NSRegularExpression(pattern: "<[a-zA-Z][^>]*>"),
+              let aspas = try? NSRegularExpression(pattern: "\"[^\"]*\"|'[^']*'"),
+              let atributoHidden = try? NSRegularExpression(pattern: "\\shidden(?=[\\s/>])", options: [.caseInsensitive])
+        else { return [] }
+
+        let ns = html as NSString
+        var trechos: [String] = []
+        for achado in tags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            let tag = ns.substring(with: achado.range)
+            // Tira os valores entre aspas, para que class="... hidden ..." não conte.
+            let semAspas = aspas.stringByReplacingMatches(
+                in: tag,
+                options: [],
+                range: NSRange(location: 0, length: (tag as NSString).length),
+                withTemplate: "\"\""
+            )
+            let semAspasNS = semAspas as NSString
+            guard atributoHidden.firstMatch(in: semAspas, options: [], range: NSRange(location: 0, length: semAspasNS.length)) != nil else {
+                continue
+            }
+
+            let inicio = achado.range.location + achado.range.length
+            let resto = NSRange(location: inicio, length: ns.length - inicio)
+            let proximoScript = ns.range(of: "<script", options: .caseInsensitive, range: resto).location
+            let fim = proximoScript == NSNotFound ? ns.length : proximoScript
+            trechos.append(textoDe(ns.substring(with: NSRange(location: inicio, length: fim - inicio))))
+        }
+        return trechos
+    }
+
+    /// Texto puro de um trecho de HTML, com espaços simples.
+    private static func textoDe(_ trecho: String) -> String {
+        let semTags = trecho.replacingOccurrences(of: "<[^>]*>", with: " ", options: .regularExpression)
+        return semTags.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private static func resumir(_ texto: String, _ limite: Int) -> String {
+        let limpo = texto.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return limpo.count > limite ? String(limpo.prefix(limite)) + "…" : limpo
+    }
+
+    private static func ocorrencias(_ termo: String, em texto: String) -> Int {
+        texto.components(separatedBy: termo).count - 1
     }
 }
 
@@ -297,236 +435,25 @@ final class DiagnosticoModel: ObservableObject {
     private var tarefa: Task<Void, Never>?
     private var tempos: [Etapa: Double] = [:]
 
+    // Memória
+    private var amostragem: Task<Void, Never>?
+    private var usadaInicio: UInt64 = 0
+    private var picoUsada: UInt64 = 0
+    private var menorDisponivel: UInt64 = UInt64.max
+    private var contagemAmostras = 0
+    private var usadaAposEtapa: [Etapa: UInt64] = [:]
+
     /// Começa a análise. Não faz nada se ela já tiver começado.
     func iniciar(url: URL) {
         guard tarefa == nil else { return }
         tarefa = Task { await executar(url: url) }
     }
 
-    private func executar(url: URL) async {
-        let inicio = CFAbsoluteTimeGetCurrent()
-        var marca = inicio
-
-        func concluir(_ etapa: Etapa) {
-            let agora = CFAbsoluteTimeGetCurrent()
-            tempos[etapa] = agora - marca
-            marca = agora
-            concluidas.insert(etapa)
-        }
-
-        // 1. Baixar
-        atual = .baixar
-        let pagina: (html: String, base: URL)
-        do {
-            pagina = try await DiagnosticoPagina.baixar(url)
-        } catch {
-            erro = "Não foi possível baixar a página:\n\(error.localizedDescription)"
-            atual = nil
-            return
-        }
-        concluir(.baixar)
-
-        // 2. Folhas de estilo externas
-        atual = .folhas
-        let comCss = await FolhasExternas.incluir(em: pagina.html, base: pagina.base)
-        concluir(.folhas)
-
-        // 3. Scripts e dados
-        atual = .scripts
-        let htmlCompleto = comCss
-        let secaoScripts = await Task.detached(priority: .userInitiated) {
-            DiagnosticoScripts.analisar(html: htmlCompleto)
-        }.value
-        concluir(.scripts)
-
-        // 4. Montagem e relatório do motor, em paralelo
-        atual = .montar
-        let largura = Float(UIScreen.main.bounds.width)
-        let saida = await DiagnosticoPagina.montarERelatorio(html: comCss, largura: largura)
-        tempos[.montar] = saida.tempoMontagem
-        tempos[.relatorio] = saida.tempoRelatorio
-        concluidas.formUnion([.montar, .relatorio])
-        marca = CFAbsoluteTimeGetCurrent()
-
-        // 5. Teste de janela, sobre os itens já montados
-        atual = .janela
-        let itens = saida.itens
-        let secaoJanela = await Task.detached(priority: .userInitiated) {
-            DiagnosticoJanela.analisar(itens: itens)
-        }.value
-        concluir(.janela)
-
-        atual = nil
-        texto = montarTexto(
-            url: pagina.base,
-            motor: saida.relatorio,
-            scripts: secaoScripts,
-            janela: secaoJanela,
-            total: CFAbsoluteTimeGetCurrent() - inicio
-        )
-    }
-
-    private func montarTexto(url: URL, motor: String, scripts: String, janela: String, total: Double) -> String {
-        var linhasTempo = ["TEMPOS DO APP"]
-        for etapa in Etapa.allCases {
-            if let tempo = tempos[etapa] {
-                linhasTempo.append("\(etapa.linhaTempo): \(formatarSegundos(tempo))")
+    /// Lê a memória a cada 50 ms, para achar o pico e a menor folga durante a análise.
+    private func iniciarAmostragem() {
+        amostragem = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.amostrar()
+                try? await Task.sleep(nanoseconds: 50_000_000)
             }
-        }
-        linhasTempo.append("Total: \(formatarSegundos(total))")
-
-        return [
-            "URL: \(url.absoluteString)",
-            motor,
-            scripts,
-            janela,
-            linhasTempo.joined(separator: "\n")
-        ]
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .joined(separator: "\n\n")
-    }
-}
-
-// MARK: - Telas
-
-/// Um símbolo por etapa: pulsa na etapa atual e fica com um quadrado verde quando conclui.
-private struct PassoEtapa: View {
-    let etapa: Etapa
-    let atual: Bool
-    let concluida: Bool
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: etapa.simbolo)
-                .font(.system(size: 22))
-                .foregroundColor(atual || concluida ? Color.accentColor : Color.secondary)
-                .scaleEffect(atual ? 1.18 : 1)
-                .animation(
-                    atual
-                        ? Animation.easeInOut(duration: 0.6).repeatForever(autoreverses: true)
-                        : Animation.easeOut(duration: 0.2),
-                    value: atual
-                )
-
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(concluida ? Color.green : Color.secondary.opacity(0.25))
-                .frame(width: 8, height: 8)
-                .animation(.easeOut(duration: 0.25), value: concluida)
-
-            Text(etapa.rotulo)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-private struct PainelEtapas: View {
-    let atual: Etapa?
-    let concluidas: Set<Etapa>
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            ForEach(Etapa.allCases, id: \.self) { etapa in
-                PassoEtapa(
-                    etapa: etapa,
-                    atual: atual == etapa,
-                    concluida: concluidas.contains(etapa)
-                )
-            }
-        }
-        .padding(.vertical, 8)
-    }
-}
-
-/// Relatório em texto selecionável, com rolagem própria.
-private struct RelatorioTexto: UIViewRepresentable {
-    let texto: String
-
-    final class Coordenador {
-        var mostrado = ""
-    }
-
-    func makeCoordinator() -> Coordenador {
-        Coordenador()
-    }
-
-    func makeUIView(context: Context) -> UITextView {
-        let vista = UITextView()
-        vista.isEditable = false
-        vista.isSelectable = true
-        vista.backgroundColor = .clear
-        vista.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        vista.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-        vista.alwaysBounceVertical = true
-        return vista
-    }
-
-    func updateUIView(_ vista: UITextView, context: Context) {
-        guard context.coordinator.mostrado != texto else { return }
-        context.coordinator.mostrado = texto
-        vista.text = texto
-    }
-}
-
-struct DiagnosticoView: View {
-    let url: URL?
-    @StateObject private var modelo = DiagnosticoModel()
-    @State private var copiado = false
-
-    init(url: URL?) {
-        self.url = url
-    }
-
-    var body: some View {
-        VStack(spacing: 10) {
-            PainelEtapas(atual: modelo.atual, concluidas: modelo.concluidas)
-                .padding(.horizontal, 12)
-
-            Text(legenda)
-                .font(.footnote)
-                .foregroundColor(.secondary)
-
-            if let erro = modelo.erro {
-                Text(erro)
-                    .font(.footnote)
-                    .foregroundColor(.red)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-            }
-
-            RelatorioTexto(texto: modelo.texto)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            Button {
-                UIPasteboard.general.string = modelo.texto
-                copiado = true
-                Task {
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    copiado = false
-                }
-            } label: {
-                Text(copiado ? "Copiado" : "Copiar relatório")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(modelo.texto.isEmpty)
-            .padding(.horizontal, 12)
-        }
-        .padding(.vertical, 8)
-        .navigationTitle("Diagnóstico")
-        .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            if let url = url {
-                modelo.iniciar(url: url)
-            }
-        }
-    }
-
-    private var legenda: String {
-        guard url != nil else { return "Abra uma página antes de analisar." }
-        if let atual = modelo.atual { return "\(atual.titulo)…" }
-        if modelo.erro != nil { return "Análise interrompida." }
-        return modelo.texto.isEmpty ? "Analisando…" : "Relatório pronto"
-    }
-}
+        
