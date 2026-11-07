@@ -3,7 +3,6 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-import SwiftUI
 import UIKit
 
 /// Medida de texto para o motor, com CoreText (UIFont), igual à usada na renderização.
