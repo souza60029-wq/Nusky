@@ -943,7 +943,14 @@ enum AmbienteJS {
   function rodarCodigo(origem, codigo) {
     estat.executados++;
     try { (0, eval)(codigo + '\n//# sourceURL=' + origem); }
-    catch (e) { erro(origem + ': ' + (e && e.message ? e.message : e) + (e && e.line ? ' [linha ' + e.line + ', coluna ' + e.column + ']' : '')); }
+    catch (e) {
+      var extra = '';
+      if (e && e.line) {
+        var c = e.column || 0, l = codigo.split('\n')[e.line - 1] || '';
+        extra = ' [linha ' + e.line + ', coluna ' + c + '] trecho: ' + l.slice(Math.max(0, c - 70), c + 70);
+      }
+      erro(origem + ': ' + (e && e.message ? e.message : e) + extra);
+    }
   }
   function podeRodar(s) {
     var tipo = (s.getAttribute('type') || '').toLowerCase().split(';')[0].trim();
