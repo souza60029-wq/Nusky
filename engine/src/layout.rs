@@ -635,6 +635,28 @@ fn layout_flex_linha(
     let disponivel = (w_base - espaco * (n as f32 - 1.0)).max(0.0);
     let soma_ideal: f32 = itens.iter().map(|i| i.ideal).sum();
     let soma_min: f32 = itens.iter().map(|i| i.minimo).sum();
+
+    // Três ou mais filhos que não cabem lado a lado (cartões, abas): espremer deixa
+    // uma palavra por linha. Aqui eles empilham, cada um na largura toda.
+    if n >= 3 && soma_ideal > disponivel {
+        for (k, item) in itens.iter().enumerate() {
+            ctx.x0 = x_base;
+            ctx.width = w_base;
+            ctx.forcar_bloco = true;
+            let info = info_do_elemento(item.el, ctx.folha.nomes_atributos());
+            let irmaos: &[Info] = if guarda_irmaos { &infos[..item.pos] } else { &[] };
+            let mut buf: Vec<Span> = Vec::new();
+            tratar_elemento(item.el, info, irmaos, item.ultimo, style, link, &mut buf, ctx);
+            flush_inline(&mut buf, style, ctx);
+            if k + 1 < n {
+                ctx.y += espaco;
+            }
+        }
+        ctx.x0 = x_base;
+        ctx.width = w_base;
+        return;
+    }
+
     let larguras: Vec<f32> = if soma_ideal <= disponivel {
         itens.iter().map(|i| i.ideal).collect()
     } else if soma_min <= disponivel && soma_ideal > soma_min {
@@ -1565,6 +1587,24 @@ mod tests {
         assert_eq!(pos.len(), 2);
         assert_eq!(pos[0].1, pos[1].1);
         assert!(pos[1].0 > pos[0].0);
+    }
+
+    #[test]
+    fn flex_com_tres_filhos_que_nao_cabem_empilha() {
+        // Cada filho mede 80 pt; os três somam mais que os 84 pt úteis.
+        let cmds = run(
+            "<style>.f{display:flex}</style><div class=f><span>aaaaaaaaaa</span><span>bbbbbbbbbb</span><span>cccccccccc</span></div>",
+            100.0,
+        );
+        let pos: Vec<(f32, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { x, y, .. } => (*x, *y),
+            })
+            .collect();
+        assert_eq!(pos.len(), 3);
+        assert!(pos[1].1 > pos[0].1 && pos[2].1 > pos[1].1);
+        assert_eq!(pos[0].0, pos[1].0);
     }
 
     #[test]
