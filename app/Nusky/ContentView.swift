@@ -37,7 +37,12 @@ struct ContentView: View {
         automatico ? sistema == .dark : noturno
     }
 
-    private var fundo: Color { escuro ? Color.black : Color.white }
+    /// Fundo atrás da página e das barras. Se a página define a cor de fundo, ela vale,
+    /// para a faixa de cima e a de baixo não destoarem do conteúdo.
+    private var fundo: Color {
+        if let f = model.fundoPagina { return Color(red: f.r, green: f.g, blue: f.b) }
+        return escuro ? Color.black : Color.white
+    }
     private var textoCor: Color { escuro ? Color.white : Color.black }
     private var corBarra: Color { escuro ? Color(white: 0.16) : Color(white: 0.93) }
 
