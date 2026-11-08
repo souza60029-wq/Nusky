@@ -20,6 +20,7 @@
 //! informa isso (`estilo_completo`, `regras_casadas`) faz a regra não casar;
 //! quem informa usa `estilo_completo_ultimo` ou `regras_casadas_ultimo`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 const ERRO_COMPOSTO: &str = "seletor não suportado (combinador ou composto)";
@@ -33,6 +34,17 @@ pub struct Info {
     pub atributos: Vec<(String, String)>,
 }
 
+/// Como o elemento se comporta na página (só o que o motor entende).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Display {
+    /// block, grid, list-item, flow-root: começa uma linha nova.
+    Bloco,
+    /// flex: os filhos ficam lado a lado (ou um sobre o outro, se `coluna`).
+    Flex,
+    /// inline, inline-block, inline-flex, contents: segue o fluxo do texto.
+    Linha,
+}
+
 /// Estilo final de um elemento.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Estilo {
@@ -41,7 +53,28 @@ pub struct Estilo {
     pub margem_topo: Option<f32>,
     pub margem_base: Option<f32>,
     pub cor: Option<(u8, u8, u8)>,
+    /// Verdadeiro quando a página pediu `color: inherit` (ou currentcolor).
+    pub cor_herdada: bool,
     pub oculto: bool,
+    /// Cor de fundo sólida (translúcida ou transparente vira None).
+    pub fundo: Option<(u8, u8, u8)>,
+    pub display: Option<Display>,
+    /// `flex-direction: column`.
+    pub coluna: Option<bool>,
+    /// `gap`, em pontos.
+    pub espaco: Option<f32>,
+    /// `justify-content`: 0 início, 1 centro, 2 fim, 3 espaço entre.
+    pub justificar: Option<u8>,
+    /// `text-align`: 0 esquerda, 1 centro, 2 direita.
+    pub alinhamento: Option<u8>,
+    pub pad_topo: Option<f32>,
+    pub pad_base: Option<f32>,
+    pub pad_esq: Option<f32>,
+    pub pad_dir: Option<f32>,
+    pub borda_largura: Option<f32>,
+    /// Some(None) = borda transparente.
+    pub borda_cor: Option<Option<(u8, u8, u8)>>,
+    pub raio: Option<f32>,
 }
 
 /// Regra que o motor não aplicou, com o motivo.
@@ -67,6 +100,18 @@ pub struct Folha {
     pub ignoradas: Vec<Ignorada>,
     usa_irmaos: bool,
     nomes_atributos: Vec<String>,
+    /// Propriedades personalizadas (`--nome`) que valem na raiz da página.
+    vars: HashMap<String, String>,
+    /// Verdadeiro na primeira leitura, que só colhe as propriedades personalizadas.
+    fase_vars: bool,
+    regras_vars: Vec<RegraVars>,
+}
+
+/// Propriedades personalizadas de uma regra, com o seletor que as aplica.
+#[derive(Debug)]
+struct RegraVars {
+    seletor: Seletor,
+    vars: Vec<(String, String)>,
 }
 
 impl Folha {
@@ -77,7 +122,36 @@ impl Folha {
 
     /// Analisa escolhendo os `@media` pela largura informada.
     pub fn parse_largura(css: &str, largura: f32) -> Folha {
+        let raiz = Info { tag: "html".to_string(), ..Info::default() };
+        Folha::parse_com_raiz(css, largura, &raiz)
+    }
+
+    /// Analisa sabendo qual é o elemento raiz (`html`), para escolher quais
+    /// propriedades personalizadas (`--cor: ...`) valem. `var(--cor)` é trocado
+    /// pelo valor na hora da leitura. Só vale o que está declarado na raiz.
+    pub fn parse_com_raiz(css: &str, largura: f32, raiz: &Info) -> Folha {
         let mut f = Folha::default();
+        if css.contains("--") {
+            f.fase_vars = true;
+            analisa(css, largura, &mut f, None);
+            f.fase_vars = false;
+            let mut valem: Vec<(u32, usize)> = f
+                .regras_vars
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| casa_seletor(&r.seletor, raiz, &[], &[], false))
+                .map(|(i, r)| (r.seletor.especificidade, i))
+                .collect();
+            valem.sort_unstable();
+            let mut mapa: HashMap<String, String> = HashMap::new();
+            for (_, i) in valem {
+                for (nome, valor) in &f.regras_vars[i].vars {
+                    mapa.insert(nome.clone(), valor.clone());
+                }
+            }
+            f.vars = mapa;
+            f.regras_vars = Vec::new();
+        }
         analisa(css, largura, &mut f, None);
         for (i, r) in f.regras.iter().enumerate() {
             indexa(&mut f.indice, &r.seletor, i);
@@ -153,7 +227,7 @@ pub fn estilo_completo_ultimo(
         aplica(&mut d, &folha.regras[i].decl);
     }
     if let Some(texto) = inline {
-        aplica(&mut d, &declaracoes(texto));
+        aplica(&mut d, &declaracoes_com(texto, &folha.vars));
     }
     para_estilo(d)
 }
@@ -222,6 +296,21 @@ struct Decl {
     oculto: Option<bool>,
     /// `true` quando visibility, clip, clip-path ou transform escondem o texto.
     escondido_visual: Option<bool>,
+    cor_herdada: Option<bool>,
+    /// Some(None) = fundo transparente (desfaz um fundo anterior).
+    fundo: Option<Option<(u8, u8, u8)>>,
+    display: Option<Display>,
+    coluna: Option<bool>,
+    espaco: Option<f32>,
+    justificar: Option<u8>,
+    alinhamento: Option<u8>,
+    pad_topo: Option<f32>,
+    pad_base: Option<f32>,
+    pad_esq: Option<f32>,
+    pad_dir: Option<f32>,
+    borda_largura: Option<f32>,
+    borda_cor: Option<Option<(u8, u8, u8)>>,
+    raio: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -346,7 +435,11 @@ fn regra(
     f: &mut Folha,
     media: Option<(&str, bool)>,
 ) {
-    let decl = declaracoes(corpo);
+    if f.fase_vars {
+        coletar_vars_da_regra(seletor_txt, corpo, f, media);
+        return;
+    }
+    let decl = declaracoes_com(corpo, &f.vars);
     let corpo_limpo = corpo.split_whitespace().collect::<Vec<&str>>().join(" ");
     let oculta = decl.oculto == Some(true);
     let ativa = media.map_or(true, |(_, a)| a);
@@ -369,7 +462,7 @@ fn regra(
             }
             continue;
         }
-        match parse_seletor(parte) {
+        match parse_seletor(&normaliza_raiz(parte)) {
             Ok(s) => {
                 if s.usa_irmaos {
                     f.usa_irmaos = true;
@@ -459,7 +552,12 @@ fn divide_seletores(texto: &str) -> Vec<&str> {
 // Declarações e valores
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn declaracoes(texto: &str) -> Decl {
+    declaracoes_com(texto, &HashMap::new())
+}
+
+fn declaracoes_com(texto: &str, vars: &HashMap<String, String>) -> Decl {
     let mut d = Decl::default();
     for par in texto.split(';') {
         let (nome, valor) = match par.split_once(':') {
@@ -471,6 +569,15 @@ fn declaracoes(texto: &str) -> Decl {
         if let Some(sem) = valor.strip_suffix("!important") {
             valor = sem.trim_end();
         }
+        let valor_final: Cow<str> = if valor.contains("var(") {
+            match substituir_vars(valor, vars) {
+                Some(s) => Cow::Owned(s),
+                None => continue,
+            }
+        } else {
+            Cow::Borrowed(valor)
+        };
+        let valor: &str = &valor_final;
         match nome.as_str() {
             "font-size" => {
                 if let Some(v) = comprimento(valor) {
@@ -508,6 +615,151 @@ fn declaracoes(texto: &str) -> Decl {
             }
             "display" => {
                 d.oculto = Some(valor.eq_ignore_ascii_case("none"));
+                d.display = match valor.to_ascii_lowercase().as_str() {
+                    "block" | "grid" | "list-item" | "flow-root" => Some(Display::Bloco),
+                    "flex" => Some(Display::Flex),
+                    "inline" | "inline-block" | "inline-flex" | "inline-grid" | "contents" => {
+                        Some(Display::Linha)
+                    }
+                    _ => None,
+                };
+            }
+            "flex-direction" => {
+                let v = valor.to_ascii_lowercase();
+                if v.starts_with("column") {
+                    d.coluna = Some(true);
+                } else if v.starts_with("row") {
+                    d.coluna = Some(false);
+                }
+            }
+            "gap" | "column-gap" | "row-gap" => {
+                let vals = dividir_valores(valor);
+                if let Some(v) = vals.first().and_then(|t| comprimento(t)) {
+                    d.espaco = Some(v);
+                }
+            }
+            "justify-content" => {
+                d.justificar = match valor.to_ascii_lowercase().as_str() {
+                    "center" => Some(1),
+                    "flex-end" | "end" | "right" => Some(2),
+                    "space-between" | "space-around" | "space-evenly" => Some(3),
+                    "flex-start" | "start" | "left" | "normal" => Some(0),
+                    _ => None,
+                };
+            }
+            "text-align" => {
+                d.alinhamento = match valor.to_ascii_lowercase().as_str() {
+                    "center" => Some(1),
+                    "right" | "end" => Some(2),
+                    "left" | "start" => Some(0),
+                    _ => None,
+                };
+            }
+            "opacity" => {
+                if let Ok(n) = valor.trim().parse::<f32>() {
+                    if n <= 0.0 {
+                        d.escondido_visual = Some(true);
+                    }
+                }
+            }
+            "background-color" => {
+                if let Some((r, g, b, a)) = cor_alfa(valor) {
+                    d.fundo = Some(if a >= 0.85 { Some((r, g, b)) } else { None });
+                }
+            }
+            "background" => {
+                let v = valor.to_ascii_lowercase();
+                if !v.contains("url(") && !v.contains("gradient") {
+                    for t in dividir_valores(valor) {
+                        if let Some((r, g, b, a)) = cor_alfa(t) {
+                            d.fundo = Some(if a >= 0.85 { Some((r, g, b)) } else { None });
+                            break;
+                        }
+                    }
+                }
+            }
+            "padding" => {
+                let vals: Vec<Option<f32>> =
+                    dividir_valores(valor).iter().map(|t| comprimento(t)).collect();
+                if let Some([topo, dir, base, esq]) = quatro_lados(&vals) {
+                    d.pad_topo = topo.or(d.pad_topo);
+                    d.pad_dir = dir.or(d.pad_dir);
+                    d.pad_base = base.or(d.pad_base);
+                    d.pad_esq = esq.or(d.pad_esq);
+                }
+            }
+            "padding-inline" | "padding-block" => {
+                let vals: Vec<Option<f32>> =
+                    dividir_valores(valor).iter().map(|t| comprimento(t)).collect();
+                if let Some([a, b, _, _]) = quatro_lados(&vals) {
+                    if nome == "padding-inline" {
+                        d.pad_esq = a.or(d.pad_esq);
+                        d.pad_dir = b.or(d.pad_dir);
+                    } else {
+                        d.pad_topo = a.or(d.pad_topo);
+                        d.pad_base = b.or(d.pad_base);
+                    }
+                }
+            }
+            "padding-top" => {
+                if let Some(v) = comprimento(valor) {
+                    d.pad_topo = Some(v);
+                }
+            }
+            "padding-bottom" => {
+                if let Some(v) = comprimento(valor) {
+                    d.pad_base = Some(v);
+                }
+            }
+            "padding-left" | "padding-inline-start" => {
+                if let Some(v) = comprimento(valor) {
+                    d.pad_esq = Some(v);
+                }
+            }
+            "padding-right" | "padding-inline-end" => {
+                if let Some(v) = comprimento(valor) {
+                    d.pad_dir = Some(v);
+                }
+            }
+            "border-width" => {
+                let vals = dividir_valores(valor);
+                if let Some(v) = vals.first().and_then(|t| comprimento(t)) {
+                    d.borda_largura = Some(v);
+                }
+            }
+            "border-style" => {
+                let v = valor.to_ascii_lowercase();
+                if v == "none" || v == "hidden" {
+                    d.borda_largura = Some(0.0);
+                }
+            }
+            "border-color" => {
+                let vals = dividir_valores(valor);
+                if let Some((r, g, b, a)) = vals.first().and_then(|t| cor_alfa(t)) {
+                    d.borda_cor = Some(if a >= 0.5 { Some((r, g, b)) } else { None });
+                }
+            }
+            "border" => {
+                for t in dividir_valores(valor) {
+                    let minusculo = t.to_ascii_lowercase();
+                    if minusculo == "none" || minusculo == "hidden" {
+                        d.borda_largura = Some(0.0);
+                    } else if let Some((r, g, b, a)) = cor_alfa(t) {
+                        d.borda_cor = Some(if a >= 0.5 { Some((r, g, b)) } else { None });
+                    } else if let Some(v) = comprimento(t) {
+                        d.borda_largura = Some(v);
+                    }
+                }
+            }
+            "border-radius" => {
+                let vals = dividir_valores(valor);
+                if let Some(t) = vals.first() {
+                    if t.ends_with('%') {
+                        d.raio = Some(9999.0);
+                    } else if let Some(v) = comprimento(t) {
+                        d.raio = Some(v);
+                    }
+                }
             }
             "visibility" => {
                 let v = valor.to_ascii_lowercase();
@@ -533,8 +785,12 @@ fn declaracoes(texto: &str) -> Decl {
                 }
             }
             "color" => {
-                if let Some(c) = cor(valor) {
+                let v = valor.to_ascii_lowercase();
+                if v == "inherit" || v == "currentcolor" {
+                    d.cor_herdada = Some(true);
+                } else if let Some(c) = cor(valor) {
                     d.cor = Some(c);
+                    d.cor_herdada = Some(false);
                 }
             }
             _ => {}
@@ -565,6 +821,48 @@ fn aplica(dst: &mut Decl, src: &Decl) {
     if src.escondido_visual.is_some() {
         dst.escondido_visual = src.escondido_visual;
     }
+    if src.cor_herdada.is_some() {
+        dst.cor_herdada = src.cor_herdada;
+    }
+    if src.fundo.is_some() {
+        dst.fundo = src.fundo;
+    }
+    if src.display.is_some() {
+        dst.display = src.display;
+    }
+    if src.coluna.is_some() {
+        dst.coluna = src.coluna;
+    }
+    if src.espaco.is_some() {
+        dst.espaco = src.espaco;
+    }
+    if src.justificar.is_some() {
+        dst.justificar = src.justificar;
+    }
+    if src.alinhamento.is_some() {
+        dst.alinhamento = src.alinhamento;
+    }
+    if src.pad_topo.is_some() {
+        dst.pad_topo = src.pad_topo;
+    }
+    if src.pad_base.is_some() {
+        dst.pad_base = src.pad_base;
+    }
+    if src.pad_esq.is_some() {
+        dst.pad_esq = src.pad_esq;
+    }
+    if src.pad_dir.is_some() {
+        dst.pad_dir = src.pad_dir;
+    }
+    if src.borda_largura.is_some() {
+        dst.borda_largura = src.borda_largura;
+    }
+    if src.borda_cor.is_some() {
+        dst.borda_cor = src.borda_cor;
+    }
+    if src.raio.is_some() {
+        dst.raio = src.raio;
+    }
 }
 
 fn para_estilo(d: Decl) -> Estilo {
@@ -574,7 +872,21 @@ fn para_estilo(d: Decl) -> Estilo {
         margem_topo: d.margem_topo,
         margem_base: d.margem_base,
         cor: d.cor,
+        cor_herdada: d.cor_herdada == Some(true),
         oculto: d.oculto == Some(true) || d.escondido_visual == Some(true),
+        fundo: d.fundo.flatten(),
+        display: d.display,
+        coluna: d.coluna,
+        espaco: d.espaco,
+        justificar: d.justificar,
+        alinhamento: d.alinhamento,
+        pad_topo: d.pad_topo,
+        pad_base: d.pad_base,
+        pad_esq: d.pad_esq,
+        pad_dir: d.pad_dir,
+        borda_largura: d.borda_largura,
+        borda_cor: d.borda_cor,
+        raio: d.raio,
     }
 }
 
@@ -688,6 +1000,18 @@ fn peso(v: &str) -> Option<bool> {
 }
 
 fn cor(v: &str) -> Option<(u8, u8, u8)> {
+    let (r, g, b, a) = cor_alfa(v)?;
+    if a >= 0.5 {
+        Some((r, g, b))
+    } else {
+        None
+    }
+}
+
+/// Cor com transparência: (r, g, b, alfa de 0 a 1).
+/// Aceita #rgb, #rgba, #rrggbb, #rrggbbaa, rgb()/rgba() e hsl()/hsla(), com vírgulas
+/// ou espaços e `/ alfa`, além de alguns nomes.
+fn cor_alfa(v: &str) -> Option<(u8, u8, u8, f32)> {
     let v = v.trim().to_ascii_lowercase();
     if let Some(hex) = v.strip_prefix('#') {
         let d: Vec<u8> = hex
@@ -695,33 +1019,229 @@ fn cor(v: &str) -> Option<(u8, u8, u8)> {
             .map(|c| c.to_digit(16).map(|x| x as u8))
             .collect::<Option<Vec<u8>>>()?;
         return match d.len() {
-            3 => Some((d[0] * 17, d[1] * 17, d[2] * 17)),
-            6 => Some((d[0] * 16 + d[1], d[2] * 16 + d[3], d[4] * 16 + d[5])),
+            3 => Some((d[0] * 17, d[1] * 17, d[2] * 17, 1.0)),
+            4 => Some((d[0] * 17, d[1] * 17, d[2] * 17, (d[3] as f32) * 17.0 / 255.0)),
+            6 => Some((d[0] * 16 + d[1], d[2] * 16 + d[3], d[4] * 16 + d[5], 1.0)),
+            8 => Some((
+                d[0] * 16 + d[1],
+                d[2] * 16 + d[3],
+                d[4] * 16 + d[5],
+                ((d[6] * 16 + d[7]) as f32) / 255.0,
+            )),
             _ => None,
         };
     }
-    if let Some(args) = v
-        .strip_prefix("rgb(")
-        .and_then(|r| r.strip_suffix(')'))
-    {
-        let p: Vec<u8> = args
-            .split(',')
-            .map(|s| s.trim().parse::<u8>().ok())
-            .collect::<Option<Vec<u8>>>()?;
-        if p.len() == 3 {
-            return Some((p[0], p[1], p[2]));
-        }
+    let (tipo, resto) = if let Some(r) = v.strip_prefix("rgba(").or_else(|| v.strip_prefix("rgb(")) {
+        ("rgb", r)
+    } else if let Some(r) = v.strip_prefix("hsla(").or_else(|| v.strip_prefix("hsl(")) {
+        ("hsl", r)
+    } else {
+        return cor_nomeada(&v);
+    };
+    let args = resto.strip_suffix(')')?;
+    let args = args.replace(|c: char| c == ',' || c == '/', " ");
+    let partes: Vec<&str> = args.split_whitespace().collect();
+    if partes.len() < 3 {
         return None;
     }
-    match v.as_str() {
-        "black" => Some((0, 0, 0)),
-        "white" => Some((255, 255, 255)),
-        "red" => Some((255, 0, 0)),
-        "green" => Some((0, 128, 0)),
-        "blue" => Some((0, 0, 255)),
-        "gray" | "grey" => Some((128, 128, 128)),
-        "navy" => Some((0, 0, 128)),
+    let alfa = match partes.get(3) {
+        Some(a) => numero_ou_percentual(a, 1.0)?,
+        None => 1.0,
+    };
+    let alfa = alfa.clamp(0.0, 1.0);
+    if tipo == "rgb" {
+        let canal = |s: &str| numero_ou_percentual(s, 255.0).map(|x| x.round().clamp(0.0, 255.0) as u8);
+        return Some((canal(partes[0])?, canal(partes[1])?, canal(partes[2])?, alfa));
+    }
+    let h = partes[0].strip_suffix("deg").unwrap_or(partes[0]).parse::<f32>().ok()?;
+    let sat = partes[1].strip_suffix('%')?.parse::<f32>().ok()? / 100.0;
+    let luz = partes[2].strip_suffix('%')?.parse::<f32>().ok()? / 100.0;
+    let (r, g, b) = hsl_para_rgb(h, sat.clamp(0.0, 1.0), luz.clamp(0.0, 1.0));
+    Some((r, g, b, alfa))
+}
+
+/// Número puro ou porcentagem. `cheio` é o valor que 100% representa.
+fn numero_ou_percentual(s: &str, cheio: f32) -> Option<f32> {
+    match s.strip_suffix('%') {
+        Some(n) => n.trim().parse::<f32>().ok().map(|x| x / 100.0 * cheio),
+        None => s.parse::<f32>().ok(),
+    }
+}
+
+fn hsl_para_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let h = (((h % 360.0) + 360.0) % 360.0) / 360.0;
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let canal = |t: f32| -> f32 {
+        let mut t = t;
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    let byte = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    (byte(canal(h + 1.0 / 3.0)), byte(canal(h)), byte(canal(h - 1.0 / 3.0)))
+}
+
+fn cor_nomeada(v: &str) -> Option<(u8, u8, u8, f32)> {
+    let c = match v {
+        "transparent" => return Some((0, 0, 0, 0.0)),
+        "black" => (0, 0, 0),
+        "white" => (255, 255, 255),
+        "red" => (255, 0, 0),
+        "green" => (0, 128, 0),
+        "blue" => (0, 0, 255),
+        "gray" | "grey" => (128, 128, 128),
+        "navy" => (0, 0, 128),
+        "silver" => (192, 192, 192),
+        "maroon" => (128, 0, 0),
+        "purple" => (128, 0, 128),
+        "orange" => (255, 165, 0),
+        "yellow" => (255, 255, 0),
+        "teal" => (0, 128, 128),
+        "lime" => (0, 255, 0),
+        "aqua" | "cyan" => (0, 255, 255),
+        "fuchsia" | "magenta" => (255, 0, 255),
+        "olive" => (128, 128, 0),
+        _ => return None,
+    };
+    Some((c.0, c.1, c.2, 1.0))
+}
+
+/// Divide por espaços fora de parênteses: `1px solid hsl(0 0% 50%)` dá 3 partes.
+fn dividir_valores(s: &str) -> Vec<&str> {
+    let mut saida: Vec<&str> = Vec::new();
+    let mut prof = 0i32;
+    let mut inicio: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        if c == '(' {
+            prof += 1;
+            if inicio.is_none() {
+                inicio = Some(i);
+            }
+        } else if c == ')' {
+            prof -= 1;
+        } else if c.is_whitespace() && prof <= 0 {
+            if let Some(ini) = inicio.take() {
+                saida.push(&s[ini..i]);
+            }
+        } else if inicio.is_none() {
+            inicio = Some(i);
+        }
+    }
+    if let Some(ini) = inicio {
+        saida.push(&s[ini..]);
+    }
+    saida
+}
+
+/// Valores de 1 a 4 lados na ordem do CSS (topo, direita, base, esquerda).
+fn quatro_lados(vals: &[Option<f32>]) -> Option<[Option<f32>; 4]> {
+    match vals.len() {
+        1 => Some([vals[0]; 4]),
+        2 => Some([vals[0], vals[1], vals[0], vals[1]]),
+        3 => Some([vals[0], vals[1], vals[2], vals[1]]),
+        4 => Some([vals[0], vals[1], vals[2], vals[3]]),
         _ => None,
+    }
+}
+
+/// Troca `var(--nome)` e `var(--nome, reserva)` pelos valores. None se faltar algum.
+fn substituir_vars(valor: &str, vars: &HashMap<String, String>) -> Option<String> {
+    let mut atual = valor.to_string();
+    for _ in 0..8 {
+        let ini = match atual.find("var(") {
+            Some(i) => i,
+            None => return Some(atual),
+        };
+        let abre = ini + 3;
+        let mut prof = 0i32;
+        let mut fim: Option<usize> = None;
+        for (k, b) in atual.bytes().enumerate().skip(abre) {
+            if b == b'(' {
+                prof += 1;
+            } else if b == b')' {
+                prof -= 1;
+                if prof == 0 {
+                    fim = Some(k);
+                    break;
+                }
+            }
+        }
+        let fim = fim?;
+        let dentro = &atual[abre + 1..fim];
+        let (nome, reserva) = match dentro.split_once(',') {
+            Some((n, r)) => (n.trim(), Some(r.trim())),
+            None => (dentro.trim(), None),
+        };
+        let novo: String = match vars.get(nome) {
+            Some(v) => v.clone(),
+            None => reserva?.to_string(),
+        };
+        atual = format!("{}{}{}", &atual[..ini], novo, &atual[fim + 1..]);
+    }
+    if atual.contains("var(") {
+        None
+    } else {
+        Some(atual)
+    }
+}
+
+/// `--nome: valor` de um bloco de declarações.
+fn propriedades_personalizadas(corpo: &str) -> Vec<(String, String)> {
+    let mut saida: Vec<(String, String)> = Vec::new();
+    for par in corpo.split(';') {
+        if let Some((nome, valor)) = par.split_once(':') {
+            let nome = nome.trim();
+            if nome.starts_with("--") && nome.len() > 2 {
+                let valor = valor.trim();
+                let valor = valor.strip_suffix("!important").map_or(valor, |s| s.trim_end());
+                saida.push((nome.to_string(), valor.to_string()));
+            }
+        }
+    }
+    saida
+}
+
+/// `:root` vale o mesmo que `html`.
+fn normaliza_raiz(seletor: &str) -> String {
+    match seletor.strip_prefix(":root") {
+        Some(resto) => format!("html{}", resto),
+        None => seletor.to_string(),
+    }
+}
+
+/// Primeira leitura: guarda as propriedades personalizadas de cada regra.
+fn coletar_vars_da_regra(seletor_txt: &str, corpo: &str, f: &mut Folha, media: Option<(&str, bool)>) {
+    if !corpo.contains("--") {
+        return;
+    }
+    if !media.map_or(true, |(_, a)| a) {
+        return;
+    }
+    let vars = propriedades_personalizadas(corpo);
+    if vars.is_empty() {
+        return;
+    }
+    for parte in divide_seletores(seletor_txt) {
+        let parte = parte.trim();
+        if parte.is_empty() {
+            continue;
+        }
+        if let Ok(s) = parse_seletor(&normaliza_raiz(parte)) {
+            f.regras_vars.push(RegraVars { seletor: s, vars: vars.clone() });
+        }
     }
 }
 
@@ -1544,4 +2064,3 @@ mod testes {
         assert!(regras_casadas(&f, &alvo, &[], &[]).is_empty());
     }
 }
-
