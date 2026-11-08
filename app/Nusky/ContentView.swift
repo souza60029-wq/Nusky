@@ -227,6 +227,8 @@ struct ContentView: View {
         ZStack {
             PaginaView(
                 itens: model.items,
+                fundos: model.fundos,
+                fundoPagina: model.fundoPagina,
                 altura: CGFloat(model.contentHeight),
                 escuro: escuro,
                 restoreY: CGFloat(model.restoreY),
