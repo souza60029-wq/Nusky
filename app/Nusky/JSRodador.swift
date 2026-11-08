@@ -276,6 +276,11 @@ final class JSRodador: @unchecked Sendable {
             }
         }
         relatorio.tempo = CFAbsoluteTimeGetCurrent() - inicio
+        // O JavaScript de uma página grande chega a centenas de MB. Pede a limpeza já,
+        // em vez de esperar o sistema, para a memória voltar antes da próxima página.
+        if let ctx = contexto {
+            JSGarbageCollect(ctx.jsGlobalContextRef)
+        }
         contexto = nil
         sessao.invalidateAndCancel()
         entregar(Resultado(html: html, relatorio: relatorio))
