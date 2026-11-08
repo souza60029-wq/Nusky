@@ -2,300 +2,300 @@
 import Foundation
 import JavaScriptCore
 
-/// Roda os scripts de uma página com JavaScriptCore, num ambiente mínimo de navegador.
-/// Esta etapa não desenha nada: executa os scripts, conta os erros e mede o tempo.
-/// O DOM de verdade entra na etapa seguinte.
-final class JSRodador {
-
-    /// Um script da página: endereço de origem (ou "inline n") e o código.
-    struct Script {
-        let origem: String
-        let codigo: String
-    }
+/// Roda os scripts de uma página com JavaScriptCore, sobre um DOM de verdade (ver AmbienteJS).
+///
+/// Fluxo: o motor (Rust) entrega a árvore do HTML em JSON; o JavaScript monta o `document`,
+/// baixa e roda os scripts na ordem da página, atende fetch/XHR pela rede do app, roda os
+/// temporizadores em tempo virtual e, no fim, devolve o HTML já alterado para o motor desenhar.
+///
+/// Segurança de threads: todo o JavaScript roda numa única fila serial. A rede responde
+/// em outras threads, mas sempre volta para essa fila antes de tocar no JavaScript.
+///
+/// Limite de tempo: o JavaScriptCore não tem interrupção pública. Usamos a função interna
+/// `JSContextGroupSetExecutionTimeLimit`, procurada em tempo de execução (se não existir,
+/// o app segue sem ela). Além disso, passado o limite a página volta ao HTML original.
+/// Isso precisa ser medido no iPhone 6s antes de confiar.
+final class JSRodador: @unchecked Sendable {
 
     /// O que aconteceu na execução. É o que o diagnóstico vai mostrar.
     struct Relatorio {
         var executados = 0
+        var ignorados = 0
         var erros: [String] = []
+        var requisicoes = 0
         var tempo: Double = 0
         var estourouLimite = false
+        /// Verdadeiro quando o HTML final veio do JavaScript. Falso = HTML original.
+        var usouResultado = false
     }
 
-    /// Roda os scripts em ordem, fora da thread principal.
-    /// Se passar de `limite` segundos, devolve o relatório parcial com `estourouLimite = true`.
-    /// Limite de verdade: o JavaScriptCore não tem interrupção pública. A thread que estourou
-    /// continua até terminar, então isso precisa ser medido no aparelho antes de confiar nele.
-    static func executar(
+    /// Chave dos ajustes. Se nunca foi gravada, o JavaScript fica ligado.
+    static let chaveAtivo = "executarJavaScript"
+    static let limitePadrao: TimeInterval = 6
+
+    static var ativo: Bool {
+        UserDefaults.standard.object(forKey: chaveAtivo) as? Bool ?? true
+    }
+
+    // MARK: - Entrada
+
+    /// Roda os scripts da página e devolve o HTML final. Se não houver script, se o
+    /// JavaScript estiver desligado ou se algo falhar, devolve o HTML original.
+    static func processar(
+        html: String,
         pagina: URL,
-        scripts: [Script],
-        limite: TimeInterval
-    ) async -> Relatorio {
-        await withCheckedContinuation { (continuacao: CheckedContinuation<Relatorio, Never>) in
-            let entrega = Entrega(continuacao)
-            let inicio = CFAbsoluteTimeGetCurrent()
+        largura: Int,
+        limite: TimeInterval = limitePadrao
+    ) async -> (html: String, relatorio: Relatorio?) {
+        guard ativo, temScript(html) else { return (html, nil) }
+        guard let arvore = Engine.arvore(html: html) else { return (html, nil) }
 
-            DispatchQueue.global(qos: .userInitiated).async {
-                let relatorio = JSRodador.rodar(pagina: pagina, scripts: scripts, inicio: inicio)
-                entrega.entregar(relatorio)
-            }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + limite) {
-                var relatorio = Relatorio()
-                relatorio.estourouLimite = true
-                relatorio.tempo = limite
-                entrega.entregar(relatorio)
-            }
+        let resultado: Resultado = await withCheckedContinuation { cont in
+            let rodador = JSRodador(pagina: pagina, largura: largura, limite: limite, continuacao: cont)
+            rodador.comecar(arvore: arvore)
         }
+
+        var relatorio = resultado.relatorio
+        // Sem nenhum script rodado, o HTML original é igual e mais barato.
+        guard let final = resultado.html, relatorio.executados > 0, !final.isEmpty else {
+            return (html, relatorio)
+        }
+        relatorio.usouResultado = true
+        return (final, relatorio)
     }
 
-    // MARK: - Execução
-
-    private static func rodar(pagina: URL, scripts: [Script], inicio: CFAbsoluteTime) -> Relatorio {
-        var relatorio = Relatorio()
-
-        guard let contexto = JSContext() else {
-            relatorio.erros.append("Não consegui criar o contexto de JavaScript.")
-            relatorio.tempo = CFAbsoluteTimeGetCurrent() - inicio
-            return relatorio
-        }
-
-        let coletor = ColetorErros()
-        // Erros não tratados do JavaScript caem aqui; a execução segue no script seguinte.
-        contexto.exceptionHandler = { _, excecao in
-            coletor.adicionar(excecao?.toString() ?? "erro desconhecido")
-        }
-        // Ponte para o ambiente JS registrar erros (ex.: console.error, temporizadores).
-        let erroPelaPagina: @convention(block) (String) -> Void = { texto in
-            coletor.adicionar(texto)
-        }
-        contexto.setObject(erroPelaPagina, forKeyedSubscript: "__erro" as NSString)
-        contexto.setObject(dadosDaPagina(pagina), forKeyedSubscript: "__pagina" as NSString)
-
-        _ = contexto.evaluateScript(ambienteMinimo, withSourceURL: URL(string: "nusky://ambiente.js"))
-
-        for script in scripts {
-            _ = contexto.evaluateScript(script.codigo, withSourceURL: URL(string: script.origem))
-            relatorio.executados += 1
-        }
-
-        // Roda os temporizadores que os scripts agendaram (com teto, para não girar para sempre).
-        if let drenar = contexto.objectForKeyedSubscript("__drenar") {
-            _ = drenar.call(withArguments: [2000])
-        }
-
-        relatorio.erros = coletor.itens
-        relatorio.tempo = CFAbsoluteTimeGetCurrent() - inicio
-        return relatorio
+    private struct Resultado {
+        let html: String?
+        let relatorio: Relatorio
     }
 
-    private static func dadosDaPagina(_ url: URL) -> [String: String] {
-        [
-            "href": url.absoluteString,
-            "protocolo": (url.scheme ?? "https") + ":",
-            "host": url.host ?? "",
-            "caminho": url.path.isEmpty ? "/" : url.path,
-            "busca": url.query.map { "?" + $0 } ?? ""
-        ]
+    /// Procura "<script" sem copiar o texto inteiro.
+    private static func temScript(_ html: String) -> Bool {
+        html.range(of: "<script", options: .caseInsensitive) != nil
     }
 
-    // MARK: - Ambiente mínimo do navegador
+    // MARK: - Estado (só a fila de JavaScript mexe aqui)
 
-    /// Objetos que um site espera encontrar: window, document, location, storage, temporizadores.
-    /// Nesta etapa, o document é falso: aceita tudo, mas não guarda uma árvore de verdade.
-    private static let ambienteMinimo = """
-    (function () {
-      var G = this;
-      var pagina = __pagina;
-      var inicioMs = Date.now();
-      var agente = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 Safari/604.1";
-      var silencio = function () {};
-      var fila = [];
-      var proximoId = 1;
+    private let fila = DispatchQueue(label: "nusky.javascript", qos: .userInitiated)
+    private let pagina: URL
+    private let largura: Int
+    private let limite: TimeInterval
+    private let inicio = CFAbsoluteTimeGetCurrent()
+    private let sessao = URLSession(configuration: .ephemeral)
 
-      function elementoFalso(tag) {
-        var nome = String(tag || 'div').toUpperCase();
-        var el = {
-          tagName: nome, nodeName: nome, nodeType: 1,
-          children: [], childNodes: [], style: {}, dataset: {}, attributes: {},
-          textContent: '', innerHTML: '', value: '', checked: false,
-          appendChild: function (f) { this.childNodes.push(f); return f; },
-          insertBefore: function (f) { this.childNodes.push(f); return f; },
-          removeChild: function (f) { return f; },
-          setAttribute: function (n, v) { this.attributes[n] = String(v); },
-          getAttribute: function (n) { return Object.prototype.hasOwnProperty.call(this.attributes, n) ? this.attributes[n] : null; },
-          removeAttribute: function (n) { delete this.attributes[n]; },
-          hasAttribute: function (n) { return Object.prototype.hasOwnProperty.call(this.attributes, n); },
-          addEventListener: silencio, removeEventListener: silencio,
-          dispatchEvent: function () { return true; },
-          focus: silencio, blur: silencio, click: silencio,
-          getBoundingClientRect: function () { return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
-          querySelector: function () { return null; },
-          querySelectorAll: function () { return []; },
-          contains: function () { return false; }
-        };
-        el.classList = { add: silencio, remove: silencio, toggle: function () { return false; }, contains: function () { return false; } };
-        return el;
-      }
+    private var contexto: JSContext?
+    private var relatorio = Relatorio()
+    private var terminado = false
 
-      function armazenamento() {
-        var dados = {};
-        return {
-          getItem: function (k) { return Object.prototype.hasOwnProperty.call(dados, k) ? dados[k] : null; },
-          setItem: function (k, v) { dados[k] = String(v); },
-          removeItem: function (k) { delete dados[k]; },
-          clear: function () { dados = {}; },
-          key: function (i) { return Object.keys(dados)[i] || null; },
-          get length() { return Object.keys(dados).length; }
-        };
-      }
-
-      var documento = elementoFalso('html');
-      documento.nodeType = 9;
-      documento.readyState = 'complete';
-      documento.title = '';
-      documento.cookie = '';
-      documento.documentElement = elementoFalso('html');
-      documento.head = elementoFalso('head');
-      documento.body = elementoFalso('body');
-      documento.createElement = function (t) { return elementoFalso(t); };
-      documento.createElementNS = function (ns, t) { return elementoFalso(t); };
-      documento.createTextNode = function (t) { var n = elementoFalso('#text'); n.nodeType = 3; n.textContent = String(t); return n; };
-      documento.createDocumentFragment = function () { return elementoFalso('#fragment'); };
-      documento.getElementById = function () { return null; };
-      documento.getElementsByTagName = function () { return []; };
-      documento.getElementsByClassName = function () { return []; };
-      documento.querySelector = function () { return null; };
-      documento.querySelectorAll = function () { return []; };
-
-      var localizacao = {
-        href: pagina.href, protocol: pagina.protocolo, host: pagina.host,
-        hostname: pagina.host, pathname: pagina.caminho, search: pagina.busca,
-        hash: '', origin: pagina.protocolo + '//' + pagina.host,
-        assign: silencio, replace: silencio, reload: silencio
-      };
-
-      function agendar(fn, args) {
-        var id = proximoId++;
-        fila.push({ id: id, fn: fn, args: args });
-        return id;
-      }
-
-      G.setTimeout = function (fn) {
-        if (typeof fn !== 'function') return 0;
-        return agendar(fn, Array.prototype.slice.call(arguments, 2));
-      };
-      G.clearTimeout = function (id) {
-        fila = fila.filter(function (t) { return t.id !== id; });
-      };
-      G.setInterval = function () { return 0; };
-      G.clearInterval = silencio;
-      G.requestAnimationFrame = function (fn) {
-        return agendar(function () { fn(Date.now() - inicioMs); }, []);
-      };
-      G.cancelAnimationFrame = G.clearTimeout;
-      G.queueMicrotask = function (fn) { agendar(fn, []); };
-
-      G.__drenar = function (maximo) {
-        var n = 0;
-        while (fila.length > 0 && n < maximo) {
-          var t = fila.shift();
-          n++;
-          try { t.fn.apply(null, t.args); } catch (e) { __erro('temporizador: ' + e); }
-        }
-        return fila.length;
-      };
-
-      G.console = {
-        log: silencio, info: silencio, debug: silencio, warn: silencio, trace: silencio,
-        table: silencio, time: silencio, timeEnd: silencio, group: silencio, groupEnd: silencio,
-        error: function () { __erro('console.error: ' + Array.prototype.join.call(arguments, ' ')); }
-      };
-
-      G.window = G;
-      G.self = G;
-      G.top = G;
-      G.parent = G;
-      G.document = documento;
-      documento.defaultView = G;
-      G.location = localizacao;
-      G.navigator = {
-        userAgent: agente, appVersion: agente, platform: 'iPhone',
-        language: 'pt-BR', languages: ['pt-BR', 'pt'], onLine: true,
-        maxTouchPoints: 5, cookieEnabled: true, vendor: 'Apple Computer, Inc.'
-      };
-      G.localStorage = armazenamento();
-      G.sessionStorage = armazenamento();
-      G.performance = { now: function () { return Date.now() - inicioMs; }, timeOrigin: inicioMs };
-      G.screen = { width: 375, height: 812, availWidth: 375, availHeight: 812, colorDepth: 24 };
-      G.innerWidth = 375;
-      G.innerHeight = 812;
-      G.devicePixelRatio = 2;
-      G.scrollX = 0;
-      G.scrollY = 0;
-      G.scrollTo = silencio;
-      G.scroll = silencio;
-      G.open = silencio;
-      G.alert = silencio;
-      G.confirm = function () { return false; };
-      G.prompt = function () { return null; };
-      G.addEventListener = silencio;
-      G.removeEventListener = silencio;
-      G.dispatchEvent = function () { return true; };
-      G.getSelection = function () { return null; };
-      G.getComputedStyle = function () { return { getPropertyValue: function () { return ''; } }; };
-      G.matchMedia = function (q) {
-        return { matches: false, media: String(q), addListener: silencio, removeListener: silencio, addEventListener: silencio, removeEventListener: silencio };
-      };
-      G.history = { pushState: silencio, replaceState: silencio, back: silencio, forward: silencio, go: silencio, state: null, length: 1 };
-      G.crypto = {
-        getRandomValues: function (a) { for (var i = 0; i < a.length; i++) { a[i] = Math.floor(Math.random() * 256); } return a; },
-        randomUUID: function () {
-          return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-            var r = Math.random() * 16 | 0;
-            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-          });
-        }
-      };
-      G.fetch = function () { return Promise.reject(new Error('fetch ainda não ligado')); };
-      G.Image = function () { return elementoFalso('img'); };
-      G.Event = function (t) { this.type = t; };
-      G.CustomEvent = G.Event;
-      G.HTMLElement = function () {};
-      G.Element = G.HTMLElement;
-      G.Node = G.HTMLElement;
-      G.Text = G.HTMLElement;
-      G.MutationObserver = function () { this.observe = silencio; this.disconnect = silencio; this.takeRecords = function () { return []; }; };
-      G.ResizeObserver = G.MutationObserver;
-      G.IntersectionObserver = G.MutationObserver;
-    })();
-    """
-}
-
-// MARK: - Apoio
-
-/// Guarda os erros da execução. Só é usado pela thread que roda o JavaScript.
-private final class ColetorErros {
-    private(set) var itens: [String] = []
-
-    func adicionar(_ texto: String) {
-        guard itens.count < 200 else { return }
-        itens.append(texto)
-    }
-}
-
-/// Entrega o resultado uma vez só, mesmo que a execução e o limite de tempo terminem juntos.
-private final class Entrega {
+    // A entrega pode vir de duas filas (fim normal ou desistência): protegida por trava.
     private let trava = NSLock()
-    private var continuacao: CheckedContinuation<JSRodador.Relatorio, Never>?
+    private var continuacao: CheckedContinuation<Resultado, Never>?
 
-    init(_ continuacao: CheckedContinuation<JSRodador.Relatorio, Never>) {
+    private init(pagina: URL, largura: Int, limite: TimeInterval, continuacao: CheckedContinuation<Resultado, Never>) {
+        self.pagina = pagina
+        self.largura = largura
+        self.limite = limite
         self.continuacao = continuacao
     }
 
-    func entregar(_ relatorio: JSRodador.Relatorio) {
+    private func comecar(arvore: String) {
+        fila.async { self.preparar(arvore: arvore) }
+        // Passou o tempo: fecha com o que já foi montado.
+        fila.asyncAfter(deadline: .now() + limite) { self.estourou() }
+        // Se a fila estiver presa num script que não parou, volta ao HTML original.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + limite + 2) { self.desistir() }
+    }
+
+    // MARK: - Preparação
+
+    private func preparar(arvore: String) {
+        guard let ctx = JSContext() else {
+            relatorio.erros.append("Não consegui criar o contexto de JavaScript.")
+            finalizar()
+            return
+        }
+        contexto = ctx
+        ctx.exceptionHandler = { [weak self] _, excecao in
+            self?.registrarErro(excecao?.toString() ?? "erro desconhecido")
+        }
+
+        instalarPonte(em: ctx)
+        limitarExecucao(de: ctx)
+
+        _ = ctx.evaluateScript(AmbienteJS.codigo, withSourceURL: URL(string: "nusky://ambiente.js"))
+        // Monta o document, roda os scripts na ordem e segue enquanto houver rede ou temporizador.
+        _ = ctx.objectForKeyedSubscript("__iniciar")?.call(withArguments: [arvore])
+    }
+
+    private func instalarPonte(em ctx: JSContext) {
+        let desktop = UserDefaults.standard.bool(forKey: IdentificacaoNavegador.chaveDesktop)
+        let dados: [String: Any] = [
+            "href": pagina.absoluteString,
+            "protocolo": (pagina.scheme ?? "https") + ":",
+            "host": pagina.host ?? "",
+            "agente": IdentificacaoNavegador.atual,
+            "plataforma": desktop ? "MacIntel" : "iPhone",
+            "toque": !desktop,
+            "largura": desktop ? 1280 : largura,
+            "altura": desktop ? 800 : 812,
+            "escala": 2,
+            "escuro": false
+        ]
+        ctx.setObject(dados, forKeyedSubscript: "__pagina" as NSString)
+
+        let aoErrar: @convention(block) (String) -> Void = { [weak self] texto in
+            self?.registrarErro(texto)
+        }
+        ctx.setObject(aoErrar, forKeyedSubscript: "__erro" as NSString)
+
+        // O mesmo parser do motor (Rust) serve para innerHTML e document.write.
+        let aoLerHTML: @convention(block) (String) -> String = { html in
+            Engine.arvore(html: html) ?? "[]"
+        }
+        ctx.setObject(aoLerHTML, forKeyedSubscript: "__parse" as NSString)
+
+        let aoPedir: @convention(block) (Int, String, String, String, String) -> Void = {
+            [weak self] id, url, metodo, cabecalhos, corpo in
+            self?.pedir(id: id, url: url, metodo: metodo, cabecalhos: cabecalhos, corpo: corpo)
+        }
+        ctx.setObject(aoPedir, forKeyedSubscript: "__pedir" as NSString)
+
+        // O JavaScript avisa que não há mais nada a fazer. Fecha fora da pilha atual.
+        let aoTerminar: @convention(block) () -> Void = { [weak self] in
+            self?.fila.async { self?.finalizar() }
+        }
+        ctx.setObject(aoTerminar, forKeyedSubscript: "__fim" as NSString)
+    }
+
+    /// Para scripts que não terminam. A função é interna do JavaScriptCore e pode não existir:
+    /// por isso é procurada na hora, sem linkar direto.
+    private func limitarExecucao(de ctx: JSContext) {
+        typealias Retorno = @convention(c) (UnsafeRawPointer?, UnsafeMutableRawPointer?) -> Bool
+        typealias Funcao = @convention(c) (UnsafeRawPointer?, Double, Retorno?, UnsafeMutableRawPointer?) -> Void
+
+        guard let simbolo = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "JSContextGroupSetExecutionTimeLimit"),
+              let grupo = JSContextGetGroup(ctx.jsGlobalContextRef) else { return }
+        let definir = unsafeBitCast(simbolo, to: Funcao.self)
+        let parar: Retorno = { _, _ in true }
+        definir(UnsafeRawPointer(grupo), limite, parar, nil)
+    }
+
+    // MARK: - Rede
+
+    private static let cabecalhosProibidos: Set<String> = [
+        "user-agent", "host", "content-length", "cookie", "connection", "referer"
+    ]
+    private static let maximoRequisicoes = 120
+    private static let maximoBytesResposta = 3_000_000
+
+    private func pedir(id: Int, url: String, metodo: String, cabecalhos: String, corpo: String) {
+        relatorio.requisicoes += 1
+        guard relatorio.requisicoes <= JSRodador.maximoRequisicoes,
+              let destino = URL(string: url),
+              let esquema = destino.scheme?.lowercased(),
+              esquema == "http" || esquema == "https" else {
+            responder(id: id, status: 0, cabecalhos: "{}", texto: "", erro: "pedido bloqueado")
+            return
+        }
+
+        var pedido = URLRequest(url: destino)
+        let metodoFinal = metodo.uppercased()
+        pedido.httpMethod = metodoFinal
+        pedido.timeoutInterval = limite
+        pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
+        pedido.setValue(pagina.absoluteString, forHTTPHeaderField: "Referer")
+        if let dados = cabecalhos.data(using: .utf8),
+           let objeto = try? JSONSerialization.jsonObject(with: dados) as? [String: Any] {
+            for (nome, valor) in objeto where !JSRodador.cabecalhosProibidos.contains(nome.lowercased()) {
+                pedido.setValue(String(describing: valor), forHTTPHeaderField: nome)
+            }
+        }
+        if !corpo.isEmpty, metodoFinal != "GET", metodoFinal != "HEAD" {
+            pedido.httpBody = corpo.data(using: .utf8)
+        }
+
+        sessao.dataTask(with: pedido) { [weak self] dados, resposta, falha in
+            guard let self else { return }
+            if let falha {
+                self.fila.async { self.responder(id: id, status: 0, cabecalhos: "{}", texto: "", erro: falha.localizedDescription) }
+                return
+            }
+            guard let dados, dados.count <= JSRodador.maximoBytesResposta else {
+                self.fila.async { self.responder(id: id, status: 0, cabecalhos: "{}", texto: "", erro: "resposta grande demais") }
+                return
+            }
+            let http = resposta as? HTTPURLResponse
+            var cab: [String: String] = [:]
+            for (k, v) in http?.allHeaderFields ?? [:] {
+                cab[String(describing: k).lowercased()] = String(describing: v)
+            }
+            let cabJSON = (try? JSONSerialization.data(withJSONObject: cab))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            let texto = String(data: dados, encoding: .utf8) ?? String(decoding: dados, as: UTF8.self)
+            self.fila.async {
+                self.responder(id: id, status: http?.statusCode ?? 0, cabecalhos: cabJSON, texto: texto, erro: "")
+            }
+        }.resume()
+    }
+
+    /// Entrega a resposta ao JavaScript. Sempre na fila do JavaScript.
+    private func responder(id: Int, status: Int, cabecalhos: String, texto: String, erro: String) {
+        guard !terminado, let ctx = contexto else { return }
+        _ = ctx.objectForKeyedSubscript("__resposta")?
+            .call(withArguments: [id, status, cabecalhos, texto, erro])
+    }
+
+    // MARK: - Fim
+
+    private func registrarErro(_ texto: String) {
+        guard relatorio.erros.count < 200 else { return }
+        relatorio.erros.append(texto)
+    }
+
+    private func estourou() {
+        guard !terminado else { return }
+        relatorio.estourouLimite = true
+        finalizar()
+    }
+
+    /// Serializa o documento, libera tudo e entrega o resultado. Só na fila do JavaScript.
+    private func finalizar() {
+        guard !terminado else { return }
+        terminado = true
+
+        var html: String?
+        if let ctx = contexto {
+            if let valor = ctx.objectForKeyedSubscript("__serializar")?.call(withArguments: []), valor.isString {
+                html = valor.toString()
+            }
+            if let texto = ctx.objectForKeyedSubscript("__estatisticas")?.call(withArguments: [])?.toString(),
+               let dados = texto.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: dados) as? [String: Any] {
+                relatorio.executados = obj["executados"] as? Int ?? 0
+                relatorio.ignorados = obj["ignorados"] as? Int ?? 0
+            }
+        }
+        relatorio.tempo = CFAbsoluteTimeGetCurrent() - inicio
+        contexto = nil
+        sessao.invalidateAndCancel()
+        entregar(Resultado(html: html, relatorio: relatorio))
+    }
+
+    /// A fila não respondeu a tempo: segue com o HTML original.
+    private func desistir() {
+        var r = Relatorio()
+        r.estourouLimite = true
+        r.tempo = CFAbsoluteTimeGetCurrent() - inicio
+        r.erros = ["O JavaScript não parou a tempo; a página foi aberta sem ele."]
+        entregar(Resultado(html: nil, relatorio: r))
+    }
+
+    /// Entrega uma vez só, mesmo que o fim normal e a desistência cheguem juntos.
+    private func entregar(_ resultado: Resultado) {
         trava.lock()
         let c = continuacao
         continuacao = nil
         trava.unlock()
-        c?.resume(returning: relatorio)
+        c?.resume(returning: resultado)
     }
 }
