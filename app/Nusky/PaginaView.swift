@@ -5,6 +5,8 @@ import UIKit
 /// em blocos (CATiledLayer): só os blocos que aparecem na tela são desenhados.
 struct PaginaView: UIViewRepresentable {
     let itens: [DrawItem]
+    let fundos: [Fundo]
+    let fundoPagina: CorTexto?
     let altura: CGFloat
     let escuro: Bool
     let restoreY: CGFloat
@@ -28,22 +30,28 @@ struct PaginaView: UIViewRepresentable {
         let c = context.coordinator
         c.pai = self
 
-        scroll.backgroundColor = escuro ? .black : .white
+        // Se a página define a cor de fundo, ela manda: o texto escolhe contraste em cima dela.
+        let escuroEfetivo = fundoPagina.map { $0.luminancia < 0.5 } ?? escuro
+        if let f = fundoPagina {
+            scroll.backgroundColor = UIColor(red: CGFloat(f.r), green: CGFloat(f.g), blue: CGFloat(f.b), alpha: 1)
+        } else {
+            scroll.backgroundColor = escuro ? .black : .white
+        }
         scroll.alturaDaPagina = altura
 
         let desenho = scroll.desenho
-        if desenho.escuro != escuro {
-            desenho.escuro = escuro
+        if desenho.escuro != escuroEfetivo {
+            desenho.escuro = escuroEfetivo
             desenho.setNeedsDisplay()
         }
         desenho.aoTocarLink = { link in c.pai.aoAbrirLink(link) }
         desenho.aoTocarPagina = { c.pai.aoTocarPagina() }
 
         // Página nova: o primeiro item muda, porque cada carregamento gera ids novos.
-        let identificacao = itens.first?.id
+        let identificacao = itens.first?.id ?? fundos.first?.id
         if identificacao != c.identificacao {
             c.identificacao = identificacao
-            desenho.trocarItens(itens)
+            desenho.trocarItens(itens, fundos: fundos)
             scroll.layoutIfNeeded()
             scroll.setContentOffset(CGPoint(x: 0, y: restoreY), animated: false)
         }
@@ -95,6 +103,7 @@ final class PaginaScroll: UIScrollView {
 final class DesenhoPagina: UIView {
     private let trava = NSLock()
     private var lista: [DrawItem] = []
+    private var caixas: [Fundo] = []
 
     var escuro = false
     var aoTocarLink: ((String) -> Void)?
@@ -120,10 +129,11 @@ final class DesenhoPagina: UIView {
         fatalError("não usado")
     }
 
-    func trocarItens(_ novos: [DrawItem]) {
+    func trocarItens(_ novos: [DrawItem], fundos: [Fundo]) {
         let ordenados = novos.sorted { CGFloat($0.y) < CGFloat($1.y) }
         trava.lock()
         lista = ordenados
+        caixas = fundos
         trava.unlock()
         setNeedsDisplay()
     }
@@ -134,7 +144,38 @@ final class DesenhoPagina: UIView {
         return lista
     }
 
+    private func copiaCaixas() -> [Fundo] {
+        trava.lock()
+        defer { trava.unlock() }
+        return caixas
+    }
+
+    /// Pinta as caixas de fundo que tocam o bloco. A lista vem de fora para dentro,
+    /// então caixas de dentro ficam por cima das de fora.
+    private func desenharFundos(_ rect: CGRect) {
+        for f in copiaCaixas() {
+            let quadro = CGRect(x: f.x, y: f.y, width: f.w, height: f.h)
+            guard quadro.intersects(rect) else { continue }
+            let raio = min(f.raio, min(quadro.width, quadro.height) / 2)
+            if let cor = f.cor {
+                UIColor(red: CGFloat(cor.r), green: CGFloat(cor.g), blue: CGFloat(cor.b), alpha: 1).setFill()
+                UIBezierPath(roundedRect: quadro, cornerRadius: raio).fill()
+            }
+            if f.bordaLargura > 0, let borda = f.bordaCor {
+                let meio = f.bordaLargura / 2
+                let caminho = UIBezierPath(
+                    roundedRect: quadro.insetBy(dx: meio, dy: meio),
+                    cornerRadius: max(0, raio - meio)
+                )
+                caminho.lineWidth = f.bordaLargura
+                UIColor(red: CGFloat(borda.r), green: CGFloat(borda.g), blue: CGFloat(borda.b), alpha: 1).setStroke()
+                caminho.stroke()
+            }
+        }
+    }
+
     override func draw(_ rect: CGRect) {
+        desenharFundos(rect)
         let itens = copia()
         var i = primeiroAPartir(itens, rect.minY - 80)
         while i < itens.count && CGFloat(itens[i].y) <= rect.maxY {
