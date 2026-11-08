@@ -6,7 +6,7 @@ Navegador para iPhone com motor próprio, escrito em Rust, e casca em Swift/Swif
 
 Abrir páginas com velocidade e pouco uso de memória em aparelhos antigos, começando pelo iPhone 6s (chip A9, 2 GB de RAM, iOS 15.8.8). O app é instalado com TrollStore.
 
-## O que funciona hoje (versão 0.0.2)
+## O que funciona hoje (versão 0.0.3)
 
 - Abrir endereços http e https, com links clicáveis e endereços com acento.
 - HTML básico: parágrafos, títulos, listas, links e entidades HTML (nomeadas e numéricas).
@@ -63,7 +63,7 @@ Detalhes de arquitetura estão em `ARCHITECTURE.md`.
 
 ## Versionamento
 
-A versão sobe em marcos validados no aparelho. A versão atual é 0.0.2.
+A versão sobe em marcos validados no aparelho. A versão atual é 0.0.3.
 
 ## Plataforma de teste
 
