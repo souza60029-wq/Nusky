@@ -625,7 +625,7 @@ enum DiagnosticoJS {
         linhas.append("HTML final veio do JavaScript: \(r.usouResultado ? "sim" : "NÃO (usou o HTML original)")")
         linhas.append("Erros: \(r.erros.count)")
         for erro in r.erros.prefix(25) {
-            linhas.append("  - " + String(erro.prefix(260)))
+            linhas.append("  - " + String(erro.prefix(600)))
         }
         if r.erros.count > 25 {
             linhas.append("  … e mais \(r.erros.count - 25)")
