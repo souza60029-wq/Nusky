@@ -88,6 +88,14 @@ enum Engine {
         return items
     }
 
+    /// Árvore do HTML em JSON (o parser do motor), para o JavaScript montar o document.
+    /// Nil se o motor não devolver nada.
+    static func arvore(html: String) -> String? {
+        guard let raw = nusky_arvore(html) else { return nil }
+        defer { nusky_free_string(raw) }
+        return String(cString: raw)
+    }
+
     /// "r,g,b" com valores de 0 a 255. Campo vazio quando a página não definiu cor.
     private static func parseCor(_ campo: Substring) -> CorTexto? {
         let partes = campo.split(separator: ",")
