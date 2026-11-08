@@ -13,7 +13,7 @@
 //! e os irmãos de cada elemento.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
-use crate::css::{self, Estilo, Folha, Info};
+use crate::css::{self, Display, Estilo, Folha, Info};
 use crate::html::{Element, Node};
 
 /// Responsável por medir texto. No iPhone, a casca implementa com CoreText.
@@ -39,6 +39,35 @@ pub enum DrawCommand {
     },
 }
 
+/// Caixa de fundo de um bloco: cor sólida e/ou borda, com cantos arredondados.
+/// Fica numa lista à parte dos textos, na ordem em que deve ser pintada
+/// (o bloco de fora vem antes do de dentro).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fundo {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub cor: Option<[u8; 3]>,
+    /// Largura e cor da borda.
+    pub borda: Option<(f32, [u8; 3])>,
+    pub raio: f32,
+}
+
+/// Tudo o que o layout produz: textos, caixas de fundo e a cor de fundo da página.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Saida {
+    pub comandos: Vec<DrawCommand>,
+    pub fundos: Vec<Fundo>,
+    /// Cor de fundo do `html` ou do `body`, se a página definiu.
+    pub fundo_pagina: Option<[u8; 3]>,
+}
+
+/// Limite de caixas de fundo, para uma página enorme não ocupar memória demais.
+const MAX_FUNDOS: usize = 4000;
+/// Marca de quebra de linha (`<br>`) dentro do texto acumulado.
+const QUEBRA: &str = "\u{1}";
+
 const PAGE_MARGIN: f32 = 8.0;
 const BASE_FONT: f32 = 16.0;
 const LINE_HEIGHT: f32 = 1.3;
@@ -59,6 +88,8 @@ struct Style {
     margin_top: f32,
     margin_bottom: f32,
     color: Option<[u8; 3]>,
+    /// `text-align`: 0 esquerda, 1 centro, 2 direita. Herdado.
+    align: u8,
 }
 
 /// Elementos que começam um novo bloco. Os demais são inline.
@@ -96,14 +127,14 @@ fn is_row_group(tag: &str) -> bool {
 /// Estilo padrão por tag. Valores em pontos. Sem cor: a cor vem do pai ou do CSS.
 fn style_for(tag: &str) -> Style {
     match tag {
-        "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0, color: None },
-        "h2" => Style { font_size: 24.0, bold: true, margin_top: 19.0, margin_bottom: 19.0, color: None },
-        "h3" => Style { font_size: 18.7, bold: true, margin_top: 18.0, margin_bottom: 18.0, color: None },
+        "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0, color: None, align: 0 },
+        "h2" => Style { font_size: 24.0, bold: true, margin_top: 19.0, margin_bottom: 19.0, color: None, align: 0 },
+        "h3" => Style { font_size: 18.7, bold: true, margin_top: 18.0, margin_bottom: 18.0, color: None, align: 0 },
         "h4" | "h5" | "h6" => {
-            Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0, color: None }
+            Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0, color: None, align: 0 }
         }
-        "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0, color: None },
-        _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0, color: None },
+        "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0, color: None, align: 0 },
+        _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0, color: None, align: 0 },
     }
 }
 
@@ -120,6 +151,7 @@ fn aplicar(base: Style, css: &Estilo) -> Style {
         margin_top: css.margem_topo.unwrap_or(base.margin_top),
         margin_bottom: css.margem_base.unwrap_or(base.margin_bottom),
         color: cor_do_css(css.cor).or(base.color),
+        align: css.alinhamento.unwrap_or(base.align),
     }
 }
 
@@ -143,6 +175,14 @@ struct Ctx<'a> {
     y: f32,
     width: f32,
     commands: Vec<DrawCommand>,
+    fundos: Vec<Fundo>,
+    fundo_pagina: Option<[u8; 3]>,
+    /// O próximo elemento tratado vira bloco (filho de flex).
+    forcar_bloco: bool,
+    /// Espaço (gap) entre os filhos do próximo `layout_children`.
+    gap: f32,
+    /// Os filhos do próximo `layout_children` viram blocos (filhos de flex em coluna).
+    filhos_bloco: bool,
 }
 
 /// Célula de tabela já resolvida: CSS calculado, colunas que ocupa e medidas do texto.
@@ -169,18 +209,63 @@ struct Linha<'a> {
 /// Gera os comandos de desenho para uma lista de nós de topo.
 /// Os comandos saem ordenados de cima para baixo e da esquerda para a direita.
 pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) -> Vec<DrawCommand> {
+    layout_completo(nodes, viewport_width, measurer).comandos
+}
+
+/// Procura o elemento `html` na árvore.
+fn achar_html(nodes: &[Node]) -> Option<&Element> {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.tag == "html" {
+                return Some(el);
+            }
+            if let Some(achado) = achar_html(&el.children) {
+                return Some(achado);
+            }
+        }
+    }
+    None
+}
+
+/// Igual a `layout`, mas devolve também as caixas de fundo e a cor de fundo da página.
+pub fn layout_completo(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) -> Saida {
     let mut css_texto = String::new();
     coletar_css(nodes, &mut css_texto);
 
+    // A raiz com as classes e atributos reais: é ela que decide quais
+    // propriedades personalizadas (`--cor`) valem (tema claro ou escuro).
+    let folha = match achar_html(nodes) {
+        Some(html) => {
+            let raiz = Info {
+                tag: "html".to_string(),
+                id: html.attr("id").unwrap_or("").to_string(),
+                classes: html
+                    .attr("class")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect(),
+                atributos: html.attrs.clone(),
+            };
+            Folha::parse_com_raiz(&css_texto, viewport_width, &raiz)
+        }
+        None => Folha::parse_largura(&css_texto, viewport_width),
+    };
+
     let mut ctx = Ctx {
         measurer,
-        folha: Folha::parse_largura(&css_texto, viewport_width),
+        folha,
         tem_css: !css_texto.trim().is_empty(),
         pais: Vec::new(),
         x0: PAGE_MARGIN,
         y: PAGE_MARGIN,
         width: (viewport_width - 2.0 * PAGE_MARGIN).max(0.0),
         commands: Vec::new(),
+        fundos: Vec::new(),
+        fundo_pagina: None,
+        forcar_bloco: false,
+        gap: 0.0,
+        filhos_bloco: false,
     };
     let root = Style {
         font_size: BASE_FONT,
@@ -188,12 +273,13 @@ pub fn layout(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) 
         margin_top: 0.0,
         margin_bottom: 0.0,
         color: None,
+        align: 0,
     };
     let mut buf: Vec<Span> = Vec::new();
     layout_children(nodes, root, None, &mut buf, &mut ctx);
     flush_inline(&mut buf, root, &mut ctx);
     ordenar_por_posicao(&mut ctx.commands);
-    ctx.commands
+    Saida { comandos: ctx.commands, fundos: ctx.fundos, fundo_pagina: ctx.fundo_pagina }
 }
 
 /// Ordena os comandos de cima para baixo e, na mesma altura, da esquerda para a direita.
@@ -284,6 +370,9 @@ fn layout_children(
     // Último elemento da lista. Texto não conta, como no CSS.
     let ultimo_idx = nodes.iter().rposition(|n| matches!(n, Node::Element(_)));
     let mut irmaos: Vec<Info> = Vec::new();
+    // Espaço entre blocos irmãos (gap de um flex em coluna).
+    let gap = std::mem::take(&mut ctx.gap);
+    let filhos_bloco = std::mem::take(&mut ctx.filhos_bloco);
     for (i, node) in nodes.iter().enumerate() {
         match node {
             Node::Text(t) => buf.push(Span {
@@ -294,7 +383,12 @@ fn layout_children(
             Node::Element(el) => {
                 let info = info_do_elemento(el, ctx.folha.nomes_atributos());
                 let ultimo = Some(i) == ultimo_idx;
+                let y_antes = ctx.y;
+                ctx.forcar_bloco = filhos_bloco;
                 let info = tratar_elemento(el, info, &irmaos, ultimo, style, link, buf, ctx);
+                if gap > 0.0 && !ultimo && ctx.y > y_antes {
+                    ctx.y += gap;
+                }
                 if guarda_irmaos {
                     irmaos.push(info);
                 }
@@ -315,6 +409,8 @@ fn tratar_elemento(
     buf: &mut Vec<Span>,
     ctx: &mut Ctx<'_>,
 ) -> Info {
+    // Filho de flex vira bloco; o pedido vale só para este elemento.
+    let forcar = std::mem::take(&mut ctx.forcar_bloco);
     if SKIP_TAGS.contains(&el.tag.as_str()) {
         return info;
     }
@@ -323,9 +419,9 @@ fn tratar_elemento(
         return info;
     }
     if el.tag == "br" {
-        // Quebra de linha forçada ainda não existe; por enquanto vira espaço.
+        // Quebra de linha forçada: `flush_inline` entende esta marca.
         buf.push(Span {
-            text: " ".to_string(),
+            text: QUEBRA.to_string(),
             href: link.map(str::to_string),
             color: style.color,
         });
@@ -353,15 +449,63 @@ fn tratar_elemento(
     };
     let child_link = own_link.or(link);
 
-    if is_block(&el.tag) {
+    // O CSS manda: `display: block/flex/grid` quebra linha, `inline` não.
+    let eh_bloco = forcar
+        || match css.display {
+            Some(Display::Linha) => false,
+            Some(_) => true,
+            None => is_block(&el.tag),
+        };
+
+    if eh_bloco {
         flush_inline(buf, style, ctx);
-        // Bloco herda a cor do pai; tamanho e margens vêm da própria tag.
-        let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
+        // Bloco herda a cor e o alinhamento do pai; tamanho e margens vêm da própria tag.
+        let block = aplicar(
+            Style { color: style.color, align: style.align, ..style_for(&el.tag) },
+            &css,
+        );
         ctx.y += block.margin_top;
+
+        // Caixa do bloco: preenchimento (padding) e borda diminuem a área do conteúdo.
+        let x_antes = ctx.x0;
+        let largura_antes = ctx.width;
+        let pad_esq = css.pad_esq.unwrap_or(0.0).max(0.0);
+        let pad_dir = css.pad_dir.unwrap_or(0.0).max(0.0);
+        let pad_topo = css.pad_topo.unwrap_or(0.0).max(0.0);
+        let pad_base = css.pad_base.unwrap_or(0.0).max(0.0);
+        let borda_l = css.borda_largura.unwrap_or(0.0).max(0.0);
+        let topo_caixa = ctx.y;
+
+        let eh_raiz = el.tag == "html" || el.tag == "body";
+        if eh_raiz {
+            if let Some((r, g, b)) = css.fundo {
+                ctx.fundo_pagina = Some([r, g, b]);
+            }
+        }
+        let indice_fundo = if eh_raiz { None } else { reservar_fundo(ctx, topo_caixa, &css) };
+
+        ctx.x0 = x_antes + pad_esq + borda_l;
+        ctx.width = (largura_antes - pad_esq - pad_dir - 2.0 * borda_l).max(0.0);
+        ctx.y += pad_topo + borda_l;
+
         ctx.pais.push(info);
-        layout_children(&el.children, block, child_link, buf, ctx);
+        let flex_linha = css.display == Some(Display::Flex) && css.coluna != Some(true);
+        if flex_linha {
+            layout_flex_linha(el, block, child_link, &css, ctx);
+        } else {
+            if css.display == Some(Display::Flex) {
+                ctx.gap = css.espaco.unwrap_or(0.0).max(0.0);
+                ctx.filhos_bloco = true;
+            }
+            layout_children(&el.children, block, child_link, buf, ctx);
+        }
         let info = ctx.pais.pop().unwrap_or_default();
         flush_inline(buf, block, ctx);
+
+        ctx.y += pad_base + borda_l;
+        ctx.x0 = x_antes;
+        ctx.width = largura_antes;
+        fechar_fundo(ctx, indice_fundo, topo_caixa);
         ctx.y += block.margin_bottom;
         info
     } else {
@@ -374,6 +518,164 @@ fn tratar_elemento(
         layout_children(&el.children, inline, child_link, buf, ctx);
         ctx.pais.pop().unwrap_or_default()
     }
+}
+
+/// Reserva um lugar na lista de fundos para o bloco que começa em `topo`.
+/// A altura só se sabe no fim; `fechar_fundo` completa. Devolve None quando o bloco
+/// não tem fundo nem borda visíveis.
+fn reservar_fundo(ctx: &mut Ctx<'_>, topo: f32, css: &Estilo) -> Option<usize> {
+    let cor = css.fundo.map(|(r, g, b)| [r, g, b]);
+    let largura_borda = css.borda_largura.unwrap_or(0.0);
+    let borda = match css.borda_cor.flatten() {
+        Some((r, g, b)) if largura_borda > 0.0 => Some((largura_borda, [r, g, b])),
+        _ => None,
+    };
+    if cor.is_none() && borda.is_none() {
+        return None;
+    }
+    if ctx.fundos.len() >= MAX_FUNDOS {
+        return None;
+    }
+    ctx.fundos.push(Fundo {
+        x: ctx.x0,
+        y: topo,
+        w: ctx.width,
+        h: 0.0,
+        cor,
+        borda,
+        raio: css.raio.unwrap_or(0.0).max(0.0),
+    });
+    Some(ctx.fundos.len() - 1)
+}
+
+/// Completa a altura do fundo reservado. Sem altura, o fundo é descartado.
+fn fechar_fundo(ctx: &mut Ctx<'_>, indice: Option<usize>, topo: f32) {
+    let Some(i) = indice else { return };
+    let altura = ctx.y - topo;
+    if altura > 0.0 && ctx.fundos[i].w > 0.0 {
+        ctx.fundos[i].h = altura;
+    } else {
+        ctx.fundos.remove(i);
+    }
+}
+
+/// Filho de um flex em linha, já medido.
+struct ItemFlex<'a> {
+    el: &'a Element,
+    /// Posição do elemento na lista de irmãos (para os seletores de irmãos).
+    pos: usize,
+    ultimo: bool,
+    minimo: f32,
+    ideal: f32,
+}
+
+/// Flex em linha: os filhos ficam lado a lado, cada um com a largura do seu texto.
+/// Com espaço de sobra, `justify-content` reparte a sobra. Sem espaço, os filhos
+/// ficam entre a maior palavra e o texto inteiro, e o texto quebra dentro de cada um.
+/// Texto solto dentro do flex (fora de um elemento) faz o bloco voltar ao layout normal.
+fn layout_flex_linha(
+    el: &Element,
+    style: Style,
+    link: Option<&str>,
+    css: &Estilo,
+    ctx: &mut Ctx<'_>,
+) {
+    let solto = el
+        .children
+        .iter()
+        .any(|n| matches!(n, Node::Text(t) if !t.trim().is_empty()));
+    if solto {
+        let mut buf: Vec<Span> = Vec::new();
+        layout_children(&el.children, style, link, &mut buf, ctx);
+        flush_inline(&mut buf, style, ctx);
+        return;
+    }
+
+    let guarda_irmaos = ctx.folha.precisa_irmaos();
+    let ultimo_idx = el.children.iter().rposition(|n| matches!(n, Node::Element(_)));
+    let mut infos: Vec<Info> = Vec::new();
+    let mut itens: Vec<ItemFlex<'_>> = Vec::new();
+    for (i, node) in el.children.iter().enumerate() {
+        let filho = match node {
+            Node::Element(f) => f,
+            Node::Text(_) => continue,
+        };
+        let info = info_do_elemento(filho, ctx.folha.nomes_atributos());
+        let ultimo = Some(i) == ultimo_idx;
+        let pos = infos.len();
+        let irmaos_f: &[Info] = if guarda_irmaos { &infos[..] } else { &[] };
+        let css_f = estilo_do_elemento(filho, &info, irmaos_f, ultimo, ctx);
+        if !SKIP_TAGS.contains(&filho.tag.as_str()) && !css_f.oculto {
+            let estilo_f = aplicar(
+                Style { color: style.color, align: style.align, ..style_for(&filho.tag) },
+                &css_f,
+            );
+            let (minimo, ideal, vazia) = medir_celula(filho, estilo_f, ctx);
+            if !vazia {
+                let extra = css_f.pad_esq.unwrap_or(0.0).max(0.0)
+                    + css_f.pad_dir.unwrap_or(0.0).max(0.0)
+                    + 2.0 * css_f.borda_largura.unwrap_or(0.0).max(0.0);
+                itens.push(ItemFlex { el: filho, pos, ultimo, minimo: minimo + extra, ideal: ideal + extra + 1.0 });
+            }
+        }
+        if guarda_irmaos {
+            infos.push(info);
+        } else {
+            infos.push(Info::default());
+        }
+    }
+    if itens.is_empty() {
+        return;
+    }
+
+    let n = itens.len();
+    let espaco = css.espaco.unwrap_or(0.0).max(0.0);
+    let x_base = ctx.x0;
+    let w_base = ctx.width;
+    let disponivel = (w_base - espaco * (n as f32 - 1.0)).max(0.0);
+    let soma_ideal: f32 = itens.iter().map(|i| i.ideal).sum();
+    let soma_min: f32 = itens.iter().map(|i| i.minimo).sum();
+    let larguras: Vec<f32> = if soma_ideal <= disponivel {
+        itens.iter().map(|i| i.ideal).collect()
+    } else if soma_min <= disponivel && soma_ideal > soma_min {
+        let folga = disponivel - soma_min;
+        let faixa = soma_ideal - soma_min;
+        itens.iter().map(|i| i.minimo + folga * (i.ideal - i.minimo) / faixa).collect()
+    } else if soma_min > 0.0 {
+        let k = disponivel / soma_min;
+        itens.iter().map(|i| i.minimo * k).collect()
+    } else {
+        vec![disponivel / n as f32; n]
+    };
+
+    let usado: f32 = larguras.iter().sum();
+    let sobra = (disponivel - usado).max(0.0);
+    let (deslocamento, espaco_extra) = match css.justificar {
+        Some(1) => (sobra / 2.0, 0.0),
+        Some(2) => (sobra, 0.0),
+        Some(3) if n > 1 => (0.0, sobra / (n as f32 - 1.0)),
+        _ => (0.0, 0.0),
+    };
+
+    let topo = ctx.y;
+    let mut fundo = topo;
+    let mut x = x_base + deslocamento;
+    for (item, largura) in itens.iter().zip(larguras.iter()) {
+        ctx.x0 = x;
+        ctx.width = *largura;
+        ctx.y = topo;
+        ctx.forcar_bloco = true;
+        let info = info_do_elemento(item.el, ctx.folha.nomes_atributos());
+        let irmaos: &[Info] = if guarda_irmaos { &infos[..item.pos] } else { &[] };
+        let mut buf: Vec<Span> = Vec::new();
+        tratar_elemento(item.el, info, irmaos, item.ultimo, style, link, &mut buf, ctx);
+        flush_inline(&mut buf, style, ctx);
+        fundo = fundo.max(ctx.y);
+        x += largura + espaco + espaco_extra;
+    }
+    ctx.x0 = x_base;
+    ctx.width = w_base;
+    ctx.y = fundo;
 }
 
 /// Desenha uma tabela. A legenda (caption) vai primeiro, na largura toda.
@@ -672,7 +974,10 @@ fn split_words(chunks: &[Span]) -> Vec<Span> {
     let mut cur: Option<Span> = None;
     for chunk in chunks {
         for ch in chunk.text.chars() {
-            if ch.is_whitespace() {
+            if ch == '\u{1}' {
+                words.extend(cur.take());
+                words.push(Span { text: QUEBRA.to_string(), href: None, color: None });
+            } else if ch.is_whitespace() {
                 words.extend(cur.take());
             } else {
                 cur.get_or_insert_with(|| Span {
@@ -703,6 +1008,16 @@ fn flush_inline(buf: &mut Vec<Span>, style: Style, ctx: &mut Ctx<'_>) {
     let mut line_w = 0.0_f32;
 
     for word in words {
+        if word.text == QUEBRA {
+            if line.is_empty() {
+                ctx.y += line_h;
+            } else {
+                emit_line(&line, style, line_h, ctx);
+                line.clear();
+                line_w = 0.0;
+            }
+            continue;
+        }
         let w = ctx.measurer.measure(&word.text, style.font_size, style.bold);
         if !line.is_empty() && line_w + space_w + w > ctx.width {
             emit_line(&line, style, line_h, ctx);
@@ -743,9 +1058,18 @@ fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
         }
     }
 
-    let mut x = ctx.x0;
-    for run in runs {
-        let w = ctx.measurer.measure(&run.text, style.font_size, style.bold);
+    let larguras: Vec<f32> = runs
+        .iter()
+        .map(|r| ctx.measurer.measure(&r.text, style.font_size, style.bold))
+        .collect();
+    let total: f32 = larguras.iter().sum();
+    let deslocamento = match style.align {
+        1 => ((ctx.width - total) / 2.0).max(0.0),
+        2 => (ctx.width - total).max(0.0),
+        _ => 0.0,
+    };
+    let mut x = ctx.x0 + deslocamento;
+    for (run, w) in runs.into_iter().zip(larguras) {
         ctx.commands.push(DrawCommand::Text {
             x,
             y: ctx.y,
@@ -1166,5 +1490,127 @@ mod tests {
             .collect();
         assert!(ys.len() > 2);
         assert!(ys.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    // --- Fundos, flex, quebra de linha e alinhamento (0.0.3) ---
+
+    fn completo(html: &str, width: f32) -> Saida {
+        layout_completo(&parse(html), width, &FixedMeasurer)
+    }
+
+    #[test]
+    fn bloco_com_fundo_gera_caixa() {
+        let s = completo(
+            "<style>.c{background-color:#102030;padding:10px}</style><div class=c>oi</div>",
+            400.0,
+        );
+        assert_eq!(s.fundos.len(), 1);
+        let f = &s.fundos[0];
+        assert_eq!(f.cor, Some([0x10, 0x20, 0x30]));
+        assert_eq!(f.x, 8.0);
+        assert!(f.h > 20.0);
+        // O texto fica dentro do padding.
+        match &s.comandos[0] {
+            DrawCommand::Text { x, y, .. } => {
+                assert_eq!(*x, 18.0);
+                assert_eq!(*y, 18.0);
+            }
+        }
+    }
+
+    #[test]
+    fn fundo_do_body_vira_fundo_da_pagina() {
+        let s = completo(
+            "<style>body{background-color:#000}</style><body><p>oi</p></body>",
+            400.0,
+        );
+        assert_eq!(s.fundo_pagina, Some([0, 0, 0]));
+        assert!(s.fundos.is_empty());
+    }
+
+    #[test]
+    fn fundos_aninhados_saem_de_fora_para_dentro() {
+        let s = completo(
+            "<style>.a{background-color:#111}.b{background-color:#222}</style><div class=a><div class=b>oi</div></div>",
+            400.0,
+        );
+        assert_eq!(s.fundos.len(), 2);
+        assert_eq!(s.fundos[0].cor, Some([0x11, 0x11, 0x11]));
+        assert_eq!(s.fundos[1].cor, Some([0x22, 0x22, 0x22]));
+    }
+
+    #[test]
+    fn variavel_da_classe_do_html_vale() {
+        let s = completo(
+            "<html class=\"escuro\"><style>.escuro{--t:10 20 30}p{color:rgb(var(--t))}</style><body><p>oi</p></body></html>",
+            400.0,
+        );
+        match &s.comandos[0] {
+            DrawCommand::Text { color, .. } => assert_eq!(*color, Some([10, 20, 30])),
+        }
+    }
+
+    #[test]
+    fn flex_em_linha_poe_filhos_lado_a_lado() {
+        let cmds = run(
+            "<style>.f{display:flex}</style><div class=f><span>aa</span><span>bb</span></div>",
+            400.0,
+        );
+        let pos: Vec<(f32, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { x, y, .. } => (*x, *y),
+            })
+            .collect();
+        assert_eq!(pos.len(), 2);
+        assert_eq!(pos[0].1, pos[1].1);
+        assert!(pos[1].0 > pos[0].0);
+    }
+
+    #[test]
+    fn flex_em_coluna_empilha() {
+        let cmds = run(
+            "<style>.f{display:flex;flex-direction:column}</style><div class=f><span>aa</span><span>bb</span></div>",
+            400.0,
+        );
+        let ys: Vec<f32> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { y, .. } => *y,
+            })
+            .collect();
+        assert_eq!(ys.len(), 2);
+        assert!(ys[1] > ys[0]);
+    }
+
+    #[test]
+    fn display_block_em_span_quebra_linha() {
+        let cmds = run(
+            "<style>.b{display:block}</style><span class=b>aa</span><span class=b>bb</span>",
+            400.0,
+        );
+        assert_eq!(cmds.len(), 2);
+        let ys: Vec<f32> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { y, .. } => *y,
+            })
+            .collect();
+        assert!(ys[1] > ys[0]);
+    }
+
+    #[test]
+    fn br_quebra_a_linha() {
+        let cmds = run("<p>aa<br>bb</p>", 400.0);
+        let textos: Vec<&str> = cmds.iter().map(text_of).collect();
+        assert_eq!(textos, vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn text_align_center_desloca_o_texto() {
+        let cmds = run("<style>p{text-align:center}</style><p>aa</p>", 400.0);
+        match &cmds[0] {
+            DrawCommand::Text { x, .. } => assert!(*x > 100.0),
+        }
     }
 }
