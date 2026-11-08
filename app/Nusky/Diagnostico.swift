@@ -527,6 +527,10 @@ final class DiagnosticoModel: ObservableObject {
             tempos[.janela] = tempoJanela
             marcar(.janela)
 
+            // O JavaScript roda por último e fora da conta dos tempos acima,
+            // para não mudar os números que já eram medidos antes.
+            let js = await DiagnosticoJS.analisar(html: comFolhas, base: base, largura: largura)
+
             let total = CFAbsoluteTimeGetCurrent() - inicioTotal
             texto = montarTexto(
                 url: url,
@@ -534,6 +538,7 @@ final class DiagnosticoModel: ObservableObject {
                 scripts: scripts,
                 dados: dados,
                 janela: janela,
+                js: js,
                 total: total
             )
         } catch {
@@ -542,7 +547,7 @@ final class DiagnosticoModel: ObservableObject {
         atual = nil
     }
 
-    private func montarTexto(url: URL, relatorio: String, scripts: String, dados: String, janela: String, total: Double) -> String {
+    private func montarTexto(url: URL, relatorio: String, scripts: String, dados: String, janela: String, js: String, total: Double) -> String {
         amostrar()
         let blocos = [
             "URL: \(url.absoluteString)",
@@ -550,6 +555,7 @@ final class DiagnosticoModel: ObservableObject {
             scripts,
             dados,
             janela,
+            js,
             montarTempos(total: total),
             montarMemoria()
         ]
@@ -586,6 +592,94 @@ final class DiagnosticoModel: ObservableObject {
             }
         }
         return linhas.joined(separator: "\n")
+    }
+}
+
+// MARK: - JavaScript
+
+/// Roda o JavaScript da página como o navegador faz e descreve o que sobrou na tela.
+/// Mostra o que o relatório antigo não mostrava: o HTML DEPOIS dos scripts.
+enum DiagnosticoJS {
+    static func analisar(html: String, base: URL, largura: Float) async -> String {
+        var linhas = ["JAVASCRIPT (depois dos scripts)"]
+
+        guard JSRodador.ativo else {
+            linhas.append("JavaScript desligado nos ajustes.")
+            return linhas.joined(separator: "\n")
+        }
+
+        let inicio = CFAbsoluteTimeGetCurrent()
+        let rodado = await JSRodador.processar(html: html, pagina: base, largura: Int(largura))
+        let tempoTotal = CFAbsoluteTimeGetCurrent() - inicio
+
+        guard let r = rodado.relatorio else {
+            linhas.append("O JavaScript não rodou (sem script ou o motor não leu a árvore).")
+            return linhas.joined(separator: "\n")
+        }
+
+        linhas.append("Scripts executados: \(r.executados)")
+        linhas.append("Scripts ignorados: \(r.ignorados)")
+        linhas.append("Pedidos de rede: \(r.requisicoes)")
+        linhas.append("Tempo do JavaScript: \(formatarSegundos(r.tempo)) (medido de fora: \(formatarSegundos(tempoTotal)))")
+        linhas.append("Estourou o limite de tempo: \(r.estourouLimite ? "SIM" : "não")")
+        linhas.append("HTML final veio do JavaScript: \(r.usouResultado ? "sim" : "NÃO (usou o HTML original)")")
+        linhas.append("Erros: \(r.erros.count)")
+        for erro in r.erros.prefix(25) {
+            linhas.append("  - " + String(erro.prefix(260)))
+        }
+        if r.erros.count > 25 {
+            linhas.append("  … e mais \(r.erros.count - 25)")
+        }
+
+        let final = rodado.html
+        linhas.append("")
+        linhas.append("HTML FINAL: \(final.utf8.count) bytes (antes: \(html.utf8.count) bytes)")
+        linhas.append("Tag <html> final: " + trecho(de: final, padrao: "<html[^>]*>", limite: 300))
+        linhas.append("Tag <body> final: " + trecho(de: final, padrao: "<body[^>]*>", limite: 300))
+
+        // Desenha o HTML final com o mesmo motor e mede o que apareceu.
+        let itens = await Task.detached(priority: .userInitiated) {
+            Engine.render(html: final, width: largura)
+        }.value
+        let letras = itens.reduce(0) { $0 + $1.text.count }
+        let altura = (itens.map { $0.y + $0.fontSize }.max() ?? 0)
+        linhas.append("Itens desenhados no HTML final: \(itens.count)")
+        linhas.append("Caracteres desenhados no HTML final: \(letras)")
+        linhas.append("Altura do conteúdo final: \(Int(altura)) pt")
+        if itens.isEmpty {
+            linhas.append("ATENÇÃO: nada foi desenhado. É isso que deixa a tela preta ou vazia.")
+        } else {
+            linhas.append("Primeiros textos desenhados:")
+            for item in itens.prefix(12) {
+                let cor = item.cor.map { String(format: "cor %.2f,%.2f,%.2f", $0.r, $0.g, $0.b) } ?? "sem cor"
+                linhas.append("  y=\(Int(item.y)) \(cor): " + String(item.text.prefix(80)))
+            }
+        }
+
+        // O começo do corpo mostra se o React trocou a página por outra coisa.
+        linhas.append("")
+        linhas.append("Início do <body> final (sem scripts e estilos, 700 caracteres):")
+        linhas.append(inicioDoCorpo(final, limite: 700))
+
+        return linhas.joined(separator: "\n")
+    }
+
+    private static func trecho(de texto: String, padrao: String, limite: Int) -> String {
+        guard let regex = try? NSRegularExpression(pattern: padrao, options: [.caseInsensitive]) else { return "-" }
+        let ns = texto as NSString
+        guard let m = regex.firstMatch(in: texto, range: NSRange(location: 0, length: ns.length)) else {
+            return "não achei"
+        }
+        return String(ns.substring(with: m.range).prefix(limite))
+    }
+
+    private static func inicioDoCorpo(_ html: String, limite: Int) -> String {
+        guard let achado = html.range(of: "<body", options: .caseInsensitive) else { return "(sem <body>)" }
+        var corpo = String(html[achado.lowerBound...])
+        for padrao in ["<script\\b[\\s\\S]*?</script>", "<style\\b[\\s\\S]*?</style>", "<link\\b[^>]*>"] {
+            corpo = corpo.replacingOccurrences(of: padrao, with: "", options: [.regularExpression, .caseInsensitive])
+        }
+        return String(corpo.prefix(limite))
     }
 }
 
