@@ -40,8 +40,24 @@ const VOID_TAGS: &[&str] = &[
 /// Elementos cujo conteúdo é texto puro. Até o fechamento, nada dentro é lido como tag.
 const RAW_TAGS: &[&str] = &["script", "style"];
 
-/// Converte uma string HTML numa lista de nós de topo.
+/// Nome especial do elemento que representa um comentário `<!--...-->`.
+/// O texto do comentário fica no atributo `data`. Só aparece em `parse_com_comentarios`.
+pub const TAG_COMENTARIO: &str = "#comment";
+
+/// Converte uma string HTML numa lista de nós de topo. Comentários são descartados.
+/// É o que o desenho usa: comentário nunca aparece na tela.
 pub fn parse(input: &str) -> Vec<Node> {
+    parse_com(input, false)
+}
+
+/// Igual a `parse`, mas guarda os comentários como elementos `TAG_COMENTARIO`.
+/// É o que o JavaScript usa: o React marca suas áreas com comentários (`<!--$-->`),
+/// e sem eles não consegue montar a página.
+pub fn parse_com_comentarios(input: &str) -> Vec<Node> {
+    parse_com(input, true)
+}
+
+fn parse_com(input: &str, comentarios: bool) -> Vec<Node> {
     // A raiz é um elemento sintético sem nome que guarda os nós de topo.
     let mut stack = vec![Element {
         tag: String::new(),
@@ -52,10 +68,21 @@ pub fn parse(input: &str) -> Vec<Node> {
 
     while !rest.is_empty() {
         if rest.starts_with("<!--") {
-            rest = match rest.find("-->") {
-                Some(i) => &rest[i + 3..],
-                None => "",
+            let (dados, depois) = match rest.find("-->") {
+                Some(i) => (if i >= 4 { &rest[4..i] } else { "" }, &rest[i + 3..]),
+                None => (&rest[4..], ""),
             };
+            if comentarios {
+                push_child(
+                    &mut stack,
+                    Node::Element(Element {
+                        tag: TAG_COMENTARIO.to_string(),
+                        attrs: vec![("data".to_string(), dados.to_string())],
+                        children: Vec::new(),
+                    }),
+                );
+            }
+            rest = depois;
         } else if rest.starts_with("<!") || rest.starts_with("<?") {
             rest = match rest.find('>') {
                 Some(i) => &rest[i + 1..],
@@ -423,6 +450,31 @@ mod tests {
     fn comments_and_doctype_are_ignored() {
         let nodes = parse("<!DOCTYPE html><!-- nota --><p>oi</p>");
         assert_eq!(nodes, vec![el("p", vec![text("oi")])]);
+    }
+
+    #[test]
+    fn comentarios_so_aparecem_quando_pedidos() {
+        let html = "<p>a<!--$-->b<!--/$--></p>";
+        assert_eq!(parse(html), vec![el("p", vec![text("a"), text("b")])]);
+
+        let nodes = parse_com_comentarios(html);
+        let Node::Element(p) = &nodes[0] else { panic!("esperava elemento") };
+        assert_eq!(p.children.len(), 4);
+        let Node::Element(c) = &p.children[1] else { panic!("esperava comentário") };
+        assert_eq!(c.tag, TAG_COMENTARIO);
+        assert_eq!(c.attr("data"), Some("$"));
+        let Node::Element(f) = &p.children[3] else { panic!("esperava comentário") };
+        assert_eq!(f.attr("data"), Some("/$"));
+    }
+
+    #[test]
+    fn comentario_vazio_e_sem_fim() {
+        let nodes = parse_com_comentarios("<!----><i></i><!--aberto");
+        assert_eq!(nodes.len(), 3);
+        let Node::Element(a) = &nodes[0] else { panic!() };
+        assert_eq!(a.attr("data"), Some(""));
+        let Node::Element(c) = &nodes[2] else { panic!() };
+        assert_eq!(c.attr("data"), Some("aberto"));
     }
 
     #[test]
