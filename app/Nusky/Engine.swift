@@ -26,6 +26,26 @@ struct DrawItem: Identifiable {
     let text: String
 }
 
+/// Caixa de fundo de um bloco da página: cor sólida e/ou borda, com cantos arredondados.
+struct Fundo: Identifiable {
+    let id = UUID()
+    let x: CGFloat
+    let y: CGFloat
+    let w: CGFloat
+    let h: CGFloat
+    let cor: CorTexto?
+    let bordaLargura: CGFloat
+    let bordaCor: CorTexto?
+    let raio: CGFloat
+}
+
+/// Tudo o que o motor desenha numa página: textos, caixas de fundo e a cor de fundo da página.
+struct PaginaDesenhada {
+    var itens: [DrawItem] = []
+    var fundos: [Fundo] = []
+    var fundoPagina: CorTexto? = nil
+}
+
 /// Um resultado da busca por nome: um site ou um atalho de site.
 struct ResultadoBusca: Identifiable, Equatable {
     /// Endereço para abrir.
@@ -60,12 +80,41 @@ enum Engine {
     // MARK: - Renderização
 
     static func render(html: String, width: Float) -> [DrawItem] {
-        guard let raw = nusky_render(html, width, measureCallback) else { return [] }
+        renderCompleto(html: html, width: width).itens
+    }
+
+    /// Textos, caixas de fundo e cor de fundo da página.
+    /// Linhas do motor: `B<TAB>r,g,b` (fundo da página), `R<TAB>x y w h cor borda corBorda raio`
+    /// (caixa de fundo, de fora para dentro) e as linhas de texto de sempre.
+    static func renderCompleto(html: String, width: Float) -> PaginaDesenhada {
+        guard let raw = nusky_render(html, width, measureCallback) else { return PaginaDesenhada() }
         defer { nusky_free_string(raw) }
         let output = String(cString: raw)
 
         var items: [DrawItem] = []
+        var fundos: [Fundo] = []
+        var fundoPagina: CorTexto? = nil
         for line in output.split(separator: "\n") {
+            if line.hasPrefix("B\t") {
+                let campos = line.split(separator: "\t", omittingEmptySubsequences: false)
+                if campos.count == 2 { fundoPagina = parseCor(campos[1]) }
+                continue
+            }
+            if line.hasPrefix("R\t") {
+                let c = line.split(separator: "\t", omittingEmptySubsequences: false)
+                guard c.count == 9,
+                      let x = Float(c[1]), let y = Float(c[2]),
+                      let w = Float(c[3]), let h = Float(c[4]),
+                      let bordaL = Float(c[6]), let raio = Float(c[8]) else { continue }
+                fundos.append(Fundo(
+                    x: CGFloat(x), y: CGFloat(y), w: CGFloat(w), h: CGFloat(h),
+                    cor: parseCor(c[5]),
+                    bordaLargura: CGFloat(bordaL),
+                    bordaCor: parseCor(c[7]),
+                    raio: CGFloat(raio)
+                ))
+                continue
+            }
             // Campos: x, y, tamanho, negrito, link, cor, texto. O texto fica por último.
             let fields = line.split(separator: "\t", maxSplits: 6, omittingEmptySubsequences: false)
             guard fields.count == 7,
@@ -85,7 +134,7 @@ enum Engine {
                 text: String(fields[6])
             ))
         }
-        return items
+        return PaginaDesenhada(itens: items, fundos: fundos, fundoPagina: fundoPagina)
     }
 
     /// Árvore do HTML em JSON (o parser do motor), para o JavaScript montar o document.
