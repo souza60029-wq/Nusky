@@ -21,7 +21,8 @@
 //! Árvore para o JavaScript:
 //! `nusky_arvore` devolve a árvore do HTML (depois de `marcar_com_javascript`) em JSON.
 //! Elementos: `{"t":"e","g":tag,"a":{atributos},"c":[filhos]}`.
-//! Textos: `{"t":"x","v":texto}`. O resultado é uma lista de nós de topo.
+//! Textos: `{"t":"x","v":texto}`. Comentários: `{"t":"c","v":texto}` (o React depende deles).
+//! O resultado é uma lista de nós de topo.
 //!
 //! Busca de sites:
 //! - `nusky_busca_carregar`: lê a lista (JSON). Sem argumento, usa a lista embutida.
@@ -46,7 +47,7 @@ use serde_json::{json, Value};
 
 use crate::busca::{indice_embutido, Indice};
 use crate::diagnostico::relatorio;
-use crate::html::{parse, Node};
+use crate::html::{parse, parse_com_comentarios, Node, TAG_COMENTARIO};
 use crate::layout::{layout, DrawCommand, TextMeasurer};
 use crate::preparo::marcar_com_javascript;
 
@@ -188,6 +189,9 @@ pub extern "C" fn nusky_diagnose(
 fn no_para_json(no: &Node) -> Value {
     match no {
         Node::Text(texto) => json!({ "t": "x", "v": texto }),
+        Node::Element(el) if el.tag == TAG_COMENTARIO => {
+            json!({ "t": "c", "v": el.attr("data").unwrap_or("") })
+        }
         Node::Element(el) => {
             let mut atributos = serde_json::Map::new();
             // Em HTML vale o primeiro atributo quando o nome se repete.
@@ -204,7 +208,7 @@ fn no_para_json(no: &Node) -> Value {
 
 /// Árvore do HTML em JSON, depois de `marcar_com_javascript`. Lista de nós de topo.
 pub fn arvore_de(html: &str) -> String {
-    let nodes = parse(&marcar_com_javascript(html));
+    let nodes = parse_com_comentarios(&marcar_com_javascript(html));
     Value::Array(nodes.iter().map(no_para_json).collect()).to_string()
 }
 
@@ -488,6 +492,23 @@ mod tests {
         let valor: Value = serde_json::from_str(&arvore_de("<script>if (a<b) {}</script>")).unwrap();
         assert_eq!(valor[0]["g"], "script");
         assert_eq!(valor[0]["c"][0]["v"], "if (a<b) {}");
+    }
+
+    #[test]
+    fn arvore_leva_comentarios() {
+        let valor: Value = serde_json::from_str(&arvore_de("<div><!--$--><i></i><!--/$--></div>")).unwrap();
+        assert_eq!(valor[0]["c"][0]["t"], "c");
+        assert_eq!(valor[0]["c"][0]["v"], "$");
+        assert_eq!(valor[0]["c"][1]["g"], "i");
+        assert_eq!(valor[0]["c"][2]["t"], "c");
+        assert_eq!(valor[0]["c"][2]["v"], "/$");
+    }
+
+    #[test]
+    fn render_continua_ignorando_comentarios() {
+        let saida = render_with("<p>a<!--$-->b</p>", None);
+        assert!(saida.contains("ab") || (saida.contains('a') && saida.contains('b')));
+        assert!(!saida.contains('$'));
     }
 
     #[test]
