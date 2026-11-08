@@ -6,6 +6,10 @@ final class BrowserModel: ObservableObject {
     @Published var address = ""
     @Published var currentHost = ""
     @Published var items: [DrawItem] = []
+    /// Caixas de fundo da página (cores, bordas e cantos arredondados).
+    @Published var fundos: [Fundo] = []
+    /// Cor de fundo da página, quando ela define uma.
+    @Published var fundoPagina: CorTexto? = nil
     @Published var contentHeight: CGFloat = 0
     @Published var status = ""
     @Published var pageVersion = 0
@@ -214,6 +218,8 @@ final class BrowserModel: ObservableObject {
     private func limparPagina() {
         task?.cancel()
         items = []
+        fundos = []
+        fundoPagina = nil
         contentHeight = 0
         currentURL = nil
         currentHost = ""
@@ -231,6 +237,8 @@ final class BrowserModel: ObservableObject {
     private func iniciarCarregamento() {
         status = ""
         items = []
+        fundos = []
+        fundoPagina = nil
         contentHeight = 0
         carregando = true
         progresso = 0.05
@@ -288,13 +296,18 @@ final class BrowserModel: ObservableObject {
     /// Gera os itens de desenho fora da thread principal e atualiza a tela.
     private func show(html: String, url: URL, entradaId: UUID?, restoreY y: CGFloat) async {
         let width = Float(textWidth)
-        let novosItens = await Task.detached(priority: .userInitiated) {
-            Engine.render(html: html, width: width)
+        let desenhada = await Task.detached(priority: .userInitiated) {
+            Engine.renderCompleto(html: html, width: width)
         }.value
         guard !Task.isCancelled else { return }
 
+        let novosItens = desenhada.itens
         items = novosItens
-        contentHeight = (novosItens.map { CGFloat($0.y) + CGFloat($0.fontSize) }.max() ?? 0) + 80
+        fundos = desenhada.fundos
+        fundoPagina = desenhada.fundoPagina
+        let fimTexto = novosItens.map { CGFloat($0.y) + CGFloat($0.fontSize) }.max() ?? 0
+        let fimFundos = desenhada.fundos.map { $0.y + $0.h }.max() ?? 0
+        contentHeight = max(fimTexto, fimFundos) + 80
         currentURL = url
         currentHost = url.host ?? ""
         address = url.absoluteString
