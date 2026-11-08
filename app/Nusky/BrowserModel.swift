@@ -21,6 +21,9 @@ final class BrowserModel: ObservableObject {
 
     let historico = Historico()
 
+    /// O que o JavaScript fez na última página (nil se não rodou). Para o diagnóstico.
+    private(set) var ultimoRelatorioJS: JSRodador.Relatorio?
+
     private(set) var currentURL: URL?
     /// Id da entrada que está realmente na tela. Muda só quando a página é exibida.
     private var exibidaId: UUID?
@@ -241,7 +244,14 @@ final class BrowserModel: ObservableObject {
             // Baixa as folhas de estilo externas antes de registrar a página no histórico,
             // para não deixar entrada sem tela se o usuário trocar de página no meio.
             progresso = 0.9
-            let completo = await FolhasExternas.incluir(em: html, base: finalURL)
+            let comCSS = await FolhasExternas.incluir(em: html, base: finalURL)
+            guard !Task.isCancelled else { return }
+            // Roda os scripts da página (se houver) e pega o HTML já alterado por eles.
+            // Qualquer falha devolve o HTML original, então a página sempre abre.
+            progresso = 0.93
+            let rodado = await JSRodador.processar(html: comCSS, pagina: finalURL, largura: Int(textWidth))
+            ultimoRelatorioJS = rodado.relatorio
+            let completo = rodado.html
             guard !Task.isCancelled else { return }
             var id = entradaId
             if navegar {
