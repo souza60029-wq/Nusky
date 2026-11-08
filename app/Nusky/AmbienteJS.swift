@@ -664,6 +664,7 @@ enum AmbienteJS {
     for (var i = 0; i < json.length; i++) {
       var j = json[i];
       if (j.t === 'x') { var tx = new Text(j.v); tx.parentNode = pai; pai.childNodes.push(tx); continue; }
+      if (j.t === 'c') { var cm = new Comment(j.v); cm.parentNode = pai; pai.childNodes.push(cm); continue; }
       var el = new Element(j.g), ns = nsPai;
       if (j.g === 'svg') ns = SVGNS;
       if (ns) el.namespaceURI = ns;
@@ -942,7 +943,7 @@ enum AmbienteJS {
   function rodarCodigo(origem, codigo) {
     estat.executados++;
     try { (0, eval)(codigo + '\n//# sourceURL=' + origem); }
-    catch (e) { erro(origem + ': ' + (e && e.message ? e.message : e)); }
+    catch (e) { erro(origem + ': ' + (e && e.message ? e.message : e) + (e && e.line ? ' [linha ' + e.line + ', coluna ' + e.column + ']' : '')); }
   }
   function podeRodar(s) {
     var tipo = (s.getAttribute('type') || '').toLowerCase().split(';')[0].trim();
