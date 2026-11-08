@@ -13,6 +13,7 @@ typedef float (*nusky_measure_fn)(const char *text, float font_size, int bold);
 char *nusky_render(const char *html, float viewport_width, nusky_measure_fn measure);
 char *nusky_diagnose(const char *html, float viewport_width, nusky_measure_fn measure);
 void nusky_free_string(char *s);
+char *nusky_arvore(const char *html);
 
 // Busca de sites pelo nome.
 // nusky_busca_carregar: json NULL carrega a lista embutida. Retorna 0 se deu certo, 1 se a lista estiver errada.
