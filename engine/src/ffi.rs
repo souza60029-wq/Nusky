@@ -48,7 +48,7 @@ use serde_json::{json, Value};
 use crate::busca::{indice_embutido, Indice};
 use crate::diagnostico::relatorio;
 use crate::html::{parse, parse_com_comentarios, Node, TAG_COMENTARIO};
-use crate::layout::{layout, DrawCommand, TextMeasurer};
+use crate::layout::{layout_completo, DrawCommand, TextMeasurer};
 use crate::preparo::marcar_com_javascript;
 
 /// Lista embutida no app, para ler o cabeçalho (versão e data) sem depender de `busca.rs`.
@@ -118,17 +118,39 @@ pub extern "C" fn nusky_render(
     let input = marcar_com_javascript(&bruto);
     let nodes = parse(&input);
 
-    let commands = match measure {
-        Some(f) => layout(
+    let saida = match measure {
+        Some(f) => layout_completo(
             &nodes,
             viewport_width,
             &CallbackMeasurer { measure: f, cache: RefCell::new(HashMap::new()) },
         ),
-        None => layout(&nodes, viewport_width, &ApproxMeasurer),
+        None => layout_completo(&nodes, viewport_width, &ApproxMeasurer),
     };
 
     let mut out = String::new();
-    for cmd in commands {
+    // Cor de fundo da página: `B<TAB>r,g,b`.
+    if let Some(cor) = saida.fundo_pagina {
+        out.push_str(&format!("B\t{}\n", formatar_cor(Some(cor))));
+    }
+    // Caixas de fundo, de fora para dentro: `R<TAB>x y w h cor-de-fundo largura-da-borda cor-da-borda raio`.
+    for f in &saida.fundos {
+        let (larg, cor_borda) = match f.borda {
+            Some((l, c)) => (l, formatar_cor(Some(c))),
+            None => (0.0, String::new()),
+        };
+        out.push_str(&format!(
+            "R\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            f.x,
+            f.y,
+            f.w,
+            f.h,
+            formatar_cor(f.cor),
+            larg,
+            cor_borda,
+            f.raio,
+        ));
+    }
+    for cmd in saida.comandos {
         match cmd {
             DrawCommand::Text { x, y, text, font_size, bold, href, color } => {
                 out.push_str(&format!(
@@ -492,6 +514,18 @@ mod tests {
         let valor: Value = serde_json::from_str(&arvore_de("<script>if (a<b) {}</script>")).unwrap();
         assert_eq!(valor[0]["g"], "script");
         assert_eq!(valor[0]["c"][0]["v"], "if (a<b) {}");
+    }
+
+    #[test]
+    fn render_envia_fundos_e_fundo_da_pagina() {
+        let saida = render_with(
+            "<style>body{background-color:#000}.c{background-color:#102030}</style><body><div class=c>oi</div></body>",
+            None,
+        );
+        assert!(saida.starts_with("B\t0,0,0\n"));
+        assert!(saida.contains("R\t8\t8\t384\t"));
+        assert!(saida.contains("\t16,32,48\t"));
+        assert!(saida.ends_with("oi\n"));
     }
 
     #[test]
