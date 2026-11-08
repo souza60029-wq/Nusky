@@ -18,6 +18,11 @@
 //! `nusky_diagnose` aceita os mesmos argumentos e devolve um relatório em texto
 //! (ver `diagnostico.rs`). Não altera a renderização.
 //!
+//! Árvore para o JavaScript:
+//! `nusky_arvore` devolve a árvore do HTML (depois de `marcar_com_javascript`) em JSON.
+//! Elementos: `{"t":"e","g":tag,"a":{atributos},"c":[filhos]}`.
+//! Textos: `{"t":"x","v":texto}`. O resultado é uma lista de nós de topo.
+//!
 //! Busca de sites:
 //! - `nusky_busca_carregar`: lê a lista (JSON). Sem argumento, usa a lista embutida.
 //!   Se a lista estiver errada, devolve 1 e mantém a lista que já estava carregada.
@@ -37,9 +42,11 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::Mutex;
 
+use serde_json::{json, Value};
+
 use crate::busca::{indice_embutido, Indice};
 use crate::diagnostico::relatorio;
-use crate::html::parse;
+use crate::html::{parse, Node};
 use crate::layout::{layout, DrawCommand, TextMeasurer};
 use crate::preparo::marcar_com_javascript;
 
@@ -174,7 +181,45 @@ pub extern "C" fn nusky_diagnose(
     }
 }
 
-/// Libera uma string devolvida por `nusky_render`, `nusky_diagnose` ou as funções de busca.
+// MARK: - Árvore para o JavaScript
+
+/// Um nó do HTML como JSON. Elementos: `t` = "e", `g` = tag, `a` = atributos, `c` = filhos.
+/// Textos: `t` = "x", `v` = texto.
+fn no_para_json(no: &Node) -> Value {
+    match no {
+        Node::Text(texto) => json!({ "t": "x", "v": texto }),
+        Node::Element(el) => {
+            let mut atributos = serde_json::Map::new();
+            // Em HTML vale o primeiro atributo quando o nome se repete.
+            for (nome, valor) in &el.attrs {
+                atributos
+                    .entry(nome.clone())
+                    .or_insert_with(|| Value::String(valor.clone()));
+            }
+            let filhos: Vec<Value> = el.children.iter().map(no_para_json).collect();
+            json!({ "t": "e", "g": el.tag.clone(), "a": atributos, "c": filhos })
+        }
+    }
+}
+
+/// Árvore do HTML em JSON, depois de `marcar_com_javascript`. Lista de nós de topo.
+pub fn arvore_de(html: &str) -> String {
+    let nodes = parse(&marcar_com_javascript(html));
+    Value::Array(nodes.iter().map(no_para_json).collect()).to_string()
+}
+
+/// Devolve a árvore do HTML em JSON (ver `arvore_de`). Retorna null se o HTML for null.
+/// Quem chama deve liberar o resultado com `nusky_free_string`.
+#[no_mangle]
+pub extern "C" fn nusky_arvore(html: *const c_char) -> *mut c_char {
+    if html.is_null() {
+        return ptr::null_mut();
+    }
+    let bruto = unsafe { CStr::from_ptr(html) }.to_string_lossy();
+    devolver(arvore_de(&bruto))
+}
+
+/// Libera uma string devolvida por `nusky_render`, `nusky_diagnose`, `nusky_arvore` ou as funções de busca.
 #[no_mangle]
 pub extern "C" fn nusky_free_string(s: *mut c_char) {
     if s.is_null() {
@@ -426,6 +471,28 @@ mod tests {
     #[test]
     fn diagnose_null_input_returns_null() {
         assert!(nusky_diagnose(ptr::null(), 400.0, None).is_null());
+    }
+
+    #[test]
+    fn arvore_leva_tags_textos_e_atributos() {
+        let valor: Value = serde_json::from_str(&arvore_de(r#"<p class="x">oi</p>"#)).unwrap();
+        assert_eq!(valor[0]["t"], "e");
+        assert_eq!(valor[0]["g"], "p");
+        assert_eq!(valor[0]["a"]["class"], "x");
+        assert_eq!(valor[0]["c"][0]["t"], "x");
+        assert_eq!(valor[0]["c"][0]["v"], "oi");
+    }
+
+    #[test]
+    fn arvore_mantem_script_como_texto() {
+        let valor: Value = serde_json::from_str(&arvore_de("<script>if (a<b) {}</script>")).unwrap();
+        assert_eq!(valor[0]["g"], "script");
+        assert_eq!(valor[0]["c"][0]["v"], "if (a<b) {}");
+    }
+
+    #[test]
+    fn arvore_null_devolve_null() {
+        assert!(nusky_arvore(ptr::null()).is_null());
     }
 
     #[test]
