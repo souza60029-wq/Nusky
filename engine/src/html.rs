@@ -455,7 +455,8 @@ mod tests {
     #[test]
     fn comentarios_so_aparecem_quando_pedidos() {
         let html = "<p>a<!--$-->b<!--/$--></p>";
-        assert_eq!(parse(html), vec![el("p", vec![text("a"), text("b")])]);
+        // Sem comentários, os dois textos se juntam num só.
+        assert_eq!(parse(html), vec![el("p", vec![text("ab")])]);
 
         let nodes = parse_com_comentarios(html);
         let Node::Element(p) = &nodes[0] else { panic!("esperava elemento") };
