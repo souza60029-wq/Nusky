@@ -13,6 +13,8 @@
 //! e os irmãos de cada elemento.
 //! Não mede texto sozinho: recebe um `TextMeasurer`, que a casca implementa.
 
+use std::collections::HashMap;
+
 use crate::css::{self, Display, Estilo, Folha, Info};
 use crate::html::{Element, Node};
 
@@ -54,6 +56,21 @@ pub struct Fundo {
     pub raio: f32,
 }
 
+/// Imagem (`<img>`) posicionada na página. A casca baixa e desenha; o motor só reserva o espaço.
+/// Com tamanho 0 x 0 o tamanho ainda não é conhecido: a casca baixa a imagem, aprende
+/// o tamanho e pede o layout de novo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Imagem {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// Endereço como está no HTML (pode ser relativo).
+    pub src: String,
+    /// Destino do link que envolve a imagem, se houver.
+    pub href: Option<String>,
+}
+
 /// Tudo o que o layout produz: textos, caixas de fundo e a cor de fundo da página.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Saida {
@@ -61,10 +78,13 @@ pub struct Saida {
     pub fundos: Vec<Fundo>,
     /// Cor de fundo do `html` ou do `body`, se a página definiu.
     pub fundo_pagina: Option<[u8; 3]>,
+    pub imagens: Vec<Imagem>,
 }
 
 /// Limite de caixas de fundo, para uma página enorme não ocupar memória demais.
 const MAX_FUNDOS: usize = 4000;
+/// Limite de imagens por página.
+const MAX_IMAGENS: usize = 80;
 /// Marca de quebra de linha (`<br>`) dentro do texto acumulado.
 const QUEBRA: &str = "\u{1}";
 
@@ -177,6 +197,9 @@ struct Ctx<'a> {
     commands: Vec<DrawCommand>,
     fundos: Vec<Fundo>,
     fundo_pagina: Option<[u8; 3]>,
+    imagens: Vec<Imagem>,
+    /// Tamanho natural das imagens já baixadas, por endereço.
+    tamanhos: &'a HashMap<String, (f32, f32)>,
     /// O próximo elemento tratado vira bloco (filho de flex).
     forcar_bloco: bool,
     /// Espaço (gap) entre os filhos do próximo `layout_children`.
@@ -229,6 +252,17 @@ fn achar_html(nodes: &[Node]) -> Option<&Element> {
 
 /// Igual a `layout`, mas devolve também as caixas de fundo e a cor de fundo da página.
 pub fn layout_completo(nodes: &[Node], viewport_width: f32, measurer: &dyn TextMeasurer) -> Saida {
+    let vazio: HashMap<String, (f32, f32)> = HashMap::new();
+    layout_com_imagens(nodes, viewport_width, measurer, &vazio)
+}
+
+/// Igual a `layout_completo`, sabendo o tamanho natural de imagens já baixadas.
+pub fn layout_com_imagens(
+    nodes: &[Node],
+    viewport_width: f32,
+    measurer: &dyn TextMeasurer,
+    tamanhos: &HashMap<String, (f32, f32)>,
+) -> Saida {
     let mut css_texto = String::new();
     coletar_css(nodes, &mut css_texto);
 
@@ -263,6 +297,8 @@ pub fn layout_completo(nodes: &[Node], viewport_width: f32, measurer: &dyn TextM
         commands: Vec::new(),
         fundos: Vec::new(),
         fundo_pagina: None,
+        imagens: Vec::new(),
+        tamanhos,
         forcar_bloco: false,
         gap: 0.0,
         filhos_bloco: false,
@@ -279,7 +315,12 @@ pub fn layout_completo(nodes: &[Node], viewport_width: f32, measurer: &dyn TextM
     layout_children(nodes, root, None, &mut buf, &mut ctx);
     flush_inline(&mut buf, root, &mut ctx);
     ordenar_por_posicao(&mut ctx.commands);
-    Saida { comandos: ctx.commands, fundos: ctx.fundos, fundo_pagina: ctx.fundo_pagina }
+    Saida {
+        comandos: ctx.commands,
+        fundos: ctx.fundos,
+        fundo_pagina: ctx.fundo_pagina,
+        imagens: ctx.imagens,
+    }
 }
 
 /// Ordena os comandos de cima para baixo e, na mesma altura, da esquerda para a direita.
@@ -428,6 +469,12 @@ fn tratar_elemento(
         return info;
     }
 
+    if el.tag == "img" {
+        flush_inline(buf, style, ctx);
+        colocar_imagem(el, &css, style, link, ctx);
+        return info;
+    }
+
     if el.tag == "table" {
         flush_inline(buf, style, ctx);
         let block = aplicar(Style { color: style.color, ..style_for(&el.tag) }, &css);
@@ -518,6 +565,122 @@ fn tratar_elemento(
         layout_children(&el.children, inline, child_link, buf, ctx);
         ctx.pais.pop().unwrap_or_default()
     }
+}
+
+/// Endereço da imagem: `src`, ou os atributos de carregamento preguiçoso, ou o primeiro `srcset`.
+/// Imagens SVG ficam de fora: a casca não sabe desenhá-las.
+fn origem_da_imagem(el: &Element) -> Option<String> {
+    let aceita = |t: &str| -> Option<String> {
+        let t = t.trim();
+        let baixo = t.to_ascii_lowercase();
+        if t.is_empty()
+            || baixo.starts_with("data:image/gif")
+            || baixo.starts_with("data:image/svg")
+            || baixo.contains(".svg")
+            || baixo.starts_with("javascript:")
+        {
+            return None;
+        }
+        Some(t.to_string())
+    };
+    for nome in ["src", "data-src", "data-lazy-src", "data-original"] {
+        if let Some(v) = el.attr(nome).and_then(|v| aceita(v)) {
+            return Some(v);
+        }
+    }
+    el.attr("srcset")
+        .and_then(|v| v.split(',').next())
+        .and_then(|c| c.split_whitespace().next())
+        .and_then(|v| aceita(v))
+}
+
+fn numero_do_atributo(el: &Element, nome: &str) -> Option<f32> {
+    el.attr(nome)
+        .and_then(|v| v.trim().trim_end_matches("px").trim().parse::<f32>().ok())
+        .filter(|v| *v > 0.0)
+}
+
+/// Tamanho pedido para a imagem, em pontos, sem limitar à largura da tela.
+/// CSS (`width`, `height`) vale mais que os atributos; sem nenhum dos dois, vale o tamanho
+/// natural da imagem baixada. Devolve (0, 0) enquanto o tamanho não é conhecido.
+fn tamanho_da_imagem(el: &Element, css: &Estilo, src: &str, ctx: &Ctx<'_>) -> (f32, f32) {
+    let largura = css.largura.filter(|v| *v > 0.0).or(numero_do_atributo(el, "width"));
+    let altura = css.altura.filter(|v| *v > 0.0).or(numero_do_atributo(el, "height"));
+    let natural = ctx.tamanhos.get(src).copied().filter(|(w, h)| *w > 0.0 && *h > 0.0);
+    match (largura, altura, natural) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some((nw, nh))) => (w, w * nh / nw),
+        (None, Some(h), Some((nw, nh))) => (h * nw / nh, h),
+        (None, None, Some((nw, nh))) => (nw, nh),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Põe uma imagem em bloco, na linha atual. Imagem grande demais encolhe até a largura útil.
+fn colocar_imagem(
+    el: &Element,
+    css: &Estilo,
+    style: Style,
+    link: Option<&str>,
+    ctx: &mut Ctx<'_>,
+) {
+    let Some(src) = origem_da_imagem(el) else { return };
+    if ctx.imagens.len() >= MAX_IMAGENS {
+        return;
+    }
+    let (mut w, mut h) = tamanho_da_imagem(el, css, &src, ctx);
+    if w > ctx.width && w > 0.0 {
+        h *= ctx.width / w;
+        w = ctx.width;
+    }
+    let deslocamento = match style.align {
+        1 => ((ctx.width - w) / 2.0).max(0.0),
+        2 => (ctx.width - w).max(0.0),
+        _ => 0.0,
+    };
+    ctx.imagens.push(Imagem {
+        x: ctx.x0 + deslocamento,
+        y: ctx.y,
+        w,
+        h,
+        src,
+        href: link.map(str::to_string),
+    });
+    ctx.y += h;
+}
+
+/// Maior largura entre as imagens visíveis da subárvore. None quando não há imagem.
+/// Imagem de tamanho ainda desconhecido conta 1 pt, só para o elemento não ser tratado como vazio.
+fn largura_das_imagens(nodes: &[Node], ctx: &mut Ctx<'_>) -> Option<f32> {
+    let guarda_irmaos = ctx.folha.precisa_irmaos();
+    let ultimo_idx = nodes.iter().rposition(|n| matches!(n, Node::Element(_)));
+    let mut irmaos: Vec<Info> = Vec::new();
+    let mut maior: Option<f32> = None;
+    for (i, node) in nodes.iter().enumerate() {
+        let Node::Element(el) = node else { continue };
+        let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+        let ultimo = Some(i) == ultimo_idx;
+        let css = estilo_do_elemento(el, &info, &irmaos, ultimo, ctx);
+        if !SKIP_TAGS.contains(&el.tag.as_str()) && !css.oculto {
+            if el.tag == "img" {
+                if let Some(src) = origem_da_imagem(el) {
+                    let (w, _) = tamanho_da_imagem(el, &css, &src, ctx);
+                    maior = Some(maior.unwrap_or(0.0).max(w.max(1.0)));
+                }
+            } else {
+                ctx.pais.push(info.clone());
+                let interna = largura_das_imagens(&el.children, ctx);
+                ctx.pais.pop();
+                if let Some(w) = interna {
+                    maior = Some(maior.unwrap_or(0.0).max(w));
+                }
+            }
+        }
+        if guarda_irmaos {
+            irmaos.push(info);
+        }
+    }
+    maior
 }
 
 /// Reserva um lugar na lista de fundos para o bloco que começa em `topo`.
@@ -876,15 +1039,24 @@ fn medir_celula(el: &Element, estilo: Style, ctx: &mut Ctx<'_>) -> (f32, f32, bo
     texto_visivel(&el.children, ctx, &mut texto);
     ctx.pais.pop();
 
+    let info = info_do_elemento(el, ctx.folha.nomes_atributos());
+    ctx.pais.push(info);
+    let imagem = largura_das_imagens(&el.children, ctx);
+    ctx.pais.pop();
+
     let palavras: Vec<&str> = texto.split_whitespace().collect();
-    if palavras.is_empty() {
+    if palavras.is_empty() && imagem.is_none() {
         return (0.0, 0.0, true);
     }
-    let ideal = ctx.measurer.measure(&palavras.join(" "), estilo.font_size, estilo.bold);
-    let minimo = palavras
+    let mut ideal = ctx.measurer.measure(&palavras.join(" "), estilo.font_size, estilo.bold);
+    let mut minimo = palavras
         .iter()
         .map(|p| ctx.measurer.measure(p, estilo.font_size, estilo.bold))
         .fold(0.0_f32, f32::max);
+    if let Some(w) = imagem {
+        ideal = ideal.max(w);
+        minimo = minimo.max(w.min(48.0));
+    }
     (minimo, ideal, false)
 }
 
@@ -1605,6 +1777,73 @@ mod tests {
         assert_eq!(pos.len(), 3);
         assert!(pos[1].1 > pos[0].1 && pos[2].1 > pos[1].1);
         assert_eq!(pos[0].0, pos[1].0);
+    }
+
+    #[test]
+    fn imagem_com_atributos_reserva_o_espaco() {
+        let s = completo("<img src=\"a.png\" width=\"100\" height=\"50\"><p>oi</p>", 400.0);
+        assert_eq!(s.imagens.len(), 1);
+        let i = &s.imagens[0];
+        assert_eq!((i.x, i.y, i.w, i.h), (8.0, 8.0, 100.0, 50.0));
+        assert_eq!(i.src, "a.png");
+        // O texto vem depois da imagem.
+        match &s.comandos[0] {
+            DrawCommand::Text { y, .. } => assert!(*y >= 58.0),
+        }
+    }
+
+    #[test]
+    fn imagem_grande_encolhe_para_a_largura_util() {
+        let s = completo("<img src=\"a.png\" width=\"1000\" height=\"500\">", 416.0);
+        let i = &s.imagens[0];
+        assert_eq!(i.w, 400.0);
+        assert_eq!(i.h, 200.0);
+    }
+
+    #[test]
+    fn imagem_sem_tamanho_usa_o_natural_conhecido() {
+        let mut mapa: HashMap<String, (f32, f32)> = HashMap::new();
+        mapa.insert("a.png".to_string(), (200.0, 100.0));
+        let nodes = parse("<img src=\"a.png\">");
+        let s = layout_com_imagens(&nodes, 408.0, &FixedMeasurer, &mapa);
+        assert_eq!((s.imagens[0].w, s.imagens[0].h), (200.0, 100.0));
+        // Sem o tamanho conhecido, a imagem sai com 0 x 0 para a casca baixar.
+        let s2 = layout_completo(&nodes, 408.0, &FixedMeasurer);
+        assert_eq!((s2.imagens[0].w, s2.imagens[0].h), (0.0, 0.0));
+    }
+
+    #[test]
+    fn css_manda_no_tamanho_da_imagem() {
+        let s = completo(
+            "<style>.i{width:32px;height:32px}</style><img class=\"i\" src=\"a.png\" width=\"500\" height=\"500\">",
+            408.0,
+        );
+        assert_eq!((s.imagens[0].w, s.imagens[0].h), (32.0, 32.0));
+    }
+
+    #[test]
+    fn imagem_svg_e_ignorada() {
+        let s = completo("<img src=\"logo.svg\" width=\"10\" height=\"10\">", 408.0);
+        assert!(s.imagens.is_empty());
+    }
+
+    #[test]
+    fn imagem_dentro_de_link_leva_o_destino() {
+        let s = completo("<a href=\"/x\"><img src=\"a.png\" width=\"10\" height=\"10\"></a>", 408.0);
+        assert_eq!(s.imagens[0].href.as_deref(), Some("/x"));
+    }
+
+    #[test]
+    fn flex_com_imagem_sem_texto_nao_some() {
+        let s = completo(
+            "<style>.f{display:flex}</style><div class=f><div><img src=\"a.png\" width=\"20\" height=\"20\"></div><span>oi</span></div>",
+            400.0,
+        );
+        assert_eq!(s.imagens.len(), 1);
+        assert_eq!(s.comandos.len(), 1);
+        assert!(s.comandos.iter().all(|c| match c {
+            DrawCommand::Text { x, .. } => *x > s.imagens[0].x,
+        }));
     }
 
     #[test]
