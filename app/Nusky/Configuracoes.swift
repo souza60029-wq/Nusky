@@ -1,18 +1,51 @@
 // app/Nusky/Configuracoes.swift
 import SwiftUI
 
-struct Configuracoes: View {
-    @Environment(\.dismiss) private var dismiss
+/// Tópicos da tela de ajustes.
+private enum Topico: String, CaseIterable, Identifiable {
+    case aparencia = "Aparência"
+    case navegacao = "Navegação"
+    case desempenho = "Desempenho"
+    case privacidade = "Privacidade"
+    case enderecos = "Endereços"
+    case sobre = "Sobre"
+
+    var id: String { rawValue }
+
+    var icone: String {
+        switch self {
+        case .aparencia: return "paintbrush"
+        case .navegacao: return "safari"
+        case .desempenho: return "speedometer"
+        case .privacidade: return "hand.raised"
+        case .enderecos: return "magnifyingglass"
+        case .sobre: return "info.circle"
+        }
+    }
+}
+
+/// Ajustes sobre a página, com fundo desfocado. A cor do texto vem da claridade do que está atrás:
+/// fundo escuro, texto branco; fundo claro, texto preto.
+struct PainelAjustes: View {
     @AppStorage("themeAuto") private var automatico = true
     @AppStorage("nightMode") private var noturno = false
     @AppStorage("barAtBottom") private var barraEmbaixo = true
-    @AppStorage("useButtons") private var botoes = true
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
+    @AppStorage(JSRodador.chaveAtivo) private var javascriptLigado = true
+    @AppStorage(BrowserModel.chaveImagens) private var imagensLigadas = true
     @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
     @AppStorage("listaEtag") private var etagLista = ""
 
     /// Página aberta no momento, usada pelo diagnóstico.
-    var urlAtual: URL? = nil
+    let urlAtual: URL?
+    /// Verdadeiro quando o que está atrás do painel é escuro.
+    let fundoEscuro: Bool
+    let aoFechar: () -> Void
+
+    @State private var topico: Topico = .aparencia
+    @State private var mostrarDiagnostico = false
+    @State private var mostrarTermos = false
+    @State private var avisoPrivacidade = ""
 
     /// Mensagem mostrada depois de tocar em "Procurar atualização".
     @State private var mensagemLista = ""
@@ -22,6 +55,8 @@ struct Configuracoes: View {
     @State private var listaNova: ListaBaixada? = nil
     /// Controla o aviso de confirmação antes de trocar a lista.
     @State private var confirmarAtualizacao = false
+
+    private var textoCor: Color { fundoEscuro ? Color.white : Color.black }
 
     private var versao: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
@@ -40,136 +75,300 @@ struct Configuracoes: View {
     }
 
     var body: some View {
-        NavigationView {
-            Form {
-                Section {
-                    Toggle("Automático", isOn: $automatico)
-                    Toggle("Modo noturno", isOn: $noturno)
-                        .disabled(automatico)
-                } header: {
-                    Text("Aparência")
-                } footer: {
-                    Text("Automático segue o modo claro ou escuro do iPhone.")
-                }
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+            (fundoEscuro ? Color.black.opacity(0.25) : Color.white.opacity(0.25))
+                .ignoresSafeArea()
 
-                Section {
-                    Toggle("Barra embaixo", isOn: $barraEmbaixo)
-                } header: {
-                    Text("Barra")
-                } footer: {
-                    Text("Desligado: a barra fica em cima.")
+            VStack(spacing: 0) {
+                cabecalho
+                abasDeTopicos
+                ScrollView {
+                    VStack(spacing: 12) {
+                        conteudo
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 40)
                 }
-
-                Section {
-                    Toggle("Botões na barra", isOn: $botoes)
-                } header: {
-                    Text("Navegação")
-                } footer: {
-                    Text("Desligado: arraste a barra para voltar, avançar e abrir as abas. Ligado: ao expandir a barra, aparecem os botões de voltar, avançar e abas.")
-                }
-
-                Section {
-                    Toggle("Solicitar versão desktop", isOn: $versaoDesktop)
-                } header: {
-                    Text("Site")
-                } footer: {
-                    Text("Ligado: pede a versão desktop. Desligado: pede a versão para celular. Ao fechar esta tela, a página aberta recarrega se a opção mudou.")
-                }
-
-                Section {
-                    HStack {
-                        Text("Versão da lista")
-                        Spacer()
-                        Text("\(Engine.versaoEmUso)")
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Text("Data da lista")
-                        Spacer()
-                        Text(dataListaTexto)
-                            .foregroundColor(.secondary)
-                    }
-                    Button {
-                        Task { await verificarAtualizacao() }
-                    } label: {
-                        Text(verificando ? "Verificando…" : "Procurar atualização")
-                    }
-                    .disabled(verificando)
-
-                    if let nova = listaNova {
-                        Text("Versão \(nova.versao), de \(nova.dataTexto).")
-                            .foregroundColor(.secondary)
-                        Button("Atualizar endereços") {
-                            confirmarAtualizacao = true
-                        }
-                    }
-                    if !mensagemLista.isEmpty {
-                        Text(mensagemLista)
-                            .foregroundColor(.secondary)
-                    }
-                } header: {
-                    Text("Endereços")
-                } footer: {
-                    Text("A lista de sites serve para achar sites pelo nome. Ela só é atualizada quando você toca em \"Procurar atualização\" e confirma. Nada é verificado em segundo plano.")
-                }
-
-                Section {
-                    NavigationLink {
-                        DiagnosticoView(url: urlAtual)
-                    } label: {
-                        Text("Analisar página atual")
-                    }
-                    .disabled(urlAtual == nil)
-                } header: {
-                    Text("Diagnóstico")
-                } footer: {
-                    Text("Baixa de novo a página aberta e gera um relatório de texto para copiar. Não altera a página.")
-                }
-
-                Section {
-                    HStack {
-                        Text("Versão")
-                        Spacer()
-                        Text(versao)
-                            .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Text("Licença")
-                        Spacer()
-                        Text("MPL-2.0")
-                            .foregroundColor(.secondary)
-                    }
-                    NavigationLink {
-                        TermosDeUso()
-                    } label: {
-                        Text("Termos de uso")
-                    }
-                } header: {
-                    Text("Sobre")
-                } footer: {
-                    if dataAceiteTexto.isEmpty {
-                        Text("Versão dos termos: \(versaoDosTermos).")
-                    } else {
-                        Text("Versão dos termos: \(versaoDosTermos). Aceitos em \(dataAceiteTexto).")
-                    }
-                }
-            }
-            .navigationTitle("Configurações")
-            .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("OK") { dismiss() }
-                }
-            }
-            .alert("Atualizar endereços?", isPresented: $confirmarAtualizacao) {
-                Button("Cancelar", role: .cancel) {}
-                Button("Atualizar") {
-                    Task { await aplicarAtualizacao() }
-                }
-            } message: {
-                Text("Os sites encontrados pelo nome passam a vir da lista nova.")
             }
         }
+        .foregroundColor(textoCor)
+        .environment(\.colorScheme, fundoEscuro ? .dark : .light)
+        .sheet(isPresented: $mostrarDiagnostico) {
+            NavigationView {
+                DiagnosticoView(url: urlAtual)
+            }
+        }
+        .sheet(isPresented: $mostrarTermos) {
+            NavigationView {
+                TermosDeUso()
+            }
+        }
+        .alert("Atualizar endereços?", isPresented: $confirmarAtualizacao) {
+            Button("Cancelar", role: .cancel) {}
+            Button("Atualizar") {
+                Task { await aplicarAtualizacao() }
+            }
+        } message: {
+            Text("Os sites encontrados pelo nome passam a vir da lista nova.")
+        }
+    }
+
+    // MARK: - Estrutura
+
+    private var cabecalho: some View {
+        HStack {
+            Text("Ajustes")
+                .font(.system(size: 32, weight: .bold))
+            Spacer()
+            Button(action: aoFechar) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.primary.opacity(0.12)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 56)
+        .padding(.bottom, 12)
+    }
+
+    private var abasDeTopicos: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Topico.allCases) { t in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { topico = t }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: t.icone)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(t.rawValue)
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                        .padding(.horizontal, 14)
+                        .frame(height: 38)
+                        .background(
+                            Capsule().fill(topico == t ? Color.primary.opacity(0.22) : Color.primary.opacity(0.08))
+                        )
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private var conteudo: some View {
+        switch topico {
+        case .aparencia: topicoAparencia
+        case .navegacao: topicoNavegacao
+        case .desempenho: topicoDesempenho
+        case .privacidade: topicoPrivacidade
+        case .enderecos: topicoEnderecos
+        case .sobre: topicoSobre
+        }
+    }
+
+    // MARK: - Tópicos
+
+    private var topicoAparencia: some View {
+        VStack(spacing: 12) {
+            cartao {
+                linhaChave("Automático", detalhe: "Segue o modo claro ou escuro do iPhone.", valor: $automatico)
+                divisor
+                linhaChave("Modo noturno", detalhe: automatico ? "Desligue o automático para escolher." : nil, valor: $noturno)
+                    .disabled(automatico)
+                    .opacity(automatico ? 0.5 : 1)
+            }
+            cartao {
+                linhaChave("Barra embaixo", detalhe: "Desligado: a barra fica em cima.", valor: $barraEmbaixo)
+            }
+        }
+    }
+
+    private var topicoNavegacao: some View {
+        VStack(spacing: 12) {
+            cartao {
+                linhaChave(
+                    "Solicitar versão desktop",
+                    detalhe: "Ao fechar os ajustes, a página recarrega se a opção mudou.",
+                    valor: $versaoDesktop
+                )
+            }
+            cartao {
+                linhaChave("Mostrar imagens", detalhe: "Desligado: a página abre sem imagens e gasta menos dados e memória.", valor: $imagensLigadas)
+                divisor
+                linhaChave("Executar JavaScript", detalhe: "Necessário em sites que montam a página no aparelho.", valor: $javascriptLigado)
+            }
+        }
+    }
+
+    private var topicoDesempenho: some View {
+        VStack(spacing: 12) {
+            cartao {
+                linhaInfo("Limite do JavaScript", "6 segundos")
+                divisor
+                linhaInfo("Imagens", imagensLigadas ? "Reduzidas ao baixar" : "Desligadas")
+            }
+            cartao {
+                botaoLinha("Analisar página atual", icone: "waveform.path.ecg") {
+                    mostrarDiagnostico = true
+                }
+                .disabled(urlAtual == nil)
+                .opacity(urlAtual == nil ? 0.5 : 1)
+            }
+            rodape("O diagnóstico baixa de novo a página aberta e gera um relatório de texto para copiar. Não altera a página.")
+        }
+    }
+
+    private var topicoPrivacidade: some View {
+        VStack(spacing: 12) {
+            cartao {
+                botaoLinha("Limpar histórico de visitas", icone: "clock.arrow.circlepath") {
+                    Biblioteca.compartilhada.limparVisitas()
+                    avisoPrivacidade = "Histórico de visitas apagado."
+                }
+                divisor
+                botaoLinha("Limpar cookies e cache", icone: "trash") {
+                    HTTPCookieStorage.shared.removeCookies(since: Date(timeIntervalSince1970: 0))
+                    URLCache.shared.removeAllCachedResponses()
+                    ArmazemImagens.compartilhado.limpar()
+                    avisoPrivacidade = "Cookies, cache e imagens guardadas foram apagados."
+                }
+            }
+            if !avisoPrivacidade.isEmpty {
+                rodape(avisoPrivacidade)
+            }
+            rodape("Histórico, favoritos, pesquisas, cookies e sessões ficam só neste aparelho. Nada é enviado a ninguém.")
+        }
+    }
+
+    private var topicoEnderecos: some View {
+        VStack(spacing: 12) {
+            cartao {
+                linhaInfo("Versão da lista", "\(Engine.versaoEmUso)")
+                divisor
+                linhaInfo("Data da lista", dataListaTexto)
+                divisor
+                botaoLinha(verificando ? "Verificando…" : "Procurar atualização", icone: "arrow.triangle.2.circlepath") {
+                    Task { await verificarAtualizacao() }
+                }
+                .disabled(verificando)
+                if let nova = listaNova {
+                    divisor
+                    linhaInfo("Disponível", "Versão \(nova.versao), de \(nova.dataTexto)")
+                    divisor
+                    botaoLinha("Atualizar endereços", icone: "square.and.arrow.down") {
+                        confirmarAtualizacao = true
+                    }
+                }
+            }
+            if !mensagemLista.isEmpty {
+                rodape(mensagemLista)
+            }
+            rodape("A lista de sites serve para achar sites pelo nome. Ela só é atualizada quando você toca em \"Procurar atualização\" e confirma. Nada é verificado em segundo plano.")
+        }
+    }
+
+    private var topicoSobre: some View {
+        VStack(spacing: 12) {
+            cartao {
+                linhaInfo("Versão", versao)
+                divisor
+                linhaInfo("Licença", "MPL-2.0")
+                divisor
+                botaoLinha("Termos de uso", icone: "doc.text") {
+                    mostrarTermos = true
+                }
+            }
+            if dataAceiteTexto.isEmpty {
+                rodape("Versão dos termos: \(versaoDosTermos).")
+            } else {
+                rodape("Versão dos termos: \(versaoDosTermos). Aceitos em \(dataAceiteTexto).")
+            }
+        }
+    }
+
+    // MARK: - Peças
+
+    private func cartao<Conteudo: View>(@ViewBuilder _ conteudo: () -> Conteudo) -> some View {
+        VStack(spacing: 0) {
+            conteudo()
+        }
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.09)))
+    }
+
+    private var divisor: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.1))
+            .frame(height: 0.5)
+            .padding(.leading, 16)
+    }
+
+    private func linhaChave(_ titulo: String, detalhe: String?, valor: Binding<Bool>) -> some View {
+        Toggle(isOn: valor) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(titulo)
+                    .font(.system(size: 17))
+                if let detalhe {
+                    Text(detalhe)
+                        .font(.system(size: 13))
+                        .opacity(0.6)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private func linhaInfo(_ titulo: String, _ valor: String) -> some View {
+        HStack {
+            Text(titulo)
+                .font(.system(size: 17))
+            Spacer()
+            Text(valor)
+                .font(.system(size: 17))
+                .opacity(0.6)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+    }
+
+    private func botaoLinha(_ titulo: String, icone: String, acao: @escaping () -> Void) -> some View {
+        Button(action: acao) {
+            HStack(spacing: 12) {
+                Image(systemName: icone)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 24)
+                Text(titulo)
+                    .font(.system(size: 17))
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .opacity(0.35)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func rodape(_ texto: String) -> some View {
+        Text(texto)
+            .font(.system(size: 13))
+            .opacity(0.6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
     }
 
     // MARK: - Atualização da lista
