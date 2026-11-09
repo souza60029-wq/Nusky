@@ -39,10 +39,25 @@ struct Fundo: Identifiable {
     let raio: CGFloat
 }
 
-/// Tudo o que o motor desenha numa página: textos, caixas de fundo e a cor de fundo da página.
+/// Imagem (`<img>`) da página. Com largura e altura 0 o tamanho ainda não é conhecido:
+/// o app baixa a imagem, aprende o tamanho e pede o layout de novo.
+struct ImagemPagina: Identifiable {
+    let id = UUID()
+    let x: CGFloat
+    let y: CGFloat
+    let w: CGFloat
+    let h: CGFloat
+    /// Destino do link que envolve a imagem. Nil quando não é link.
+    let href: String?
+    /// Endereço como está no HTML (pode ser relativo).
+    let src: String
+}
+
+/// Tudo o que o motor desenha numa página: textos, caixas de fundo, imagens e a cor de fundo da página.
 struct PaginaDesenhada {
     var itens: [DrawItem] = []
     var fundos: [Fundo] = []
+    var imagens: [ImagemPagina] = []
     var fundoPagina: CorTexto? = nil
 }
 
@@ -86,15 +101,42 @@ enum Engine {
     /// Textos, caixas de fundo e cor de fundo da página.
     /// Linhas do motor: `B<TAB>r,g,b` (fundo da página), `R<TAB>x y w h cor borda corBorda raio`
     /// (caixa de fundo, de fora para dentro) e as linhas de texto de sempre.
-    static func renderCompleto(html: String, width: Float) -> PaginaDesenhada {
-        guard let raw = nusky_render(html, width, measureCallback) else { return PaginaDesenhada() }
+    static func renderCompleto(
+        html: String,
+        width: Float,
+        tamanhos: [String: CGSize] = [:]
+    ) -> PaginaDesenhada {
+        // Tamanho natural das imagens já baixadas: endereco<TAB>largura<TAB>altura.
+        let linhasTamanho = tamanhos.compactMap { (src, tamanho) -> String? in
+            guard tamanho.width > 0, tamanho.height > 0 else { return nil }
+            let limpo = src.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
+            return "\(limpo)\t\(tamanho.width)\t\(tamanho.height)"
+        }
+        let textoTamanhos = linhasTamanho.joined(separator: "\n")
+        let bruto: UnsafeMutablePointer<CChar>? = textoTamanhos.withCString { tam in
+            nusky_render_imagens(html, width, measureCallback, tam)
+        }
+        guard let raw = bruto else { return PaginaDesenhada() }
         defer { nusky_free_string(raw) }
         let output = String(cString: raw)
 
         var items: [DrawItem] = []
         var fundos: [Fundo] = []
+        var imagens: [ImagemPagina] = []
         var fundoPagina: CorTexto? = nil
         for line in output.split(separator: "\n") {
+            if line.hasPrefix("I\t") {
+                let c = line.split(separator: "\t", omittingEmptySubsequences: false)
+                guard c.count == 7,
+                      let x = Float(c[1]), let y = Float(c[2]),
+                      let w = Float(c[3]), let h = Float(c[4]) else { continue }
+                imagens.append(ImagemPagina(
+                    x: CGFloat(x), y: CGFloat(y), w: CGFloat(w), h: CGFloat(h),
+                    href: c[5].isEmpty ? nil : String(c[5]),
+                    src: String(c[6])
+                ))
+                continue
+            }
             if line.hasPrefix("B\t") {
                 let campos = line.split(separator: "\t", omittingEmptySubsequences: false)
                 if campos.count == 2 { fundoPagina = parseCor(campos[1]) }
@@ -134,7 +176,7 @@ enum Engine {
                 text: String(fields[6])
             ))
         }
-        return PaginaDesenhada(itens: items, fundos: fundos, fundoPagina: fundoPagina)
+        return PaginaDesenhada(itens: items, fundos: fundos, imagens: imagens, fundoPagina: fundoPagina)
     }
 
     /// Árvore do HTML em JSON (o parser do motor), para o JavaScript montar o document.
