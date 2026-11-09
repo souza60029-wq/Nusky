@@ -12,8 +12,8 @@ targets:
       path: app/Nusky/Info.plist
       properties:
         CFBundleDisplayName: Nusky
-        CFBundleShortVersionString: "0.0.3"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "0.0.4"
+        CFBundleVersion: "4"
         UILaunchScreen: {}
     settings:
       base:
