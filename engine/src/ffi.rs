@@ -48,7 +48,7 @@ use serde_json::{json, Value};
 use crate::busca::{indice_embutido, Indice};
 use crate::diagnostico::relatorio;
 use crate::html::{parse, parse_com_comentarios, Node, TAG_COMENTARIO};
-use crate::layout::{layout_completo, DrawCommand, TextMeasurer};
+use crate::layout::{layout_com_imagens, DrawCommand, TextMeasurer};
 use crate::preparo::marcar_com_javascript;
 
 /// Lista embutida no app, para ler o cabeçalho (versão e data) sem depender de `busca.rs`.
@@ -111,20 +111,56 @@ pub extern "C" fn nusky_render(
     viewport_width: f32,
     measure: Option<MeasureFn>,
 ) -> *mut c_char {
+    nusky_render_imagens(html, viewport_width, measure, ptr::null())
+}
+
+/// Lê o tamanho natural das imagens já baixadas: uma linha por imagem, `endereco<TAB>largura<TAB>altura`.
+fn ler_tamanhos(texto: &str) -> HashMap<String, (f32, f32)> {
+    let mut mapa = HashMap::new();
+    for linha in texto.lines() {
+        let mut partes = linha.split('\t');
+        let (Some(src), Some(w), Some(h)) = (partes.next(), partes.next(), partes.next()) else {
+            continue;
+        };
+        if let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>()) {
+            if w > 0.0 && h > 0.0 && !src.is_empty() {
+                mapa.insert(src.to_string(), (w, h));
+            }
+        }
+    }
+    mapa
+}
+
+/// Igual a `nusky_render`, sabendo o tamanho das imagens já baixadas (`tamanhos` pode ser NULL).
+/// Além das linhas de sempre, devolve `I<TAB>x y w h destino-do-link endereco` para cada imagem.
+/// Retorna null em caso de erro. Liberar com `nusky_free_string`.
+#[no_mangle]
+pub extern "C" fn nusky_render_imagens(
+    html: *const c_char,
+    viewport_width: f32,
+    measure: Option<MeasureFn>,
+    tamanhos: *const c_char,
+) -> *mut c_char {
     if html.is_null() {
         return ptr::null_mut();
     }
     let bruto = unsafe { CStr::from_ptr(html) }.to_string_lossy();
     let input = marcar_com_javascript(&bruto);
     let nodes = parse(&input);
+    let mapa = if tamanhos.is_null() {
+        HashMap::new()
+    } else {
+        ler_tamanhos(&unsafe { CStr::from_ptr(tamanhos) }.to_string_lossy())
+    };
 
     let saida = match measure {
-        Some(f) => layout_completo(
+        Some(f) => layout_com_imagens(
             &nodes,
             viewport_width,
             &CallbackMeasurer { measure: f, cache: RefCell::new(HashMap::new()) },
+            &mapa,
         ),
-        None => layout_completo(&nodes, viewport_width, &ApproxMeasurer),
+        None => layout_com_imagens(&nodes, viewport_width, &ApproxMeasurer, &mapa),
     };
 
     let mut out = String::new();
@@ -148,6 +184,18 @@ pub extern "C" fn nusky_render(
             larg,
             cor_borda,
             f.raio,
+        ));
+    }
+    // Imagens: `I<TAB>x y w h destino endereco`.
+    for i in &saida.imagens {
+        out.push_str(&format!(
+            "I\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            i.x,
+            i.y,
+            i.w,
+            i.h,
+            sanitize(i.href.as_deref().unwrap_or("")),
+            sanitize(&i.src),
         ));
     }
     for cmd in saida.comandos {
@@ -526,6 +574,26 @@ mod tests {
         assert!(saida.contains("R\t8\t8\t384\t"));
         assert!(saida.contains("\t16,32,48\t"));
         assert!(saida.ends_with("oi\n"));
+    }
+
+    #[test]
+    fn render_envia_imagens_e_usa_o_tamanho_conhecido() {
+        let saida = render_with("<img src=\"a.png\" width=\"100\" height=\"50\">", None);
+        assert_eq!(saida, "I\t8\t8\t100\t50\t\ta.png\n");
+
+        let c = CString::new("<img src=\"b.png\">").unwrap();
+        let t = CString::new("b.png\t30\t20\n").unwrap();
+        let p = nusky_render_imagens(c.as_ptr(), 400.0, None, t.as_ptr());
+        let out = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        nusky_free_string(p);
+        assert_eq!(out, "I\t8\t8\t30\t20\t\tb.png\n");
+    }
+
+    #[test]
+    fn tamanhos_ruins_sao_ignorados() {
+        let m = ler_tamanhos("a.png\t10\t20\nruim\nb.png\tx\t5\nc.png\t0\t5\n");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("a.png"), Some(&(10.0, 20.0)));
     }
 
     #[test]
