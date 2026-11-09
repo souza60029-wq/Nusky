@@ -75,6 +75,10 @@ pub struct Estilo {
     /// Some(None) = borda transparente.
     pub borda_cor: Option<Option<(u8, u8, u8)>>,
     pub raio: Option<f32>,
+    /// `width` em pontos (só valores absolutos: px, rem, em). Porcentagem e auto ficam None.
+    pub largura: Option<f32>,
+    /// `height` em pontos, com a mesma regra de `largura`.
+    pub altura: Option<f32>,
 }
 
 /// Regra que o motor não aplicou, com o motivo.
@@ -311,6 +315,8 @@ struct Decl {
     borda_largura: Option<f32>,
     borda_cor: Option<Option<(u8, u8, u8)>>,
     raio: Option<f32>,
+    largura: Option<f32>,
+    altura: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -632,6 +638,12 @@ fn declaracoes_com(texto: &str, vars: &HashMap<String, String>) -> Decl {
                     d.coluna = Some(false);
                 }
             }
+            "width" => {
+                d.largura = comprimento(valor).filter(|v| *v >= 0.0);
+            }
+            "height" => {
+                d.altura = comprimento(valor).filter(|v| *v >= 0.0);
+            }
             "gap" | "column-gap" | "row-gap" => {
                 let vals = dividir_valores(valor);
                 if let Some(v) = vals.first().and_then(|t| comprimento(t)) {
@@ -863,6 +875,12 @@ fn aplica(dst: &mut Decl, src: &Decl) {
     if src.raio.is_some() {
         dst.raio = src.raio;
     }
+    if src.largura.is_some() {
+        dst.largura = src.largura;
+    }
+    if src.altura.is_some() {
+        dst.altura = src.altura;
+    }
 }
 
 fn para_estilo(d: Decl) -> Estilo {
@@ -887,6 +905,8 @@ fn para_estilo(d: Decl) -> Estilo {
         borda_largura: d.borda_largura,
         borda_cor: d.borda_cor,
         raio: d.raio,
+        largura: d.largura,
+        altura: d.altura,
     }
 }
 
@@ -1802,6 +1822,17 @@ mod testes {
     fn oculto(css: &str, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> bool {
         let f = Folha::parse(css);
         estilo_completo(&f, alvo, pais, irmaos, None).oculto
+    }
+
+    #[test]
+    fn largura_e_altura_em_valores_absolutos() {
+        let f = Folha::parse(".a{width:2rem;height:10px}.b{width:100%;height:auto}");
+        let a = estilo_para(&f, "img", "", &["a".to_string()], None);
+        assert_eq!(a.largura, Some(32.0));
+        assert_eq!(a.altura, Some(10.0));
+        let b = estilo_para(&f, "img", "", &["b".to_string()], None);
+        assert_eq!(b.largura, None);
+        assert_eq!(b.altura, None);
     }
 
     #[test]
