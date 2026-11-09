@@ -10,6 +10,8 @@ final class BrowserModel: ObservableObject {
     @Published var fundos: [Fundo] = []
     /// Cor de fundo da página, quando ela define uma.
     @Published var fundoPagina: CorTexto? = nil
+    /// Imagens da página, com a posição já calculada.
+    @Published var imagens: [ImagemPagina] = []
     @Published var contentHeight: CGFloat = 0
     @Published var status = ""
     @Published var pageVersion = 0
@@ -36,6 +38,18 @@ final class BrowserModel: ObservableObject {
 
     private var task: Task<Void, Never>?
     private var started = false
+
+    // Imagens: o HTML fica guardado para refazer o layout quando o tamanho de uma imagem é descoberto.
+    private var htmlAtual = ""
+    private var tamanhosImagens: [String: CGSize] = [:]
+    private var geracao = 0
+    private var tarefaImagens: Task<Void, Never>?
+
+    /// Chave dos ajustes. Se nunca foi gravada, as imagens ficam ligadas.
+    static let chaveImagens = "mostrarImagens"
+    static var imagensAtivas: Bool {
+        UserDefaults.standard.object(forKey: chaveImagens) as? Bool ?? true
+    }
     private let textWidth = UIScreen.main.bounds.width
 
     // MARK: Ciclo de vida
@@ -235,9 +249,12 @@ final class BrowserModel: ObservableObject {
 
     /// Esvazia a tela e mostra o início do carregamento.
     private func iniciarCarregamento() {
+        tarefaImagens?.cancel()
+        geracao += 1
         status = ""
         items = []
         fundos = []
+        imagens = []
         fundoPagina = nil
         contentHeight = 0
         carregando = true
@@ -264,6 +281,7 @@ final class BrowserModel: ObservableObject {
             var id = entradaId
             if navegar {
                 historico.navegar(para: finalURL)
+                Biblioteca.compartilhada.registrarVisita(finalURL)
                 id = historico.entradaAtual?.id
             }
             progresso = 0.95
@@ -295,19 +313,12 @@ final class BrowserModel: ObservableObject {
 
     /// Gera os itens de desenho fora da thread principal e atualiza a tela.
     private func show(html: String, url: URL, entradaId: UUID?, restoreY y: CGFloat) async {
-        let width = Float(textWidth)
-        let desenhada = await Task.detached(priority: .userInitiated) {
-            Engine.renderCompleto(html: html, width: width)
-        }.value
+        htmlAtual = html
+        tamanhosImagens = [:]
+        let desenhada = await desenhar(html)
         guard !Task.isCancelled else { return }
 
-        let novosItens = desenhada.itens
-        items = novosItens
-        fundos = desenhada.fundos
-        fundoPagina = desenhada.fundoPagina
-        let fimTexto = novosItens.map { CGFloat($0.y) + CGFloat($0.fontSize) }.max() ?? 0
-        let fimFundos = desenhada.fundos.map { $0.y + $0.h }.max() ?? 0
-        contentHeight = max(fimTexto, fimFundos) + 80
+        aplicar(desenhada)
         currentURL = url
         currentHost = url.host ?? ""
         address = url.absoluteString
@@ -318,5 +329,78 @@ final class BrowserModel: ObservableObject {
         carregando = false
         progresso = 0
         pageVersion += 1
+        iniciarImagens(desenhada.imagens, base: url, geracao: geracao)
+    }
+
+    // MARK: Desenho e imagens
+
+    /// Gera o desenho fora da thread principal, sabendo o tamanho das imagens já baixadas.
+    private func desenhar(_ html: String) async -> PaginaDesenhada {
+        let width = Float(textWidth)
+        let tamanhos = tamanhosImagens
+        return await Task.detached(priority: .userInitiated) {
+            Engine.renderCompleto(html: html, width: width, tamanhos: tamanhos)
+        }.value
+    }
+
+    private func aplicar(_ desenhada: PaginaDesenhada) {
+        let novosItens = desenhada.itens
+        items = novosItens
+        fundos = desenhada.fundos
+        imagens = desenhada.imagens
+        fundoPagina = desenhada.fundoPagina
+        let fimTexto = novosItens.map { CGFloat($0.y) + CGFloat($0.fontSize) }.max() ?? 0
+        let fimFundos = desenhada.fundos.map { $0.y + $0.h }.max() ?? 0
+        let fimImagens = desenhada.imagens.map { $0.y + $0.h }.max() ?? 0
+        contentHeight = max(fimTexto, max(fimFundos, fimImagens)) + 80
+    }
+
+    /// Baixa as imagens da página aos poucos (6 por vez, no máximo 60). A cada lote, se algum
+    /// tamanho foi descoberto, o layout é refeito para abrir espaço para elas.
+    private func iniciarImagens(_ lista: [ImagemPagina], base: URL, geracao g: Int) {
+        guard BrowserModel.imagensAtivas else { return }
+        var vistos = Set<String>()
+        var pendentes: [String] = []
+        for imagem in lista where tamanhosImagens[imagem.src] == nil && vistos.insert(imagem.src).inserted {
+            pendentes.append(imagem.src)
+        }
+        guard !pendentes.isEmpty else { return }
+        pendentes = Array(pendentes.prefix(60))
+
+        tarefaImagens?.cancel()
+        tarefaImagens = Task { [weak self] in
+            var fila = pendentes
+            while !fila.isEmpty {
+                let lote = Array(fila.prefix(6))
+                fila.removeFirst(lote.count)
+                let resultados = await withTaskGroup(of: (String, CGSize?).self) { grupo -> [(String, CGSize?)] in
+                    for src in lote {
+                        grupo.addTask {
+                            guard let url = resolverEnderecoDeImagem(src, base: base) else { return (src, nil) }
+                            return (src, await ArmazemImagens.compartilhado.carregar(endereco: url))
+                        }
+                    }
+                    var saida: [(String, CGSize?)] = []
+                    for await r in grupo { saida.append(r) }
+                    return saida
+                }
+                guard let self, !Task.isCancelled, self.geracao == g else { return }
+                var descobriu = false
+                for (src, tamanho) in resultados {
+                    // Imagem que falhou fica com 0 x 0 para não ser tentada de novo.
+                    self.tamanhosImagens[src] = tamanho ?? .zero
+                    if tamanho != nil { descobriu = true }
+                }
+                if descobriu { await self.redesenharComImagens(geracao: g) }
+            }
+        }
+    }
+
+    /// Refaz o layout da mesma página com os tamanhos novos, sem mexer na posição de rolagem.
+    private func redesenharComImagens(geracao g: Int) async {
+        let desenhada = await desenhar(htmlAtual)
+        guard g == geracao, !Task.isCancelled else { return }
+        restoreY = scrollY
+        aplicar(desenhada)
     }
 }
