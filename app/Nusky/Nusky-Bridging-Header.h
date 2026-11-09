@@ -11,6 +11,9 @@ typedef float (*nusky_measure_fn)(const char *text, float font_size, int bold);
 
 // Renderização e diagnóstico.
 char *nusky_render(const char *html, float viewport_width, nusky_measure_fn measure);
+// Igual a nusky_render, sabendo o tamanho natural das imagens já baixadas.
+// tamanhos (pode ser NULL): uma linha por imagem, endereco<TAB>largura<TAB>altura.
+char *nusky_render_imagens(const char *html, float viewport_width, nusky_measure_fn measure, const char *tamanhos);
 char *nusky_diagnose(const char *html, float viewport_width, nusky_measure_fn measure);
 void nusky_free_string(char *s);
 char *nusky_arvore(const char *html);
