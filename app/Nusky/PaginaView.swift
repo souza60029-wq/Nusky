@@ -6,6 +6,9 @@ import UIKit
 struct PaginaView: UIViewRepresentable {
     let itens: [DrawItem]
     let fundos: [Fundo]
+    let imagens: [ImagemPagina]
+    /// Endereço da página, para completar os endereços relativos das imagens.
+    let baseURL: URL?
     let fundoPagina: CorTexto?
     let altura: CGFloat
     let escuro: Bool
@@ -13,6 +16,8 @@ struct PaginaView: UIViewRepresentable {
     let aoRolar: (CGFloat) -> Void
     let aoAbrirLink: (String) -> Void
     let aoTocarPagina: () -> Void
+    /// O dedo começou a arrastar a página (a barra recolhe).
+    let aoComecarRolar: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -48,10 +53,10 @@ struct PaginaView: UIViewRepresentable {
         desenho.aoTocarPagina = { c.pai.aoTocarPagina() }
 
         // Página nova: o primeiro item muda, porque cada carregamento gera ids novos.
-        let identificacao = itens.first?.id ?? fundos.first?.id
+        let identificacao = itens.first?.id ?? fundos.first?.id ?? imagens.first?.id
         if identificacao != c.identificacao {
             c.identificacao = identificacao
-            desenho.trocarItens(itens, fundos: fundos)
+            desenho.trocarItens(itens, fundos: fundos, imagens: imagens, base: baseURL)
             scroll.layoutIfNeeded()
             scroll.setContentOffset(CGPoint(x: 0, y: restoreY), animated: false)
         }
@@ -67,6 +72,10 @@ struct PaginaView: UIViewRepresentable {
 
         func scrollViewDidScroll(_ scroll: UIScrollView) {
             pai.aoRolar(max(0, scroll.contentOffset.y))
+        }
+
+        func scrollViewWillBeginDragging(_ scroll: UIScrollView) {
+            pai.aoComecarRolar()
         }
     }
 }
@@ -104,6 +113,9 @@ final class DesenhoPagina: UIView {
     private let trava = NSLock()
     private var lista: [DrawItem] = []
     private var caixas: [Fundo] = []
+    /// Imagens da página, cada uma com a chave do cache (nil se o endereço não vale).
+    private var figuras: [(imagem: ImagemPagina, chave: String?)] = []
+    private var observador: NSObjectProtocol?
 
     var escuro = false
     var aoTocarLink: ((String) -> Void)?
@@ -123,17 +135,32 @@ final class DesenhoPagina: UIView {
             camada.levelsOfDetailBias = 0
         }
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tocou(_:))))
+        // Quando uma imagem termina de baixar, a tela se desenha de novo.
+        observador = NotificationCenter.default.addObserver(
+            forName: ArmazemImagens.aoCarregar, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.setNeedsDisplay()
+        }
+    }
+
+    deinit {
+        if let observador { NotificationCenter.default.removeObserver(observador) }
     }
 
     required init?(coder: NSCoder) {
         fatalError("não usado")
     }
 
-    func trocarItens(_ novos: [DrawItem], fundos: [Fundo]) {
+    func trocarItens(_ novos: [DrawItem], fundos: [Fundo], imagens: [ImagemPagina], base: URL?) {
         let ordenados = novos.sorted { CGFloat($0.y) < CGFloat($1.y) }
+        let preparadas: [(imagem: ImagemPagina, chave: String?)] = imagens.map { img in
+            guard let base, let url = resolverEnderecoDeImagem(img.src, base: base) else { return (img, nil) }
+            return (img, ArmazemImagens.chave(para: url))
+        }
         trava.lock()
         lista = ordenados
         caixas = fundos
+        figuras = preparadas
         trava.unlock()
         setNeedsDisplay()
     }
@@ -148,6 +175,28 @@ final class DesenhoPagina: UIView {
         trava.lock()
         defer { trava.unlock() }
         return caixas
+    }
+
+    private func copiaFiguras() -> [(imagem: ImagemPagina, chave: String?)] {
+        trava.lock()
+        defer { trava.unlock() }
+        return figuras
+    }
+
+    /// Desenha as imagens que tocam o bloco. Enquanto a imagem não chegou, aparece um retângulo neutro.
+    private func desenharImagens(_ rect: CGRect) {
+        for figura in copiaFiguras() {
+            let img = figura.imagem
+            guard img.w > 0, img.h > 0 else { continue }
+            let quadro = CGRect(x: img.x, y: img.y, width: img.w, height: img.h)
+            guard quadro.intersects(rect) else { continue }
+            if let chave = figura.chave, let pronta = ArmazemImagens.compartilhado.imagem(para: chave) {
+                pronta.draw(in: quadro)
+            } else {
+                UIColor.gray.withAlphaComponent(0.18).setFill()
+                UIBezierPath(roundedRect: quadro, cornerRadius: 6).fill()
+            }
+        }
     }
 
     /// Pinta as caixas de fundo que tocam o bloco. A lista vem de fora para dentro,
@@ -176,6 +225,7 @@ final class DesenhoPagina: UIView {
 
     override func draw(_ rect: CGRect) {
         desenharFundos(rect)
+        desenharImagens(rect)
         let itens = copia()
         var i = primeiroAPartir(itens, rect.minY - 80)
         while i < itens.count && CGFloat(itens[i].y) <= rect.maxY {
@@ -232,6 +282,15 @@ final class DesenhoPagina: UIView {
                 return
             }
             i += 1
+        }
+        for figura in copiaFiguras() {
+            let img = figura.imagem
+            guard let link = img.href else { continue }
+            let quadro = CGRect(x: img.x, y: img.y, width: img.w, height: img.h)
+            if quadro.contains(ponto) {
+                aoTocarLink?(link)
+                return
+            }
         }
         aoTocarPagina?()
     }
