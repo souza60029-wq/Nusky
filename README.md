@@ -1,6 +1,6 @@
 # Nusky
 
-Nuskyé um navegador para iPhone feito do zero. Ele não usa o motor de desenho do WebKit (o motor que o Safari usa): tem um motor próprio, escrito em Rust, que lê o HTML, aplica o CSS e desenha a página. A tela do app é feita em Swift e SwiftUI.
+Nusky é um navegador para iPhone feito do zero. Ele não usa o motor de desenho do WebKit (o motor que o Safari usa): tem um motor próprio, escrito em Rust, que lê o HTML, aplica o CSS e desenha a página. A tela do app é feita em Swift e SwiftUI.
 
 Versão atual: **0.0.5**
 
