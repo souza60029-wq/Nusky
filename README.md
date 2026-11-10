@@ -1,90 +1,64 @@
 # Nusky
 
-Navegador para iPhone feito do zero. Ele não usa o motor de desenho do WebKit (o motor que o Safari usa): tem um motor próprio, escrito em Rust, que lê o HTML, aplica o CSS, calcula a posição de cada coisa e desenha a página. A tela do app é feita em Swift e SwiftUI.
+Navegador para iPhone feito do zero. Ele não usa o motor de desenho do WebKit (o motor que o Safari usa): tem um motor próprio, escrito em Rust, que lê o HTML, aplica o CSS e desenha a página. A tela do app é feita em Swift e SwiftUI.
 
-## Objetivo
+Versão atual: **0.0.5**
 
-Abrir páginas com velocidade e pouco uso de memória em aparelhos antigos, começando pelo iPhone 6s (chip A9, 2 GB de RAM, iOS 15.8.8). O app é instalado com TrollStore. As prioridades são otimização, pouca memória, design e estabilidade.
+## Instalação
 
-## O que funciona hoje (versão 0.0.4)
+1. Tenha um iPhone com iOS 15 ou mais novo e o [TrollStore](https://github.com/opa334/TrollStore) instalado.
+2. Baixe o arquivo `Nusky-unsigned.ipa` na página de [versões](https://github.com/souza60029-wq/Nusky/releases) do repositório.
+3. Abra o arquivo no TrollStore e instale.
 
-**Páginas**
+Testado no iPhone 6s com iOS 15.8.8.
 
-- Abrir endereços http e https, com links clicáveis. Digitar o nome de um site (a busca roda numa lista que fica no aparelho, tolera erro de digitação e não envia o que foi pesquisado).
-- HTML: parágrafos, títulos, listas, tabelas, links, quebra de linha (`<br>`) e entidades.
-- CSS lido de `<style>`, folhas externas e atributos `style`, `id` e `class`: tamanho, negrito, margens, preenchimento (padding), cor, cor de fundo, bordas, cantos arredondados, `text-align`, `display` (bloco, linha, flex), `flex-direction`, `gap`, `justify-content`, `width` e `height` (valores absolutos) e propriedades personalizadas (`--cor`, `var()`), com as classes reais do `<html>`.
-- Caixas de fundo e cor de fundo da página. Flex em linha e em coluna; três ou mais filhos que não cabem lado a lado empilham.
-- **Imagens (novo):** `<img>` baixa e desenha PNG, JPEG, GIF e WebP, inclusive `data:` e atributos de carregamento preguiçoso. A imagem é reduzida ao decodificar para gastar pouca memória. O espaço é reservado pelos atributos `width` e `height`, pelo CSS ou, sem eles, pelo tamanho natural da imagem. SVG ainda não é desenhado.
-- **JavaScript:** o JavaScriptCore roda os scripts da página sobre um DOM próprio (árvore, seletores, eventos, temporizadores, `fetch`, armazenamento) e devolve o HTML final ao motor. Há limite de 6 segundos.
-- Medição de texto feita pelo CoreText do próprio aparelho. O desenho é feito em blocos, só do que aparece na tela.
+## Atualização
 
-**App**
+Em **Ajustes > Sobre** há duas opções, e nada é verificado sozinho:
 
-- **Barra nova (0.0.4):** uma pílula com o site. Ao tocar nela (área de toque maior que a pílula), ela se expande com mola, e a barra de ferramentas sai de trás dela ligada por um "chiclete" que estica. A barra fica sobre um fundo desfocado. Ela recolhe sozinha ao rolar a página, tocar na página, abrir uma ferramenta ou enviar um endereço, e só volta a abrir com um toque.
-- Ao tocar no campo de endereço, o teclado sobe com o endereço todo selecionado: quem começa a digitar apaga o antigo. Enquanto digita, as ferramentas se guardam para dar espaço aos resultados.
-- No campo de endereço fica só o botão de recarregar. As ferramentas são voltar, avançar (quando houver), abas, biblioteca, compartilhar e ajustes.
-- Abas em grade, com fechar, nova aba e seleção para apagar em lote. Histórico por aba, com voltar e avançar, e a rolagem de cada site é guardada.
-- **Biblioteca (novo):** favoritos e histórico de visitas, só no aparelho.
-- **Compartilhar (novo):** a folha de compartilhamento do iOS.
-- **Ajustes (novo):** tela com fundo desfocado e tópicos: Aparência, Navegação, Desempenho, Privacidade, Endereços e Sobre. A cor do texto segue a claridade do que está atrás: fundo escuro, texto branco; fundo claro, texto preto.
-  - Aparência: tema automático ou noturno e barra em cima ou embaixo.
-  - Navegação: versão desktop, mostrar imagens, executar JavaScript.
-  - Desempenho: diagnóstico da página atual.
-  - Privacidade: limpar histórico de visitas, cookies, cache e imagens guardadas.
-  - Endereços: atualização manual da lista de sites, com confirmação.
-- Diagnóstico embutido: mede a página, o JavaScript depois dos scripts e a memória, e gera um relatório de texto.
-- Ícone novo.
+- **Atualizar só a lista de sites**: baixa a lista nova e aplica depois da sua confirmação.
+- **Atualizar o app (inclui a lista)**: procura a última versão publicada no GitHub e entrega o arquivo ao TrollStore. A lista de sites é atualizada junto.
 
-## Limitações conhecidas
+## O que o Nusky faz
 
-- Nem todo site abre: o Nusky não é um navegador completo. Cada site precisa ser provado no aparelho.
-- Sem SVG, ícones vetoriais, campos de formulário desenhados, `position`, fontes próprias do site e fundo atrás de texto no meio da linha.
-- Fileiras que rolam de lado viram uma lista vertical.
-- `width` e `height` só valem para imagens, e só em valores absolutos.
-- O JavaScript de páginas grandes usa centenas de MB e pode estourar o limite de 6 segundos.
-- Sem bloqueio de anúncios.
-- Anonimato não é prometido: o modo anônimo só será feito depois de medido.
+- Abre sites http e https, com links clicáveis, tabelas, imagens (PNG, JPEG, GIF e WebP) e as cores, fundos, bordas e disposições (flex) que a página define.
+- Executa o JavaScript das páginas, por até 6 segundos, para sites que montam a página no aparelho. Sites muito pesados podem abrir incompletos.
+- Encontra sites pelo nome. A busca roda numa lista que fica no aparelho, aceita erro de digitação e não envia o que você pesquisa.
+- Abas em cartões grandes, com miniatura da página, como a tela de apps recentes do iOS.
+- Favoritos e histórico, com o ícone de cada site.
+- Compartilhar, recarregar, voltar e avançar.
+- Barra de endereço que fica fina, do tamanho da barra de status, e se abre com um toque. Ao tocar no campo, o endereço fica todo selecionado.
+- Diagnóstico da página aberta, com relatório de texto para copiar.
 
-## Roadmap
+## Ajustes
 
-- 0.0.5: ChatGPT, Claude (login e carregamento) e Discord.
-- 0.0.6: GitHub, YouTube e Pinterest.
-- 0.1.0: sites principais abrindo, validados no aparelho; acabamento visual.
-- Regras específicas por site em `dados/fixes.json`, com scripts externos e limite de tempo medido no iPhone 6s.
-- Metal para desenhar, somente se a medição mostrar rolagem travando.
-- Lista de sites maior, atalhos aprendidos só no aparelho e economia de memória nas abas paradas.
+- **Aparência:** tema automático ou noturno, forçar modo noturno nos sites (escurece páginas claras), barra em cima ou embaixo e efeito de desfoque.
+- **Toque:** feedback luminoso, expansivo e tátil, cada um liga e desliga sozinho, com intensidade Leve, Padrão ou Extravagante.
+- **Navegação:** versão desktop, mostrar imagens e executar JavaScript.
+- **Privacidade:** limpar histórico, cookies e cache.
+- **Sobre:** versão, lista de sites, atualizações, repositório do projeto, diagnóstico e termos de uso.
 
-As regras do motor são gerais. Nada de nome de site ou de framework no código do motor: o que for específico de um site vai em `dados/`.
+As opções que podem pesar no desempenho trazem a etiqueta **Desempenho**.
 
-## Estrutura
+## Privacidade
 
-- `engine/`: motor em Rust (HTML, CSS, layout e ponte para a casca).
-- `app/Nusky/`: casca em Swift e SwiftUI (barra, ajustes, abas, biblioteca, imagens, JavaScript e download).
-- `dados/`: lista de sites para a busca por nome.
-- `testes/`: páginas usadas para testar recursos no aparelho.
-- `.github/workflows/`: builds automáticos no GitHub Actions.
-- `project.yml`: configuração do projeto Xcode, gerada com XcodeGen.
+Histórico, favoritos, pesquisas, miniaturas das abas, cookies e sessões ficam só no aparelho. O Nusky não tem conta, cadastro nem servidor próprio. Os sites que você abre, as imagens e os ícones são pedidos ao próprio site, e as atualizações são pedidas ao GitHub. Os termos de uso completos aparecem na primeira abertura e em Ajustes > Sobre.
 
-## Como verificar
+## Limitações
+
+- O Nusky ainda não é um navegador completo: nem todo site abre, e cada um precisa ser testado no aparelho.
+- Não desenha SVG, campos de formulário, fontes próprias dos sites nem fileiras que rolam de lado (viram uma lista vertical).
+- O JavaScript de páginas grandes usa bastante memória e pode ser cortado nos 6 segundos.
+
+## Para quem quer compilar
 
 - Testes do motor: `cargo test --manifest-path engine/Cargo.toml`
-- Build do app: o workflow `ios` gera o arquivo `Nusky-unsigned.ipa`, que pode ser instalado com TrollStore.
+- O workflow `iOS` do GitHub Actions gera o `Nusky-unsigned.ipa`. Ao criar uma tag no formato `v0.0.5`, ele publica o arquivo nas versões do repositório.
 
-## Documentação
-
-Detalhes de arquitetura estão em `ARCHITECTURE.md`.
-
-## Versionamento
-
-A versão sobe em marcos validados no iPhone. As três versões (`engine/Cargo.toml` e `project.yml`, com o build) sobem juntas, num commit só. A versão atual é 0.0.4.
-
-## Plataforma de teste
-
-- iPhone 6s, iOS 15.8.8
-- TrollStore 2.1.1, com JIT habilitado
+Mais detalhes de arquitetura estão em `ARCHITECTURE.md`.
 
 ## Licença
 
-Este projeto é distribuído sob a Mozilla Public License 2.0. Veja o arquivo `LICENSE`.
+Mozilla Public License 2.0. Veja o arquivo `LICENSE`.
 
 Copyright (c) 2026 S7y1_e
