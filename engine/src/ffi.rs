@@ -200,15 +200,25 @@ pub extern "C" fn nusky_render_imagens(
     }
     for cmd in saida.comandos {
         match cmd {
-            DrawCommand::Text { x, y, text, font_size, bold, href, color } => {
+            DrawCommand::Text { x, y, text, font_size, bold, href, color, italic, serif, fundo } => {
+                // Estilo: `i` itálico, `s` serifa. Vazio quando não há nenhum dos dois.
+                let mut estilo = String::new();
+                if italic {
+                    estilo.push('i');
+                }
+                if serif {
+                    estilo.push('s');
+                }
                 out.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     x,
                     y,
                     font_size,
                     bold as u8,
                     sanitize(href.as_deref().unwrap_or("")),
                     formatar_cor(color),
+                    estilo,
+                    formatar_cor(fundo),
                     sanitize(&text),
                 ));
             }
@@ -499,19 +509,19 @@ mod tests {
 
     #[test]
     fn render_returns_tab_separated_lines() {
-        assert_eq!(render_with("<p>oi</p>", None), "8\t24\t16\t0\t\t\toi\n");
+        assert_eq!(render_with("<p>oi</p>", None), "8\t24\t16\t0\t\t\t\t\toi\n");
     }
 
     #[test]
     fn render_includes_link_target() {
-        assert_eq!(render_with(r#"<a href="/x">oi</a>"#, None), "8\t8\t16\t0\t/x\t\toi\n");
+        assert_eq!(render_with(r#"<a href="/x">oi</a>"#, None), "8\t8\t16\t0\t/x\t\t\t\toi\n");
     }
 
     #[test]
     fn render_includes_css_color() {
         assert_eq!(
             render_with(r#"<p style="color: red">oi</p>"#, None),
-            "8\t24\t16\t0\t\t255,0,0\toi\n"
+            "8\t24\t16\t0\t\t255,0,0\t\t\toi\n"
         );
     }
 
@@ -524,7 +534,7 @@ mod tests {
 
     #[test]
     fn entities_are_decoded_in_output() {
-        assert_eq!(render_with("<p>a &amp; b</p>", None), "8\t24\t16\t0\t\t\ta & b\n");
+        assert_eq!(render_with("<p>a &amp; b</p>", None), "8\t24\t16\t0\t\t\t\t\ta & b\n");
     }
 
     #[test]
@@ -574,6 +584,15 @@ mod tests {
         assert!(saida.contains("R\t8\t8\t384\t"));
         assert!(saida.contains("\t16,32,48\t"));
         assert!(saida.ends_with("oi\n"));
+    }
+
+    #[test]
+    fn render_envia_italico_serifa_e_fundo_do_texto() {
+        let saida = render_with(
+            "<style>.d{font-style:italic;font-family:Georgia;background-color:#102030}</style><span class=d>oi</span>",
+            None,
+        );
+        assert_eq!(saida, "8\t8\t16\t0\t\t\tis\t16,32,48\toi\n");
     }
 
     #[test]

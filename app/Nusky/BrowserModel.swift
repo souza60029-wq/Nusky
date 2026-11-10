@@ -274,7 +274,12 @@ final class BrowserModel: ObservableObject {
             // Roda os scripts da página (se houver) e pega o HTML já alterado por eles.
             // Qualquer falha devolve o HTML original, então a página sempre abre.
             progresso = 0.93
-            let rodado = await JSRodador.processar(html: comCSS, pagina: finalURL, largura: Int(textWidth))
+            let rodado = await JSRodador.processar(
+                html: comCSS,
+                pagina: finalURL,
+                largura: Int(textWidth),
+                escuro: Aparencia.sitesEmModoEscuro()
+            )
             ultimoRelatorioJS = rodado.relatorio
             let completo = rodado.html
             guard !Task.isCancelled else { return }
@@ -343,7 +348,12 @@ final class BrowserModel: ObservableObject {
         }.value
     }
 
-    private func aplicar(_ desenhada: PaginaDesenhada) {
+    private func aplicar(_ original: PaginaDesenhada) {
+        // "Forçar modo noturno": escurece páginas claras. Páginas que já são escuras não mudam.
+        var desenhada = original
+        if UserDefaults.standard.bool(forKey: ChavesTema.forcarNoturno) {
+            desenhada = ModoNoturnoForcado.aplicar(original)
+        }
         let novosItens = desenhada.itens
         items = novosItens
         fundos = desenhada.fundos

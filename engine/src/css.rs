@@ -79,6 +79,10 @@ pub struct Estilo {
     pub largura: Option<f32>,
     /// `height` em pontos, com a mesma regra de `largura`.
     pub altura: Option<f32>,
+    /// `font-style: italic` (ou oblique).
+    pub italico: Option<bool>,
+    /// A primeira fonte reconhecida da lista de `font-family` tem serifa (Georgia, Times, `serif`).
+    pub serifa: Option<bool>,
 }
 
 /// Regra que o motor não aplicou, com o motivo.
@@ -174,6 +178,29 @@ impl Folha {
     pub fn nomes_atributos(&self) -> &[String] {
         &self.nomes_atributos
     }
+}
+
+/// Diz se a lista de `font-family` pede uma fonte com serifa. Vale a primeira fonte conhecida;
+/// nomes que o motor não conhece (fontes próprias do site) são pulados.
+/// Devolve None quando nenhuma fonte da lista é conhecida.
+fn familia_com_serifa(valor: &str) -> Option<bool> {
+    const COM_SERIFA: [&str; 9] = [
+        "serif", "ui-serif", "georgia", "times", "times new roman", "cambria", "palatino", "garamond", "baskerville",
+    ];
+    const SEM_SERIFA: [&str; 11] = [
+        "sans-serif", "ui-sans-serif", "system-ui", "-apple-system", "helvetica", "helvetica neue", "arial", "inter",
+        "roboto", "verdana", "ui-monospace",
+    ];
+    for parte in valor.split(',') {
+        let nome = parte.trim().trim_matches(|c| c == '"' || c == '\'').trim().to_ascii_lowercase();
+        if COM_SERIFA.contains(&nome.as_str()) {
+            return Some(true);
+        }
+        if SEM_SERIFA.contains(&nome.as_str()) {
+            return Some(false);
+        }
+    }
+    None
 }
 
 /// Estilo de um elemento sem pais nem irmãos.
@@ -317,6 +344,8 @@ struct Decl {
     raio: Option<f32>,
     largura: Option<f32>,
     altura: Option<f32>,
+    italico: Option<bool>,
+    serifa: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -589,6 +618,17 @@ fn declaracoes_com(texto: &str, vars: &HashMap<String, String>) -> Decl {
                 if let Some(v) = comprimento(valor) {
                     d.tamanho = Some(v);
                 }
+            }
+            "font-style" => {
+                let v = valor.trim().to_ascii_lowercase();
+                if v == "italic" || v.starts_with("oblique") {
+                    d.italico = Some(true);
+                } else if v == "normal" {
+                    d.italico = Some(false);
+                }
+            }
+            "font-family" => {
+                d.serifa = familia_com_serifa(valor);
             }
             "font-weight" => {
                 if let Some(v) = peso(valor) {
@@ -881,6 +921,12 @@ fn aplica(dst: &mut Decl, src: &Decl) {
     if src.altura.is_some() {
         dst.altura = src.altura;
     }
+    if src.italico.is_some() {
+        dst.italico = src.italico;
+    }
+    if src.serifa.is_some() {
+        dst.serifa = src.serifa;
+    }
 }
 
 fn para_estilo(d: Decl) -> Estilo {
@@ -907,6 +953,8 @@ fn para_estilo(d: Decl) -> Estilo {
         raio: d.raio,
         largura: d.largura,
         altura: d.altura,
+        italico: d.italico,
+        serifa: d.serifa,
     }
 }
 
@@ -1825,6 +1873,19 @@ mod testes {
     }
 
     #[test]
+    fn italico_e_serifa() {
+        let f = Folha::parse(".a{font-style:italic;font-family:\"Foo\", Georgia, serif}.b{font-family:Inter, Georgia}.c{font-style:normal}");
+        let a = estilo_para(&f, "p", "", &["a".to_string()], None);
+        assert_eq!(a.italico, Some(true));
+        assert_eq!(a.serifa, Some(true));
+        let b = estilo_para(&f, "p", "", &["b".to_string()], None);
+        assert_eq!(b.serifa, Some(false));
+        let c = estilo_para(&f, "p", "", &["c".to_string()], None);
+        assert_eq!(c.italico, Some(false));
+        assert_eq!(c.serifa, None);
+    }
+
+    #[test]
     fn largura_e_altura_em_valores_absolutos() {
         let f = Folha::parse(".a{width:2rem;height:10px}.b{width:100%;height:auto}");
         let a = estilo_para(&f, "img", "", &["a".to_string()], None);
@@ -2095,3 +2156,4 @@ mod testes {
         assert!(regras_casadas(&f, &alvo, &[], &[]).is_empty());
     }
 }
+

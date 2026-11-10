@@ -38,6 +38,12 @@ pub enum DrawCommand {
         href: Option<String>,
         /// Cor definida pelo CSS da página, em r, g, b. None quando a página não definiu cor.
         color: Option<[u8; 3]>,
+        /// `font-style: italic`.
+        italic: bool,
+        /// Fonte com serifa (Georgia, Times, `serif`).
+        serif: bool,
+        /// Cor de fundo atrás do texto (destaque), em r, g, b.
+        fundo: Option<[u8; 3]>,
     },
 }
 
@@ -110,6 +116,11 @@ struct Style {
     color: Option<[u8; 3]>,
     /// `text-align`: 0 esquerda, 1 centro, 2 direita. Herdado.
     align: u8,
+    /// Itálico e serifa são herdados.
+    italic: bool,
+    serif: bool,
+    /// Fundo atrás do texto de um elemento em linha (destaque). Não vale para blocos.
+    fundo: Option<[u8; 3]>,
 }
 
 /// Elementos que começam um novo bloco. Os demais são inline.
@@ -147,14 +158,14 @@ fn is_row_group(tag: &str) -> bool {
 /// Estilo padrão por tag. Valores em pontos. Sem cor: a cor vem do pai ou do CSS.
 fn style_for(tag: &str) -> Style {
     match tag {
-        "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0, color: None, align: 0 },
-        "h2" => Style { font_size: 24.0, bold: true, margin_top: 19.0, margin_bottom: 19.0, color: None, align: 0 },
-        "h3" => Style { font_size: 18.7, bold: true, margin_top: 18.0, margin_bottom: 18.0, color: None, align: 0 },
+        "h1" => Style { font_size: 32.0, bold: true, margin_top: 21.0, margin_bottom: 21.0, color: None, align: 0, italic: false, serif: false, fundo: None },
+        "h2" => Style { font_size: 24.0, bold: true, margin_top: 19.0, margin_bottom: 19.0, color: None, align: 0, italic: false, serif: false, fundo: None },
+        "h3" => Style { font_size: 18.7, bold: true, margin_top: 18.0, margin_bottom: 18.0, color: None, align: 0, italic: false, serif: false, fundo: None },
         "h4" | "h5" | "h6" => {
-            Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0, color: None, align: 0 }
+            Style { font_size: BASE_FONT, bold: true, margin_top: 16.0, margin_bottom: 16.0, color: None, align: 0, italic: false, serif: false, fundo: None }
         }
-        "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0, color: None, align: 0 },
-        _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0, color: None, align: 0 },
+        "p" => Style { font_size: BASE_FONT, bold: false, margin_top: 16.0, margin_bottom: 16.0, color: None, align: 0, italic: false, serif: false, fundo: None },
+        _ => Style { font_size: BASE_FONT, bold: false, margin_top: 0.0, margin_bottom: 0.0, color: None, align: 0, italic: false, serif: false, fundo: None },
     }
 }
 
@@ -172,7 +183,22 @@ fn aplicar(base: Style, css: &Estilo) -> Style {
         margin_bottom: css.margem_base.unwrap_or(base.margin_bottom),
         color: cor_do_css(css.cor).or(base.color),
         align: css.alinhamento.unwrap_or(base.align),
+        italic: css.italico.unwrap_or(base.italic),
+        serif: css.serifa.unwrap_or(base.serif),
+        fundo: css.fundo.map(|(r, g, b)| [r, g, b]).or(base.fundo),
     }
+}
+
+/// Aparência de um trecho de texto além da cor: itálico, serifa e fundo de destaque.
+#[derive(Clone, Copy, PartialEq, Default)]
+struct Fx {
+    italic: bool,
+    serif: bool,
+    fundo: Option<[u8; 3]>,
+}
+
+fn fx_do_estilo(style: &Style) -> Fx {
+    Fx { italic: style.italic, serif: style.serif, fundo: style.fundo }
 }
 
 /// Trecho de texto com o link e a cor ao qual pertence.
@@ -182,6 +208,7 @@ struct Span {
     text: String,
     href: Option<String>,
     color: Option<[u8; 3]>,
+    fx: Fx,
 }
 
 struct Ctx<'a> {
@@ -310,6 +337,9 @@ pub fn layout_com_imagens(
         margin_bottom: 0.0,
         color: None,
         align: 0,
+        italic: false,
+        serif: false,
+        fundo: None,
     };
     let mut buf: Vec<Span> = Vec::new();
     layout_children(nodes, root, None, &mut buf, &mut ctx);
@@ -420,6 +450,7 @@ fn layout_children(
                 text: t.clone(),
                 href: link.map(str::to_string),
                 color: style.color,
+                fx: fx_do_estilo(&style),
             }),
             Node::Element(el) => {
                 let info = info_do_elemento(el, ctx.folha.nomes_atributos());
@@ -465,6 +496,7 @@ fn tratar_elemento(
             text: QUEBRA.to_string(),
             href: link.map(str::to_string),
             color: style.color,
+            fx: Fx::default(),
         });
         return info;
     }
@@ -507,10 +539,12 @@ fn tratar_elemento(
     if eh_bloco {
         flush_inline(buf, style, ctx);
         // Bloco herda a cor e o alinhamento do pai; tamanho e margens vêm da própria tag.
-        let block = aplicar(
-            Style { color: style.color, align: style.align, ..style_for(&el.tag) },
+        let mut block = aplicar(
+            Style { color: style.color, align: style.align, italic: style.italic, serif: style.serif, ..style_for(&el.tag) },
             &css,
         );
+        // O fundo do bloco é a caixa (`Fundo`); só elementos em linha pintam atrás do texto.
+        block.fundo = None;
         ctx.y += block.margin_top;
 
         // Caixa do bloco: preenchimento (padding) e borda diminuem a área do conteúdo.
@@ -529,10 +563,27 @@ fn tratar_elemento(
                 ctx.fundo_pagina = Some([r, g, b]);
             }
         }
-        let indice_fundo = if eh_raiz { None } else { reservar_fundo(ctx, topo_caixa, &css) };
+        let indice_fundo = if eh_raiz {
+            None
+        } else {
+            let w_original = ctx.width;
+            if let Some(w) = css.largura {
+                if w > 0.0 && w < w_original {
+                    ctx.width = w;
+                }
+            }
+            let indice = reservar_fundo(ctx, topo_caixa, &css);
+            ctx.width = w_original;
+            indice
+        };
 
+        // `width` fixo em pontos deixa o bloco mais estreito que a coluna (nunca mais largo).
+        let largura_caixa = match css.largura {
+            Some(w) if w > 0.0 && w < largura_antes => w,
+            _ => largura_antes,
+        };
         ctx.x0 = x_antes + pad_esq + borda_l;
-        ctx.width = (largura_antes - pad_esq - pad_dir - 2.0 * borda_l).max(0.0);
+        ctx.width = (largura_caixa - pad_esq - pad_dir - 2.0 * borda_l).max(0.0);
         ctx.y += pad_topo + borda_l;
 
         ctx.pais.push(info);
@@ -550,6 +601,12 @@ fn tratar_elemento(
         flush_inline(buf, block, ctx);
 
         ctx.y += pad_base + borda_l;
+        // `height` fixo em pontos vale como altura mínima da caixa.
+        if let Some(h) = css.altura {
+            if h > 0.0 && ctx.y - topo_caixa < h {
+                ctx.y = topo_caixa + h;
+            }
+        }
         ctx.x0 = x_antes;
         ctx.width = largura_antes;
         fechar_fundo(ctx, indice_fundo, topo_caixa);
@@ -770,10 +827,16 @@ fn layout_flex_linha(
         let css_f = estilo_do_elemento(filho, &info, irmaos_f, ultimo, ctx);
         if !SKIP_TAGS.contains(&filho.tag.as_str()) && !css_f.oculto {
             let estilo_f = aplicar(
-                Style { color: style.color, align: style.align, ..style_for(&filho.tag) },
+                Style { color: style.color, align: style.align, italic: style.italic, serif: style.serif, ..style_for(&filho.tag) },
                 &css_f,
             );
-            let (minimo, ideal, vazia) = medir_celula(filho, estilo_f, ctx);
+            let (mut minimo, mut ideal, mut vazia) = medir_celula(filho, estilo_f, ctx);
+            // `width` fixo em pontos manda no tamanho do item, mesmo sem texto (ícones, avatares).
+            if let Some(w) = css_f.largura.filter(|w| *w > 0.0) {
+                minimo = w;
+                ideal = w - 1.0;
+                vazia = false;
+            }
             if !vazia {
                 let extra = css_f.pad_esq.unwrap_or(0.0).max(0.0)
                     + css_f.pad_dir.unwrap_or(0.0).max(0.0)
@@ -1170,7 +1233,7 @@ fn split_words(chunks: &[Span]) -> Vec<Span> {
         for ch in chunk.text.chars() {
             if ch == '\u{1}' {
                 words.extend(cur.take());
-                words.push(Span { text: QUEBRA.to_string(), href: None, color: None });
+                words.push(Span { text: QUEBRA.to_string(), href: None, color: None, fx: Fx::default() });
             } else if ch.is_whitespace() {
                 words.extend(cur.take());
             } else {
@@ -1178,6 +1241,7 @@ fn split_words(chunks: &[Span]) -> Vec<Span> {
                     text: String::new(),
                     href: chunk.href.clone(),
                     color: chunk.color,
+                    fx: chunk.fx,
                 })
                 .text
                 .push(ch);
@@ -1238,7 +1302,7 @@ fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
         }
         let continues = runs
             .last()
-            .map_or(false, |r| r.href == word.href && r.color == word.color);
+            .map_or(false, |r| r.href == word.href && r.color == word.color && r.fx == word.fx);
         if continues {
             if let Some(last) = runs.last_mut() {
                 last.text.push_str(&word.text);
@@ -1248,6 +1312,7 @@ fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
                 text: word.text.clone(),
                 href: word.href.clone(),
                 color: word.color,
+                fx: word.fx,
             });
         }
     }
@@ -1272,6 +1337,9 @@ fn emit_line(line: &[Span], style: Style, line_h: f32, ctx: &mut Ctx<'_>) {
             bold: style.bold,
             href: run.href,
             color: run.color,
+            italic: run.fx.italic,
+            serif: run.fx.serif,
+            fundo: run.fx.fundo,
         });
         x += w;
     }
@@ -1315,6 +1383,9 @@ mod tests {
                 bold: false,
                 href: None,
                 color: None,
+                italic: false,
+                serif: false,
+                fundo: None,
             }]
         );
     }

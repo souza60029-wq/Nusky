@@ -609,7 +609,8 @@ enum DiagnosticoJS {
         }
 
         let inicio = CFAbsoluteTimeGetCurrent()
-        let rodado = await JSRodador.processar(html: html, pagina: base, largura: Int(largura))
+        let escuro = await MainActor.run { Aparencia.sitesEmModoEscuro() }
+        let rodado = await JSRodador.processar(html: html, pagina: base, largura: Int(largura), escuro: escuro)
         let tempoTotal = CFAbsoluteTimeGetCurrent() - inicio
 
         guard let r = rodado.relatorio else {
@@ -757,30 +758,33 @@ struct PainelEtapas: View {
 /// Texto do relatório em UITextView, rolável e selecionável.
 struct RelatorioTexto: UIViewRepresentable {
     let texto: String
+    let escuro: Bool
 
     func makeUIView(context: Context) -> UITextView {
         let visao = UITextView()
         visao.isEditable = false
         visao.isSelectable = true
         visao.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        visao.backgroundColor = UIColor.secondarySystemBackground
-        visao.layer.cornerRadius = 10
-        visao.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
+        visao.backgroundColor = .clear
+        visao.textContainerInset = UIEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
         return visao
     }
 
     func updateUIView(_ visao: UITextView, context: Context) {
+        visao.textColor = escuro ? UIColor.white : UIColor.black
         if visao.text != texto {
             visao.text = texto
         }
     }
 }
 
+/// Relatório de diagnóstico da página aberta. Vai dentro de um `PainelVidro`.
 struct DiagnosticoView: View {
     /// Nil quando nenhuma página está aberta (por exemplo, a tela inicial).
     let url: URL?
     @StateObject private var modelo = DiagnosticoModel()
     @State private var copiado = false
+    @Environment(\.colorScheme) private var esquema
 
     init(url: URL?) {
         self.url = url
@@ -788,38 +792,53 @@ struct DiagnosticoView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            PainelEtapas(atual: modelo.atual, concluidas: modelo.concluidas)
-
-            Text("Quadrado verde: etapa concluída. Símbolo pulsando: etapa em andamento.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                PainelEtapas(atual: modelo.atual, concluidas: modelo.concluidas)
+                Text("Quadrado verde: etapa concluída. Símbolo pulsando: etapa em andamento.")
+                    .font(.system(size: 12))
+                    .opacity(0.6)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.09)))
 
             if url == nil {
                 Text("Nenhuma página aberta. Abra um site e volte para cá.")
-                    .font(.callout)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 15))
+                    .opacity(0.7)
             }
 
             if let erro = modelo.erro {
                 Text(erro)
-                    .font(.callout)
+                    .font(.system(size: 15))
                     .foregroundColor(.red)
             }
 
-            RelatorioTexto(texto: modelo.texto)
+            RelatorioTexto(texto: modelo.texto, escuro: esquema == .dark)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.09)))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-            Button(copiado ? "Relatório copiado" : "Copiar relatório") {
+            Button {
                 UIPasteboard.general.string = modelo.texto
                 copiado = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: copiado ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(copiado ? "Relatório copiado" : "Copiar relatório")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .contentShape(Capsule())
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(EstiloToque(forma: .capsula))
             .disabled(modelo.texto.isEmpty)
-            .frame(maxWidth: .infinity)
+            .opacity(modelo.texto.isEmpty ? 0.5 : 1)
         }
-        .padding()
-        .navigationTitle("Diagnóstico")
-        .navigationBarTitleDisplayMode(.inline)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 24)
         .onAppear {
             if let url {
                 modelo.iniciar(url: url)

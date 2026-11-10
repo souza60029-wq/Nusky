@@ -947,7 +947,7 @@ enum AmbienteJS {
       var extra = '';
       if (e && e.line) {
         var c = e.column || 0, l = codigo.split('\n')[e.line - 1] || '';
-        extra = ' [linha ' + e.line + ', coluna ' + c + '] trecho: ' + l.slice(Math.max(0, c - 70), c + 70);
+        extra = ' [linha ' + e.line + ', coluna ' + c + ', o script tem ' + codigo.split('\n').length + ' linhas e ' + codigo.length + ' caracteres] trecho: ' + l.slice(Math.max(0, c - 70), c + 70);
       }
       erro(origem + ': ' + (e && e.message ? e.message : e) + extra);
     }

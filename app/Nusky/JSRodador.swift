@@ -45,13 +45,14 @@ final class JSRodador: @unchecked Sendable {
         html: String,
         pagina: URL,
         largura: Int,
+        escuro: Bool = false,
         limite: TimeInterval = limitePadrao
     ) async -> (html: String, relatorio: Relatorio?) {
         guard ativo, temScript(html) else { return (html, nil) }
         guard let arvore = Engine.arvore(html: html) else { return (html, nil) }
 
         let resultado: Resultado = await withCheckedContinuation { cont in
-            let rodador = JSRodador(pagina: pagina, largura: largura, limite: limite, continuacao: cont)
+            let rodador = JSRodador(pagina: pagina, largura: largura, escuro: escuro, limite: limite, continuacao: cont)
             rodador.comecar(arvore: arvore)
         }
 
@@ -79,6 +80,8 @@ final class JSRodador: @unchecked Sendable {
     private let fila = DispatchQueue(label: "nusky.javascript", qos: .userInitiated)
     private let pagina: URL
     private let largura: Int
+    /// O tema escuro vale para os sites que escolhem as cores por `prefers-color-scheme`.
+    private let escuro: Bool
     private let limite: TimeInterval
     private let inicio = CFAbsoluteTimeGetCurrent()
     private let sessao = URLSession(configuration: .ephemeral)
@@ -91,9 +94,10 @@ final class JSRodador: @unchecked Sendable {
     private let trava = NSLock()
     private var continuacao: CheckedContinuation<Resultado, Never>?
 
-    private init(pagina: URL, largura: Int, limite: TimeInterval, continuacao: CheckedContinuation<Resultado, Never>) {
+    private init(pagina: URL, largura: Int, escuro: Bool, limite: TimeInterval, continuacao: CheckedContinuation<Resultado, Never>) {
         self.pagina = pagina
         self.largura = largura
+        self.escuro = escuro
         self.limite = limite
         self.continuacao = continuacao
     }
@@ -139,7 +143,7 @@ final class JSRodador: @unchecked Sendable {
             "largura": desktop ? 1280 : largura,
             "altura": desktop ? 800 : 812,
             "escala": 2,
-            "escuro": false
+            "escuro": escuro
         ]
         ctx.setObject(dados, forKeyedSubscript: "__pagina" as NSString)
 

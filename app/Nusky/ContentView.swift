@@ -2,12 +2,22 @@
 import SwiftUI
 import UIKit
 
+/// Menus que cobrem a página com o fundo desfocado.
+enum PainelAtivo {
+    case ajustes
+    case abas
+    case biblioteca
+    case diagnostico
+    case termos
+}
+
 struct ContentView: View {
     @StateObject private var model = BrowserModel()
 
     @AppStorage("nightMode") private var noturno = false
     @AppStorage("themeAuto") private var automatico = true
     @AppStorage("barAtBottom") private var barraEmbaixo = true
+    @AppStorage(ChavesTema.desfoque) private var desfoque = true
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
     @AppStorage(ChavesTermos.versaoAceita) private var versaoAceita = ""
     @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
@@ -21,18 +31,18 @@ struct ContentView: View {
     @State private var editando = false
     /// 0 = ferramentas guardadas dentro da barra; 1 = ferramentas abertas. Passa de 1 na mola, e o "chiclete" estica.
     @State private var gomo: CGFloat = 0
-    @State private var mostrarAjustes = false
-    @State private var mostrarAbas = false
-    @State private var mostrarBiblioteca = false
-    @State private var mostrarCompartilhar = false
+    @State private var painel: PainelAtivo? = nil
     @State private var versaoNaAbertura = false
     @State private var mostrarBoasVindas = false
+    @State private var controle = PaginaControle()
 
     // Medidas da barra
-    private let alturaReservada: CGFloat = 56   // espaço da barra e área de toque
-    private let alturaPilula: CGFloat = 44      // altura visível da barra de endereço
+    private let alturaReservada: CGFloat = 56   // área de toque da barra
+    private let alturaPilula: CGFloat = 44      // altura da barra de endereço aberta
+    private let alturaFina: CGFloat = 24        // altura da barra recolhida, como a barra de status
     private let alturaFerramentas: CGFloat = 48
     private let folgaPescoco: CGFloat = 18      // distância entre a barra e as ferramentas, com tudo aberto
+    private let espacoDaPagina: CGFloat = 36    // espaço que a página deixa para a barra recolhida
 
     // MARK: - Cores
 
@@ -44,7 +54,9 @@ struct ContentView: View {
         automatico ? sistema == .dark : noturno
     }
 
-    /// A claridade da página manda nas cores da barra: fundo escuro, texto branco; fundo claro, texto preto.
+    /// A claridade da página manda nas cores da barra e dos menus: fundo escuro, texto branco;
+    /// fundo claro, texto preto. Assim o desfoque nunca destoa do que está atrás, mesmo quando
+    /// a página não segue o modo do app.
     private var fundoEscuro: Bool {
         if let f = model.fundoPagina { return f.luminancia < 0.5 }
         return escuro
@@ -58,7 +70,8 @@ struct ContentView: View {
 
     private var textoCor: Color { fundoEscuro ? Color.white : Color.black }
     private var corPilula: Color { fundoEscuro ? Color(white: 0.2) : Color(white: 0.96) }
-    private var corBorda: Color { fundoEscuro ? Color.white.opacity(0.12) : Color.black.opacity(0.08) }
+    private var corBorda: Color { fundoEscuro ? Color.white.opacity(0.14) : Color.black.opacity(0.08) }
+    private var corSombra: Color { fundoEscuro ? Color.white.opacity(0.16) : Color.black.opacity(0.2) }
     private var larguraTela: CGFloat { UIScreen.main.bounds.width - 24 }
 
     /// Altura da barra de status (hora, bateria). No iPhone 6s é 20 pt.
@@ -77,19 +90,13 @@ struct ContentView: View {
             fundo.ignoresSafeArea()
             conteudo
             faixaDeBlur
-            if !mostrarAjustes {
+            if painel == nil {
                 grupoDaBarra
             }
-            if mostrarAjustes {
-                PainelAjustes(
-                    urlAtual: model.currentURL,
-                    fundoEscuro: fundoEscuro,
-                    aoFechar: {
-                        withAnimation(.easeInOut(duration: 0.25)) { mostrarAjustes = false }
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(10)
+            if let ativo = painel {
+                conteudoDoPainel(ativo)
+                    .transition(.opacity)
+                    .zIndex(10)
             }
         }
         // Faixa com a cor da página sob a barra de status, para o texto não passar por trás dela.
@@ -100,35 +107,6 @@ struct ContentView: View {
                 .allowsHitTesting(false)
         }
         .preferredColorScheme(esquemaPreferido)
-        .fullScreenCover(isPresented: $mostrarAbas) {
-            ListaAbas(
-                historico: model.historico,
-                onSelect: { id in
-                    model.selecionarAba(id)
-                    mostrarAbas = false
-                },
-                onNew: {
-                    model.novaAba()
-                    mostrarAbas = false
-                },
-                onDelete: { ids in
-                    model.fecharAbas(ids)
-                },
-                onClose: {
-                    mostrarAbas = false
-                }
-            )
-            .preferredColorScheme(esquemaPreferido)
-        }
-        .sheet(isPresented: $mostrarBiblioteca) {
-            BibliotecaView(urlAtual: model.currentURL, aoAbrir: { url in model.open(url: url) })
-                .preferredColorScheme(esquemaPreferido)
-        }
-        .sheet(isPresented: $mostrarCompartilhar) {
-            if let url = model.currentURL {
-                FolhaDeCompartilhar(itens: [url])
-            }
-        }
         // Boas-vindas e termos: aparecem na primeira abertura e quando a versão dos termos muda.
         .fullScreenCover(isPresented: $mostrarBoasVindas) {
             BoasVindas(aoAceitar: aceitarTermos)
@@ -141,14 +119,6 @@ struct ContentView: View {
         .onChange(of: scenePhase) { fase in
             if fase != .active { model.saveSession() }
         }
-        // Ao fechar Ajustes, recarrega a página só se a opção de versão desktop mudou.
-        .onChange(of: mostrarAjustes) { aberta in
-            if aberta {
-                versaoNaAbertura = versaoDesktop
-            } else if versaoDesktop != versaoNaAbertura {
-                model.reload()
-            }
-        }
         // Enquanto o campo tem o teclado, a lista de resultados acompanha o que está sendo digitado.
         .onChange(of: model.address) { texto in
             atualizarResultados(texto)
@@ -159,6 +129,88 @@ struct ContentView: View {
                 gomo = ativo ? 0 : (expandida ? 1 : 0)
             }
             if !ativo { fecharBusca() }
+        }
+    }
+
+    // MARK: - Menus
+
+    @ViewBuilder
+    private func conteudoDoPainel(_ ativo: PainelAtivo) -> some View {
+        switch ativo {
+        case .ajustes:
+            PainelAjustes(
+                fundoEscuro: fundoEscuro,
+                temPagina: model.currentURL != nil,
+                aoAbrirURL: { url in
+                    fecharPainel()
+                    model.open(url: url)
+                },
+                aoAbrirDiagnostico: { trocarPainel(.diagnostico) },
+                aoAbrirTermos: { trocarPainel(.termos) },
+                aoFechar: { fecharPainel() }
+            )
+        case .abas:
+            ListaAbas(
+                historico: model.historico,
+                fundoEscuro: fundoEscuro,
+                onSelect: { id in
+                    model.selecionarAba(id)
+                    fecharPainel()
+                },
+                onNew: {
+                    model.novaAba()
+                    fecharPainel()
+                },
+                onDelete: { ids in
+                    model.fecharAbas(ids)
+                    for id in ids { MiniaturasAbas.compartilhada.apagar(id) }
+                },
+                onClose: { fecharPainel() }
+            )
+        case .biblioteca:
+            BibliotecaView(
+                urlAtual: model.currentURL,
+                fundoEscuro: fundoEscuro,
+                aoAbrir: { url in model.open(url: url) },
+                aoFechar: { fecharPainel() }
+            )
+        case .diagnostico:
+            PainelVidro(titulo: "Diagnóstico", fundoEscuro: fundoEscuro, aoFechar: { trocarPainel(.ajustes) }) {
+                DiagnosticoView(url: model.currentURL)
+            }
+        case .termos:
+            PainelVidro(titulo: "Termos de uso", fundoEscuro: fundoEscuro, aoFechar: { trocarPainel(.ajustes) }) {
+                TermosDeUso()
+            }
+        }
+    }
+
+    private func abrirPainel(_ novo: PainelAtivo) {
+        if novo == .ajustes { versaoNaAbertura = versaoDesktop }
+        if novo == .abas { capturarMiniatura() }
+        recolher()
+        withAnimation(.easeInOut(duration: 0.25)) { painel = novo }
+    }
+
+    private func trocarPainel(_ novo: PainelAtivo) {
+        withAnimation(.easeInOut(duration: 0.25)) { painel = novo }
+    }
+
+    /// Fecha o menu. Se a opção de versão desktop mudou, recarrega a página.
+    private func fecharPainel() {
+        withAnimation(.easeInOut(duration: 0.25)) { painel = nil }
+        if versaoDesktop != versaoNaAbertura {
+            versaoNaAbertura = versaoDesktop
+            model.reload()
+        }
+    }
+
+    /// Guarda a miniatura da aba aberta, para a tela de abas.
+    private func capturarMiniatura() {
+        guard !model.items.isEmpty || !model.imagens.isEmpty else { return }
+        let tamanho = CGSize(width: UIScreen.main.bounds.width, height: 620)
+        if let imagem = controle.miniatura(tamanho: tamanho, fundo: UIColor(fundo)) {
+            MiniaturasAbas.compartilhada.guardar(imagem, para: model.historico.abaAtual.id)
         }
     }
 
@@ -215,9 +267,8 @@ struct ContentView: View {
     private var painelBusca: some View {
         if expandida, let s = model.sugestao {
             linhaSugestao(s)
-                .background(RoundedRectangle(cornerRadius: 18).fill(corPilula))
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 4)
+                .background(vidroRetangulo)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         } else if expandida && !model.resultados.isEmpty {
             ScrollView {
                 VStack(spacing: 0) {
@@ -227,27 +278,29 @@ struct ContentView: View {
                         } label: {
                             linhaResultado(r)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(EstiloToque(forma: .retangulo(0), comFundo: false))
                     }
                 }
             }
             .frame(maxHeight: 300)
-            .background(RoundedRectangle(cornerRadius: 18).fill(corPilula))
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 4)
+            .background(vidroRetangulo)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
     }
 
     private func linhaResultado(_ r: ResultadoBusca) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(r.titulo.isEmpty ? r.nome : "\(r.nome) · \(r.titulo)")
-                .font(.system(size: 16))
-                .foregroundColor(textoCor)
-                .lineLimit(1)
-            Text(r.endereco)
-                .font(.system(size: 12))
-                .foregroundColor(textoCor.opacity(0.5))
-                .lineLimit(1)
+        HStack(spacing: 12) {
+            IconeDoSite(host: URL(string: r.endereco)?.host ?? "", tamanho: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(r.titulo.isEmpty ? r.nome : "\(r.nome) · \(r.titulo)")
+                    .font(.system(size: 16))
+                    .foregroundColor(textoCor)
+                    .lineLimit(1)
+                Text(r.endereco)
+                    .font(.system(size: 12))
+                    .foregroundColor(textoCor.opacity(0.5))
+                    .lineLimit(1)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -268,7 +321,35 @@ struct ContentView: View {
                 .padding(.vertical, 12)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(EstiloToque(forma: .retangulo(0), comFundo: false))
+    }
+
+    /// Fundo de vidro (ou liso, sem desfoque) das caixas retangulares da barra.
+    private var vidroRetangulo: some View {
+        ZStack {
+            if desfoque {
+                RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 18, style: .continuous).fill(corPilula.opacity(0.35))
+            } else {
+                RoundedRectangle(cornerRadius: 18, style: .continuous).fill(corPilula)
+            }
+            RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(corBorda, lineWidth: 0.5)
+        }
+        .shadow(color: corSombra, radius: 8, x: 0, y: 3)
+    }
+
+    /// Fundo de vidro (ou liso, sem desfoque) das cápsulas da barra.
+    private var vidroCapsula: some View {
+        ZStack {
+            if desfoque {
+                Capsule().fill(.ultraThinMaterial)
+                Capsule().fill(corPilula.opacity(0.35))
+            } else {
+                Capsule().fill(corPilula)
+            }
+            Capsule().stroke(corBorda, lineWidth: 0.5)
+        }
+        .shadow(color: corSombra, radius: 8, x: 0, y: 3)
     }
 
     // MARK: - Página
@@ -292,14 +373,15 @@ struct ContentView: View {
                 },
                 aoComecarRolar: {
                     if expandida { recolher() }
-                }
+                },
+                controle: controle
             )
 
             if model.items.isEmpty && model.imagens.isEmpty {
                 telaVazia
             }
         }
-        .padding(barraEmbaixo ? .bottom : .top, alturaReservada)
+        .padding(barraEmbaixo ? .bottom : .top, espacoDaPagina)
     }
 
     /// Enquanto a página não está pronta: barra de progresso no centro, ou a mensagem de erro.
@@ -322,22 +404,25 @@ struct ContentView: View {
     // MARK: - Barra
 
     /// Desfoque atrás da barra aberta, com a borda de cima (ou de baixo) esmaecida.
+    @ViewBuilder
     private var faixaDeBlur: some View {
-        Rectangle()
-            .fill(.ultraThinMaterial)
-            .environment(\.colorScheme, fundoEscuro ? .dark : .light)
-            .frame(height: 230)
-            .mask(
-                LinearGradient(
-                    colors: [Color.clear, Color.black, Color.black],
-                    startPoint: barraEmbaixo ? .top : .bottom,
-                    endPoint: barraEmbaixo ? .bottom : .top
+        if desfoque {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .environment(\.colorScheme, fundoEscuro ? .dark : .light)
+                .frame(height: 230)
+                .mask(
+                    LinearGradient(
+                        colors: [Color.clear, Color.black, Color.black],
+                        startPoint: barraEmbaixo ? .top : .bottom,
+                        endPoint: barraEmbaixo ? .bottom : .top
+                    )
                 )
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: barraEmbaixo ? .bottom : .top)
-            .ignoresSafeArea()
-            .opacity(expandida ? 1 : 0)
-            .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: barraEmbaixo ? .bottom : .top)
+                .ignoresSafeArea()
+                .opacity(expandida ? 1 : 0)
+                .allowsHitTesting(false)
+        }
     }
 
     private var grupoDaBarra: some View {
@@ -352,6 +437,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(barraEmbaixo ? .bottom : .top, 6)
+        .environment(\.colorScheme, fundoEscuro ? .dark : .light)
     }
 
     /// A barra de endereço e, ligada a ela por um "chiclete", a barra de ferramentas.
@@ -377,8 +463,7 @@ struct ContentView: View {
         let sinal: CGFloat = barraEmbaixo ? -1 : 1
         let pescoco = comprimentoDoPescoco
         return ZStack {
-            PescocoChiclete(esticamento: pescoco / folgaPescoco)
-                .fill(corPilula)
+            pescocoDoChiclete(esticamento: pescoco / folgaPescoco)
                 .frame(width: 70, height: pescoco)
                 .offset(y: sinal * (alturaPilula / 2 + pescoco / 2))
                 .opacity(pescoco > 0.5 ? 1 : 0)
@@ -388,6 +473,15 @@ struct ContentView: View {
                 .offset(y: sinal * distancia * gomo)
                 .opacity(Double(min(1, gomo * 1.6)))
                 .allowsHitTesting(expandida && !editando && gomo > 0.8)
+        }
+    }
+
+    @ViewBuilder
+    private func pescocoDoChiclete(esticamento: CGFloat) -> some View {
+        if desfoque {
+            PescocoChiclete(esticamento: esticamento).fill(.ultraThinMaterial)
+        } else {
+            PescocoChiclete(esticamento: esticamento).fill(corPilula)
         }
     }
 
@@ -404,27 +498,36 @@ struct ContentView: View {
                 }
             }
             botaoDeFerramenta("rectangle.stack", ativo: true) {
-                mostrarAbas = true
-                recolher()
+                abrirPainel(.abas)
             }
             botaoDeFerramenta("books.vertical", ativo: true) {
-                mostrarBiblioteca = true
-                recolher()
+                abrirPainel(.biblioteca)
             }
             botaoDeFerramenta("square.and.arrow.up", ativo: model.currentURL != nil) {
-                mostrarCompartilhar = true
-                recolher()
+                compartilhar()
             }
             botaoDeFerramenta("gearshape", ativo: true) {
-                recolher()
-                withAnimation(.easeInOut(duration: 0.25)) { mostrarAjustes = true }
+                abrirPainel(.ajustes)
             }
         }
         .frame(height: alturaFerramentas)
         .padding(.horizontal, 6)
-        .background(Capsule().fill(corPilula))
-        .overlay(Capsule().stroke(corBorda, lineWidth: 0.5))
-        .shadow(color: Color.black.opacity(0.18), radius: 10, x: 0, y: 4)
+        .background(vidroCapsula)
+    }
+
+    /// Abre a folha de compartilhamento do iOS com o endereço da página.
+    private func compartilhar() {
+        recolher()
+        guard let url = model.currentURL else { return }
+        let folha = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        let janelas = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+        guard let raiz = (janelas.first(where: { $0.isKeyWindow }) ?? janelas.first)?.rootViewController else { return }
+        var topo = raiz
+        while let apresentado = topo.presentedViewController { topo = apresentado }
+        folha.popoverPresentationController?.sourceView = topo.view
+        topo.present(folha, animated: true)
     }
 
     private func botaoDeFerramenta(_ icone: String, ativo: Bool, acao: @escaping () -> Void) -> some View {
@@ -435,13 +538,31 @@ struct ContentView: View {
                 .frame(width: 52, height: alturaFerramentas)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(EstiloToque(forma: .circulo, comFundo: false))
         .disabled(!ativo)
     }
 
-    /// Recolhida: uma pílula pequena com o site. Aberta: a pílula cresce até a largura da tela e mostra o campo.
-    /// A área de toque é mais alta que a pílula, para ficar fácil de acertar.
+    /// Recolhida: uma faixa fina como a barra de status, só com o site. Aberta: a faixa cresce até virar a
+    /// pílula do campo de endereço. A área de toque é mais alta que a faixa, para ficar fácil de acertar.
     private var pilulaDeEndereco: some View {
+        Group {
+            if expandida {
+                corpoDaPilula
+            } else {
+                Button(action: expandir) {
+                    corpoDaPilula
+                        .frame(maxWidth: .infinity)
+                        .frame(height: alturaReservada)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(EstiloToque(forma: .capsula, comFundo: false))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: alturaReservada)
+    }
+
+    private var corpoDaPilula: some View {
         ZStack {
             rotuloRecolhido
                 .opacity(expandida ? 0 : 1)
@@ -449,20 +570,11 @@ struct ContentView: View {
                 .opacity(expandida ? 1 : 0)
                 .allowsHitTesting(expandida)
         }
-        .frame(width: expandida ? larguraTela : min(250, larguraTela), height: alturaPilula)
+        .frame(width: larguraTela, height: expandida ? alturaPilula : alturaFina)
         .background(
-            Capsule()
-                .fill(corPilula)
+            vidroCapsula
                 .overlay(alignment: .bottom) { linhaDeProgresso }
-                .overlay(Capsule().stroke(corBorda, lineWidth: 0.5))
-                .shadow(color: Color.black.opacity(0.18), radius: 10, x: 0, y: 4)
         )
-        .frame(maxWidth: .infinity)
-        .frame(height: alturaReservada)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if !expandida { expandir() }
-        }
     }
 
     @ViewBuilder
@@ -483,14 +595,14 @@ struct ContentView: View {
     }
 
     private var rotuloRecolhido: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Image(systemName: ehHTTPS ? "lock.fill" : "globe")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
             Text(model.currentHost.isEmpty ? "Nusky" : model.currentHost)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
         }
-        .foregroundColor(textoCor.opacity(0.75))
+        .foregroundColor(textoCor.opacity(0.8))
         .padding(.horizontal, 16)
     }
 
@@ -519,7 +631,7 @@ struct ContentView: View {
                     .frame(width: 46, height: alturaPilula)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(EstiloToque(forma: .circulo, comFundo: false))
         }
     }
 

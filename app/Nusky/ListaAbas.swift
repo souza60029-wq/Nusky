@@ -1,21 +1,20 @@
+// app/Nusky/ListaAbas.swift
 import SwiftUI
 import UIKit
 
-/// Tela de abas no estilo do iOS: grade de cartões, barra de navegação e barra inferior.
+/// Tela de abas no estilo da tela de apps recentes do iOS: cartões grandes com a miniatura da página,
+/// que se deslizam de lado.
 struct ListaAbas: View {
     @ObservedObject var historico: Historico
+    let fundoEscuro: Bool
     let onSelect: (UUID) -> Void
     let onNew: () -> Void
     let onDelete: (Set<UUID>) -> Void
     let onClose: () -> Void
 
-    @State private var editando = false
-    @State private var selecao = Set<UUID>()
-
-    private let colunas = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12),
-    ]
+    private var larguraTela: CGFloat { UIScreen.main.bounds.width }
+    private var larguraCartao: CGFloat { larguraTela * 0.74 }
+    private var alturaCartao: CGFloat { min(UIScreen.main.bounds.height * 0.6, larguraCartao * 1.6) }
 
     private var contagem: String {
         let n = historico.abas.count
@@ -23,133 +22,100 @@ struct ListaAbas: View {
     }
 
     var body: some View {
-        NavigationView {
-            ScrollView {
-                LazyVGrid(columns: colunas, spacing: 12) {
-                    ForEach(historico.abas) { aba in
-                        cartao(aba)
-                    }
-                }
-                .padding(16)
-            }
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-            .navigationTitle("Abas")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    if !editando {
-                        Button(action: onClose) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 17, weight: .semibold))
+        PainelVidro(titulo: "Abas", fundoEscuro: fundoEscuro, aoFechar: onClose) {
+            VStack(spacing: 14) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 18) {
+                        ForEach(historico.abas) { aba in
+                            cartao(aba)
                         }
-                        .accessibilityLabel("Fechar")
                     }
+                    .padding(.horizontal, (larguraTela - larguraCartao) / 2)
+                    .padding(.vertical, 10)
                 }
 
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: alternarEdicao) {
-                        Text(editando ? "OK" : "Selecionar")
-                    }
-                }
-
-                ToolbarItemGroup(placement: .bottomBar) {
-                    if editando {
-                        Spacer()
-                        Button(role: .destructive, action: apagarSelecionadas) {
-                            Text(selecao.isEmpty ? "Apagar" : "Apagar \(selecao.count)")
-                        }
-                        .disabled(selecao.isEmpty)
-                        Spacer()
-                    } else {
-                        Text(contagem)
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Button(action: onNew) {
+                HStack {
+                    Text(contagem)
+                        .font(.system(size: 15, weight: .medium))
+                        .opacity(0.7)
+                    Spacer()
+                    Button(action: onNew) {
+                        HStack(spacing: 8) {
                             Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .semibold))
+                                .font(.system(size: 16, weight: .bold))
+                            Text("Nova aba")
+                                .font(.system(size: 16, weight: .semibold))
                         }
-                        .accessibilityLabel("Nova aba")
+                        .padding(.horizontal, 20)
+                        .frame(height: 46)
+                        .contentShape(Capsule())
                     }
+                    .buttonStyle(EstiloToque(forma: .capsula))
                 }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 28)
             }
         }
-        .navigationViewStyle(.stack)
     }
 
     private func cartao(_ aba: Aba) -> some View {
         let ativa = aba.id == historico.abaAtual.id
-        let marcada = selecao.contains(aba.id)
+        let host = aba.entradaAtual?.host ?? ""
 
-        return VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .topTrailing) {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(uiColor: .tertiarySystemFill))
-                    .frame(height: 110)
-                    .overlay(
-                        Image(systemName: "globe")
-                            .font(.system(size: 28))
-                            .foregroundColor(.secondary)
-                    )
+        return ZStack(alignment: .top) {
+            miniatura(aba)
+                .frame(width: larguraCartao, height: alturaCartao)
+                .clipped()
 
-                if editando {
-                    Image(systemName: marcada ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 22))
-                        .foregroundColor(marcada ? .accentColor : .secondary)
-                        .background(Circle().fill(Color(uiColor: .systemBackground)))
-                        .padding(6)
+            HStack(spacing: 8) {
+                if !host.isEmpty {
+                    IconeDoSite(host: host, tamanho: 24)
                 }
+                Text(host.isEmpty ? "Nova aba" : host)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button {
+                    onDelete([aba.id])
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(EstiloToque(forma: .circulo))
+                .accessibilityLabel("Fechar aba")
             }
-
-            Text(aba.titulo)
-                .font(.system(size: 15, weight: .semibold))
-                .lineLimit(1)
-
-            Text(aba.entradaAtual?.url ?? "Sem página")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+            .padding(.horizontal, 10)
+            .frame(width: larguraCartao, height: 46)
+            .background(Rectangle().fill(.ultraThinMaterial))
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        )
+        .frame(width: larguraCartao, height: alturaCartao)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(ativa ? Color.accentColor : Color.clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(ativa ? Color.accentColor : (fundoEscuro ? Color.white.opacity(0.16) : Color.black.opacity(0.1)),
+                        lineWidth: ativa ? 3 : 0.8)
         )
-        .contentShape(RoundedRectangle(cornerRadius: 14))
-        .onTapGesture { toque(aba) }
-        .contextMenu {
-            Button(role: .destructive) {
-                onDelete([aba.id])
-            } label: {
-                Label("Apagar", systemImage: "trash")
-            }
-        }
+        .shadow(color: fundoEscuro ? Color.white.opacity(0.14) : Color.black.opacity(0.22), radius: 12, x: 0, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .onTapGesture { onSelect(aba.id) }
     }
 
-    private func toque(_ aba: Aba) {
-        if editando {
-            if selecao.contains(aba.id) {
-                selecao.remove(aba.id)
-            } else {
-                selecao.insert(aba.id)
-            }
+    @ViewBuilder
+    private func miniatura(_ aba: Aba) -> some View {
+        if let imagem = MiniaturasAbas.compartilhada.imagem(para: aba.id) {
+            Image(uiImage: imagem)
+                .resizable()
+                .scaledToFill()
+                .frame(width: larguraCartao, height: alturaCartao, alignment: .top)
         } else {
-            onSelect(aba.id)
+            ZStack {
+                Rectangle().fill(Color.primary.opacity(0.08))
+                Image(systemName: "globe")
+                    .font(.system(size: 40, weight: .light))
+                    .opacity(0.4)
+            }
         }
-    }
-
-    private func alternarEdicao() {
-        selecao.removeAll()
-        editando.toggle()
-    }
-
-    private func apagarSelecionadas() {
-        onDelete(selecao)
-        selecao.removeAll()
-        editando = false
     }
 }

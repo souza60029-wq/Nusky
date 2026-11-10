@@ -24,6 +24,11 @@ struct DrawItem: Identifiable {
     /// Cor definida pelo CSS da página. Nil quando a página não definiu cor.
     let cor: CorTexto?
     let text: String
+    /// Itálico e fonte com serifa, como a página pediu.
+    var italico = false
+    var serifa = false
+    /// Cor de destaque atrás do texto (por exemplo, uma palavra marcada).
+    var fundo: CorTexto? = nil
 }
 
 /// Caixa de fundo de um bloco da página: cor sólida e/ou borda, com cantos arredondados.
@@ -157,9 +162,9 @@ enum Engine {
                 ))
                 continue
             }
-            // Campos: x, y, tamanho, negrito, link, cor, texto. O texto fica por último.
-            let fields = line.split(separator: "\t", maxSplits: 6, omittingEmptySubsequences: false)
-            guard fields.count == 7,
+            // Campos: x, y, tamanho, negrito, link, cor, estilo (i, s), fundo, texto. O texto fica por último.
+            let fields = line.split(separator: "\t", maxSplits: 8, omittingEmptySubsequences: false)
+            guard fields.count == 9,
                   let x = Float(fields[0]),
                   let y = Float(fields[1]),
                   let size = Float(fields[2]),
@@ -173,7 +178,10 @@ enum Engine {
                 bold: bold == 1,
                 href: href,
                 cor: parseCor(fields[5]),
-                text: String(fields[6])
+                text: String(fields[8]),
+                italico: fields[6].contains("i"),
+                serifa: fields[6].contains("s"),
+                fundo: parseCor(fields[7])
             ))
         }
         return PaginaDesenhada(itens: items, fundos: fundos, imagens: imagens, fundoPagina: fundoPagina)

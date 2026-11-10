@@ -96,122 +96,173 @@ final class Biblioteca: ObservableObject {
     }
 }
 
-/// Tela com os favoritos e o histórico.
+/// Tela com os favoritos e o histórico, no estilo dos menus do app.
 struct BibliotecaView: View {
     @ObservedObject private var biblioteca = Biblioteca.compartilhada
-    @Environment(\.dismiss) private var dismiss
 
     /// Página aberta agora, para o botão de favoritar.
     let urlAtual: URL?
+    let fundoEscuro: Bool
     let aoAbrir: (URL) -> Void
+    let aoFechar: () -> Void
 
     @State private var aba = 0
 
     var body: some View {
-        NavigationView {
+        PainelVidro(titulo: "Biblioteca", fundoEscuro: fundoEscuro, aoFechar: aoFechar) {
             VStack(spacing: 0) {
-                Picker("Seção", selection: $aba) {
-                    Text("Favoritos").tag(0)
-                    Text("Histórico").tag(1)
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-
-                if aba == 0 {
-                    listaFavoritos
-                } else {
-                    listaVisitas
-                }
-            }
-            .navigationTitle("Biblioteca")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    if let url = urlAtual {
-                        Button {
-                            biblioteca.alternarFavorito(url: url)
-                        } label: {
-                            Image(systemName: biblioteca.ehFavorito(url.absoluteString) ? "star.fill" : "star")
+                abas
+                ScrollView {
+                    VStack(spacing: 10) {
+                        if aba == 0 {
+                            favoritos
+                        } else {
+                            visitas
                         }
                     }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("OK") { dismiss() }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 40)
                 }
             }
         }
     }
 
+    private var abas: some View {
+        HStack(spacing: 8) {
+            chip("Favoritos", "star", 0)
+            chip("Histórico", "clock", 1)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 6)
+    }
+
+    private func chip(_ titulo: String, _ icone: String, _ valor: Int) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { aba = valor }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icone)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(titulo)
+                    .font(.system(size: 15, weight: .semibold))
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .opacity(aba == valor ? 1 : 0.6)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(EstiloToque(forma: .capsula))
+    }
+
     @ViewBuilder
-    private var listaFavoritos: some View {
+    private var favoritos: some View {
+        if let url = urlAtual {
+            Button {
+                biblioteca.alternarFavorito(url: url)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: biblioteca.ehFavorito(url.absoluteString) ? "star.fill" : "star")
+                        .font(.system(size: 17, weight: .medium))
+                    Text(biblioteca.ehFavorito(url.absoluteString) ? "Página atual nos favoritos" : "Adicionar a página atual")
+                        .font(.system(size: 16, weight: .medium))
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 52)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(EstiloToque(forma: .retangulo(18)))
+        }
+
         if biblioteca.favoritos.isEmpty {
-            vazio("Nenhum favorito ainda.", "Toque na estrela para guardar a página aberta.")
+            vazio("Nenhum favorito ainda.", "Toque em \"Adicionar a página atual\" para guardar o site aberto.")
         } else {
-            List {
-                ForEach(biblioteca.favoritos) { f in
-                    Button {
-                        abrir(f.url)
-                    } label: {
-                        linha(titulo: f.titulo, endereco: f.url)
+            ForEach(biblioteca.favoritos) { f in
+                linha(titulo: f.titulo, endereco: f.url, host: URL(string: f.url)?.host ?? "") {
+                    abrir(f.url)
+                } apagar: {
+                    if let i = biblioteca.favoritos.firstIndex(of: f) {
+                        biblioteca.removerFavoritos(em: IndexSet(integer: i))
                     }
                 }
-                .onDelete { biblioteca.removerFavoritos(em: $0) }
             }
-            .listStyle(.plain)
         }
     }
 
     @ViewBuilder
-    private var listaVisitas: some View {
+    private var visitas: some View {
         if biblioteca.visitas.isEmpty {
             vazio("Histórico vazio.", "As páginas que você abrir aparecem aqui, só neste aparelho.")
         } else {
-            List {
-                ForEach(biblioteca.visitas) { v in
-                    Button {
-                        abrir(v.url)
-                    } label: {
-                        linha(titulo: v.host, endereco: v.url)
+            ForEach(biblioteca.visitas) { v in
+                linha(titulo: v.host, endereco: v.url, host: v.host) {
+                    abrir(v.url)
+                } apagar: {
+                    if let i = biblioteca.visitas.firstIndex(of: v) {
+                        biblioteca.removerVisitas(em: IndexSet(integer: i))
                     }
                 }
-                .onDelete { biblioteca.removerVisitas(em: $0) }
             }
-            .listStyle(.plain)
         }
     }
 
-    private func linha(titulo: String, endereco: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(titulo)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(.primary)
-                .lineLimit(1)
-            Text(endereco)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+    private func linha(
+        titulo: String,
+        endereco: String,
+        host: String,
+        abrir: @escaping () -> Void,
+        apagar: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Button(action: abrir) {
+                HStack(spacing: 12) {
+                    IconeDoSite(host: host, tamanho: 30)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(titulo)
+                            .font(.system(size: 16, weight: .semibold))
+                            .lineLimit(1)
+                        Text(endereco)
+                            .font(.system(size: 12))
+                            .opacity(0.6)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 56)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(EstiloToque(forma: .retangulo(18)))
+
+            Button(action: apagar) {
+                Image(systemName: "trash")
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(EstiloToque(forma: .circulo))
+            .accessibilityLabel("Apagar")
         }
-        .padding(.vertical, 2)
     }
 
     private func vazio(_ titulo: String, _ detalhe: String) -> some View {
         VStack(spacing: 6) {
-            Spacer()
-            Text(titulo).font(.system(size: 17, weight: .medium))
+            Text(titulo).font(.system(size: 17, weight: .semibold))
             Text(detalhe)
                 .font(.system(size: 14))
-                .foregroundColor(.secondary)
+                .opacity(0.6)
                 .multilineTextAlignment(.center)
-            Spacer()
         }
-        .padding(.horizontal, 32)
+        .padding(.horizontal, 24)
+        .padding(.top, 40)
         .frame(maxWidth: .infinity)
     }
 
     private func abrir(_ texto: String) {
         guard let url = URL(string: texto) else { return }
-        dismiss()
+        aoFechar()
         aoAbrir(url)
     }
 }

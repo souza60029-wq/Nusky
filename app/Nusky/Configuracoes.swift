@@ -4,10 +4,9 @@ import SwiftUI
 /// Tópicos da tela de ajustes.
 private enum Topico: String, CaseIterable, Identifiable {
     case aparencia = "Aparência"
+    case toque = "Toque"
     case navegacao = "Navegação"
-    case desempenho = "Desempenho"
     case privacidade = "Privacidade"
-    case enderecos = "Endereços"
     case sobre = "Sobre"
 
     var id: String { rawValue }
@@ -15,16 +14,15 @@ private enum Topico: String, CaseIterable, Identifiable {
     var icone: String {
         switch self {
         case .aparencia: return "paintbrush"
+        case .toque: return "hand.tap"
         case .navegacao: return "safari"
-        case .desempenho: return "speedometer"
         case .privacidade: return "hand.raised"
-        case .enderecos: return "magnifyingglass"
         case .sobre: return "info.circle"
         }
     }
 }
 
-/// Ajustes sobre a página, com fundo desfocado. A cor do texto vem da claridade do que está atrás:
+/// Ajustes do app, sobre a página desfocada. A cor do texto segue a claridade do que está atrás:
 /// fundo escuro, texto branco; fundo claro, texto preto.
 struct PainelAjustes: View {
     @AppStorage("themeAuto") private var automatico = true
@@ -33,21 +31,28 @@ struct PainelAjustes: View {
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
     @AppStorage(JSRodador.chaveAtivo) private var javascriptLigado = true
     @AppStorage(BrowserModel.chaveImagens) private var imagensLigadas = true
+    @AppStorage(ChavesTema.desfoque) private var desfoque = true
+    @AppStorage(ChavesTema.forcarNoturno) private var forcarNoturno = false
+    @AppStorage(ChavesTema.feedbackLuminoso) private var feedbackLuminoso = true
+    @AppStorage(ChavesTema.feedbackExpansivo) private var feedbackExpansivo = true
+    @AppStorage(ChavesTema.feedbackTatil) private var feedbackTatil = true
+    @AppStorage(ChavesTema.padraoFeedback) private var padraoBruto = 1
     @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
     @AppStorage("listaEtag") private var etagLista = ""
 
-    /// Página aberta no momento, usada pelo diagnóstico.
-    let urlAtual: URL?
     /// Verdadeiro quando o que está atrás do painel é escuro.
     let fundoEscuro: Bool
+    /// Há uma página aberta (o diagnóstico precisa de uma).
+    let temPagina: Bool
+    let aoAbrirURL: (URL) -> Void
+    let aoAbrirDiagnostico: () -> Void
+    let aoAbrirTermos: () -> Void
     let aoFechar: () -> Void
 
     @State private var topico: Topico = .aparencia
-    @State private var mostrarDiagnostico = false
-    @State private var mostrarTermos = false
     @State private var avisoPrivacidade = ""
 
-    /// Mensagem mostrada depois de tocar em "Procurar atualização".
+    /// Mensagem mostrada depois de tocar em "Procurar atualização da lista".
     @State private var mensagemLista = ""
     /// Verdadeiro enquanto o app consulta o GitHub.
     @State private var verificando = false
@@ -56,7 +61,10 @@ struct PainelAjustes: View {
     /// Controla o aviso de confirmação antes de trocar a lista.
     @State private var confirmarAtualizacao = false
 
-    private var textoCor: Color { fundoEscuro ? Color.white : Color.black }
+    @State private var versaoApp: VersaoPublicada? = nil
+    @State private var verificandoApp = false
+    @State private var mensagemApp = ""
+    @State private var confirmarApp = false
 
     private var versao: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
@@ -75,15 +83,8 @@ struct PainelAjustes: View {
     }
 
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .ignoresSafeArea()
-            (fundoEscuro ? Color.black.opacity(0.25) : Color.white.opacity(0.25))
-                .ignoresSafeArea()
-
+        PainelVidro(titulo: "Ajustes", fundoEscuro: fundoEscuro, aoFechar: aoFechar) {
             VStack(spacing: 0) {
-                cabecalho
                 abasDeTopicos
                 ScrollView {
                     VStack(spacing: 12) {
@@ -95,18 +96,6 @@ struct PainelAjustes: View {
                 }
             }
         }
-        .foregroundColor(textoCor)
-        .environment(\.colorScheme, fundoEscuro ? .dark : .light)
-        .sheet(isPresented: $mostrarDiagnostico) {
-            NavigationView {
-                DiagnosticoView(url: urlAtual)
-            }
-        }
-        .sheet(isPresented: $mostrarTermos) {
-            NavigationView {
-                TermosDeUso()
-            }
-        }
         .alert("Atualizar endereços?", isPresented: $confirmarAtualizacao) {
             Button("Cancelar", role: .cancel) {}
             Button("Atualizar") {
@@ -115,28 +104,17 @@ struct PainelAjustes: View {
         } message: {
             Text("Os sites encontrados pelo nome passam a vir da lista nova.")
         }
+        .alert("Atualizar o Nusky?", isPresented: $confirmarApp) {
+            Button("Cancelar", role: .cancel) {}
+            Button("Atualizar") {
+                Task { await atualizarApp() }
+            }
+        } message: {
+            Text("O TrollStore vai instalar a nova versão por cima desta, e a lista de sites é atualizada junto. Favoritos, histórico e ajustes continuam no aparelho.")
+        }
     }
 
     // MARK: - Estrutura
-
-    private var cabecalho: some View {
-        HStack {
-            Text("Ajustes")
-                .font(.system(size: 32, weight: .bold))
-            Spacer()
-            Button(action: aoFechar) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .bold))
-                    .frame(width: 36, height: 36)
-                    .background(Circle().fill(Color.primary.opacity(0.12)))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 56)
-        .padding(.bottom, 12)
-    }
 
     private var abasDeTopicos: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -153,16 +131,14 @@ struct PainelAjustes: View {
                         }
                         .padding(.horizontal, 14)
                         .frame(height: 38)
-                        .background(
-                            Capsule().fill(topico == t ? Color.primary.opacity(0.22) : Color.primary.opacity(0.08))
-                        )
+                        .opacity(topico == t ? 1 : 0.6)
                         .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(EstiloToque(forma: .capsula))
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
         }
     }
 
@@ -170,10 +146,9 @@ struct PainelAjustes: View {
     private var conteudo: some View {
         switch topico {
         case .aparencia: topicoAparencia
+        case .toque: topicoToque
         case .navegacao: topicoNavegacao
-        case .desempenho: topicoDesempenho
         case .privacidade: topicoPrivacidade
-        case .enderecos: topicoEnderecos
         case .sobre: topicoSobre
         }
     }
@@ -190,7 +165,71 @@ struct PainelAjustes: View {
                     .opacity(automatico ? 0.5 : 1)
             }
             cartao {
+                linhaChave(
+                    "Forçar modo noturno nos sites",
+                    detalhe: "Escurece as páginas claras. Páginas que já são escuras não mudam.",
+                    valor: $forcarNoturno,
+                    desempenho: true
+                )
+            }
+            cartao {
                 linhaChave("Barra embaixo", detalhe: "Desligado: a barra fica em cima.", valor: $barraEmbaixo)
+                divisor
+                linhaChave(
+                    "Efeito de desfoque",
+                    detalhe: "Desligado: barras e menus ficam com fundo liso.",
+                    valor: $desfoque,
+                    desempenho: true
+                )
+            }
+        }
+    }
+
+    private var topicoToque: some View {
+        VStack(spacing: 12) {
+            cartao {
+                linhaChave(
+                    "Feedback luminoso",
+                    detalhe: "Um brilho nasce onde você toca e se espalha pelo botão, enfraquecendo até sumir.",
+                    valor: $feedbackLuminoso,
+                    desempenho: true
+                )
+                divisor
+                linhaChave(
+                    "Feedback expansivo",
+                    detalhe: "O botão pulsa e volta ao normal.",
+                    valor: $feedbackExpansivo,
+                    desempenho: true
+                )
+                divisor
+                linhaChave("Feedback tátil", detalhe: "Vibração a cada toque.", valor: $feedbackTatil)
+            }
+
+            cartao {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Intensidade")
+                        .font(.system(size: 17))
+                    HStack(spacing: 8) {
+                        ForEach(PadraoFeedback.allCases) { nivel in
+                            Button {
+                                padraoBruto = nivel.rawValue
+                            } label: {
+                                Text(nivel.nome)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 38)
+                                    .opacity(padraoBruto == nivel.rawValue ? 1 : 0.55)
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(EstiloToque(forma: .capsula))
+                        }
+                    }
+                    Text("A intensidade vale para os três efeitos ao mesmo tempo. Extravagante é bem forte e dura mais; Leve é rápido e discreto.")
+                        .font(.system(size: 13))
+                        .opacity(0.6)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
             }
         }
     }
@@ -205,28 +244,20 @@ struct PainelAjustes: View {
                 )
             }
             cartao {
-                linhaChave("Mostrar imagens", detalhe: "Desligado: a página abre sem imagens e gasta menos dados e memória.", valor: $imagensLigadas)
+                linhaChave(
+                    "Mostrar imagens",
+                    detalhe: "Desligado: a página abre sem imagens e gasta menos dados e memória.",
+                    valor: $imagensLigadas,
+                    desempenho: true
+                )
                 divisor
-                linhaChave("Executar JavaScript", detalhe: "Necessário em sites que montam a página no aparelho.", valor: $javascriptLigado)
+                linhaChave(
+                    "Executar JavaScript",
+                    detalhe: "Necessário em sites que montam a página no aparelho. O limite é de 6 segundos.",
+                    valor: $javascriptLigado,
+                    desempenho: true
+                )
             }
-        }
-    }
-
-    private var topicoDesempenho: some View {
-        VStack(spacing: 12) {
-            cartao {
-                linhaInfo("Limite do JavaScript", "6 segundos")
-                divisor
-                linhaInfo("Imagens", imagensLigadas ? "Reduzidas ao baixar" : "Desligadas")
-            }
-            cartao {
-                botaoLinha("Analisar página atual", icone: "waveform.path.ecg") {
-                    mostrarDiagnostico = true
-                }
-                .disabled(urlAtual == nil)
-                .opacity(urlAtual == nil ? 0.5 : 1)
-            }
-            rodape("O diagnóstico baixa de novo a página aberta e gera um relatório de texto para copiar. Não altera a página.")
         }
     }
 
@@ -252,14 +283,24 @@ struct PainelAjustes: View {
         }
     }
 
-    private var topicoEnderecos: some View {
+    private var topicoSobre: some View {
         VStack(spacing: 12) {
             cartao {
-                linhaInfo("Versão da lista", "\(Engine.versaoEmUso)")
+                linhaInfo("Versão do app", versao)
+                divisor
+                linhaInfo("Licença", "MPL-2.0")
+                divisor
+                botaoLinha("Repositório do projeto", icone: "chevron.left.forwardslash.chevron.right") {
+                    aoAbrirURL(AtualizadorApp.repositorio)
+                }
+            }
+
+            cartao {
+                linhaInfo("Lista de sites", "Versão \(Engine.versaoEmUso)")
                 divisor
                 linhaInfo("Data da lista", dataListaTexto)
                 divisor
-                botaoLinha(verificando ? "Verificando…" : "Procurar atualização", icone: "arrow.triangle.2.circlepath") {
+                botaoLinha(verificando ? "Verificando…" : "Atualizar só a lista de sites", icone: "arrow.triangle.2.circlepath") {
                     Task { await verificarAtualizacao() }
                 }
                 .disabled(verificando)
@@ -267,7 +308,7 @@ struct PainelAjustes: View {
                     divisor
                     linhaInfo("Disponível", "Versão \(nova.versao), de \(nova.dataTexto)")
                     divisor
-                    botaoLinha("Atualizar endereços", icone: "square.and.arrow.down") {
+                    botaoLinha("Aplicar a nova lista", icone: "square.and.arrow.down") {
                         confirmarAtualizacao = true
                     }
                 }
@@ -275,19 +316,35 @@ struct PainelAjustes: View {
             if !mensagemLista.isEmpty {
                 rodape(mensagemLista)
             }
-            rodape("A lista de sites serve para achar sites pelo nome. Ela só é atualizada quando você toca em \"Procurar atualização\" e confirma. Nada é verificado em segundo plano.")
-        }
-    }
 
-    private var topicoSobre: some View {
-        VStack(spacing: 12) {
             cartao {
-                linhaInfo("Versão", versao)
-                divisor
-                linhaInfo("Licença", "MPL-2.0")
+                botaoLinha(verificandoApp ? "Verificando…" : "Atualizar o app (inclui a lista)", icone: "arrow.down.app") {
+                    Task { await verificarApp() }
+                }
+                .disabled(verificandoApp)
+                if let nova = versaoApp {
+                    divisor
+                    linhaInfo("Disponível", "Versão \(nova.versao)")
+                    divisor
+                    botaoLinha("Instalar com o TrollStore", icone: "square.and.arrow.down") {
+                        confirmarApp = true
+                    }
+                }
+            }
+            if !mensagemApp.isEmpty {
+                rodape(mensagemApp)
+            }
+            rodape("Nada é verificado em segundo plano: só quando você toca. Atualizar o app também atualiza a lista de sites.")
+
+            cartao {
+                botaoLinha("Analisar a página atual", icone: "waveform.path.ecg") {
+                    aoAbrirDiagnostico()
+                }
+                .disabled(!temPagina)
+                .opacity(temPagina ? 1 : 0.5)
                 divisor
                 botaoLinha("Termos de uso", icone: "doc.text") {
-                    mostrarTermos = true
+                    aoAbrirTermos()
                 }
             }
             if dataAceiteTexto.isEmpty {
@@ -305,6 +362,7 @@ struct PainelAjustes: View {
             conteudo()
         }
         .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.09)))
+        .shadow(color: fundoEscuro ? Color.white.opacity(0.08) : Color.black.opacity(0.1), radius: 6, x: 0, y: 2)
     }
 
     private var divisor: some View {
@@ -314,11 +372,16 @@ struct PainelAjustes: View {
             .padding(.leading, 16)
     }
 
-    private func linhaChave(_ titulo: String, detalhe: String?, valor: Binding<Bool>) -> some View {
+    private func linhaChave(_ titulo: String, detalhe: String?, valor: Binding<Bool>, desempenho: Bool = false) -> some View {
         Toggle(isOn: valor) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(titulo)
-                    .font(.system(size: 17))
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(titulo)
+                        .font(.system(size: 17))
+                    if desempenho {
+                        EtiquetaDesempenho()
+                    }
+                }
                 if let detalhe {
                     Text(detalhe)
                         .font(.system(size: 13))
@@ -360,7 +423,7 @@ struct PainelAjustes: View {
             .padding(.vertical, 14)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(EstiloToque(forma: .retangulo(18), comFundo: false))
     }
 
     private func rodape(_ texto: String) -> some View {
@@ -369,6 +432,40 @@ struct PainelAjustes: View {
             .opacity(0.6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 8)
+    }
+
+    // MARK: - Atualização do app
+
+    /// Consulta a última versão publicada no GitHub. Não instala nada.
+    private func verificarApp() async {
+        verificandoApp = true
+        mensagemApp = ""
+        versaoApp = nil
+        defer { verificandoApp = false }
+        do {
+            let publicada = try await AtualizadorApp.buscar()
+            if AtualizadorApp.ehMaisNova(publicada.versao, que: versao) {
+                versaoApp = publicada
+            } else {
+                mensagemApp = "Você já tem a versão mais recente (\(versao))."
+            }
+        } catch ErroAtualizacao.semPublicacao {
+            mensagemApp = "Ainda não há uma versão publicada no GitHub."
+        } catch ErroAtualizacao.semIPA {
+            mensagemApp = "A versão publicada não traz o arquivo de instalação (.ipa)."
+        } catch {
+            mensagemApp = mensagemFalha
+        }
+    }
+
+    /// Atualiza a lista de sites e entrega o novo app ao TrollStore.
+    private func atualizarApp() async {
+        guard let nova = versaoApp else { return }
+        await verificarAtualizacao()
+        if listaNova != nil {
+            await aplicarAtualizacao()
+        }
+        AtualizadorApp.instalar(nova)
     }
 
     // MARK: - Atualização da lista

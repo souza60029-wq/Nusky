@@ -18,6 +18,8 @@ struct PaginaView: UIViewRepresentable {
     let aoTocarPagina: () -> Void
     /// O dedo começou a arrastar a página (a barra recolhe).
     let aoComecarRolar: () -> Void
+    /// Dá acesso à tela desenhada, para tirar a miniatura da aba.
+    let controle: PaginaControle
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -43,6 +45,8 @@ struct PaginaView: UIViewRepresentable {
             scroll.backgroundColor = escuro ? .black : .white
         }
         scroll.alturaDaPagina = altura
+        controle.desenho = scroll.desenho
+        controle.rolagem = scroll
 
         let desenho = scroll.desenho
         if desenho.escuro != escuroEfetivo {
@@ -171,6 +175,20 @@ final class DesenhoPagina: UIView {
         return lista
     }
 
+    /// Imagem da parte da página que está na tela, para a tela de abas.
+    func miniatura(tamanho: CGSize, deslocamento: CGFloat, fundo: UIColor) -> UIImage? {
+        let formato = UIGraphicsImageRendererFormat()
+        formato.scale = 1
+        formato.opaque = true
+        let renderizador = UIGraphicsImageRenderer(size: tamanho, format: formato)
+        return renderizador.image { contexto in
+            fundo.setFill()
+            contexto.fill(CGRect(origin: .zero, size: tamanho))
+            contexto.cgContext.translateBy(x: 0, y: -deslocamento)
+            draw(CGRect(x: 0, y: deslocamento, width: tamanho.width, height: tamanho.height))
+        }
+    }
+
     private func copiaCaixas() -> [Fundo] {
         trava.lock()
         defer { trava.unlock() }
@@ -236,6 +254,13 @@ final class DesenhoPagina: UIView {
 
     private func desenhar(_ item: DrawItem) {
         let texto = NSAttributedString(string: item.text, attributes: atributos(item))
+        if let fundo = item.fundo {
+            // Destaque atrás do texto, um pouco maior que ele.
+            let tamanho = texto.size()
+            let quadro = CGRect(x: CGFloat(item.x) - 6, y: CGFloat(item.y), width: tamanho.width + 12, height: tamanho.height)
+            UIColor(red: CGFloat(fundo.r), green: CGFloat(fundo.g), blue: CGFloat(fundo.b), alpha: 1).setFill()
+            UIRectFill(quadro)
+        }
         texto.draw(at: CGPoint(x: CGFloat(item.x), y: CGFloat(item.y)))
     }
 
@@ -251,16 +276,34 @@ final class DesenhoPagina: UIView {
     }
 
     private func fonte(_ item: DrawItem) -> UIFont {
-        UIFont.systemFont(ofSize: CGFloat(item.fontSize), weight: item.bold ? .bold : .regular)
+        let base = UIFont.systemFont(ofSize: CGFloat(item.fontSize), weight: item.bold ? .bold : .regular)
+        guard item.serifa || item.italico else { return base }
+        var descritor = base.fontDescriptor
+        if item.serifa, let serifada = descritor.withDesign(.serif) {
+            descritor = serifada
+        }
+        if item.italico, let inclinada = descritor.withSymbolicTraits(descritor.symbolicTraits.union(.traitItalic)) {
+            descritor = inclinada
+        }
+        return UIFont(descriptor: descritor, size: CGFloat(item.fontSize))
     }
 
     /// Cor da linha: a que a página pediu pelo CSS.
     /// Só troca por cor do tema quando o contraste fica abaixo de 1,5.
     /// Links sem cor própria ficam azuis.
     private func cor(_ item: DrawItem) -> UIColor {
-        let padrao: UIColor = item.href != nil ? .systemBlue : (escuro ? .white : .black)
+        // Texto sobre um destaque: o contraste conta contra a cor do destaque, não contra a página.
+        let fundoLuminancia: Double
+        let sobreEscuro: Bool
+        if let destaque = item.fundo {
+            fundoLuminancia = luminanciaRelativa(destaque)
+            sobreEscuro = fundoLuminancia < 0.18
+        } else {
+            fundoLuminancia = escuro ? 0 : 1
+            sobreEscuro = escuro
+        }
+        let padrao: UIColor = item.href != nil ? .systemBlue : (sobreEscuro ? .white : .black)
         guard let c = item.cor else { return padrao }
-        let fundoLuminancia: Double = escuro ? 0 : 1
         let contraste = razaoDeContraste(luminanciaRelativa(c), fundoLuminancia)
         if contraste < 1.5 { return padrao }
         return UIColor(red: CGFloat(c.r), green: CGFloat(c.g), blue: CGFloat(c.b), alpha: 1)
@@ -322,4 +365,16 @@ private func luminanciaRelativa(_ cor: CorTexto) -> Double {
 /// Razão de contraste entre duas luminâncias: de 1 (igual) a 21 (preto contra branco).
 private func razaoDeContraste(_ a: Double, _ b: Double) -> Double {
     (max(a, b) + 0.05) / (min(a, b) + 0.05)
+}
+
+/// Ponte entre a tela e o código que tira a miniatura da aba.
+final class PaginaControle {
+    weak var desenho: DesenhoPagina?
+    weak var rolagem: UIScrollView?
+
+    /// Miniatura do que aparece na tela agora. Nil se a página ainda não foi desenhada.
+    func miniatura(tamanho: CGSize, fundo: UIColor) -> UIImage? {
+        guard let desenho else { return nil }
+        return desenho.miniatura(tamanho: tamanho, deslocamento: rolagem?.contentOffset.y ?? 0, fundo: fundo)
+    }
 }

@@ -81,6 +81,23 @@ final class ArmazemImagens: @unchecked Sendable {
         return natural
     }
 
+    // MARK: - Ícones de sites
+
+    private let semIcone = ConjuntoGuardado()
+
+    /// Ícone do site: o `favicon.ico` do próprio site. Quem não tem ícone não é pedido de novo.
+    func icone(host: String) async -> UIImage? {
+        guard !host.isEmpty, let url = URL(string: "https://\(host)/favicon.ico") else { return nil }
+        let chave = ArmazemImagens.chave(para: url)
+        if let pronto = imagem(para: chave) { return pronto }
+        if semIcone.contem(host) { return nil }
+        if await carregar(endereco: url) == nil {
+            semIcone.inserir(host)
+            return nil
+        }
+        return imagem(para: chave)
+    }
+
     // MARK: - Apoio
 
     /// Tamanhos naturais já conhecidos (a imagem reduzida do cache perde o tamanho original).
@@ -134,6 +151,24 @@ final class ArmazemImagens: @unchecked Sendable {
             return Data(base64Encoded: limpo, options: .ignoreUnknownCharacters)
         }
         return (corpo.removingPercentEncoding ?? corpo).data(using: .utf8)
+    }
+}
+
+/// Conjunto protegido por trava.
+private final class ConjuntoGuardado: @unchecked Sendable {
+    private let trava = NSLock()
+    private var itens = Set<String>()
+
+    func contem(_ valor: String) -> Bool {
+        trava.lock()
+        defer { trava.unlock() }
+        return itens.contains(valor)
+    }
+
+    func inserir(_ valor: String) {
+        trava.lock()
+        itens.insert(valor)
+        trava.unlock()
     }
 }
 
