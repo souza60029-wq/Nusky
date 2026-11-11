@@ -2,8 +2,7 @@
 import SwiftUI
 import UIKit
 
-/// Tela de abas no estilo da tela de apps recentes do iOS: cartões grandes com a miniatura da página,
-/// que se deslizam de lado.
+/// Tela de abas: uma grade de cartões simples, cada um só com o ícone do site e o nome.
 struct ListaAbas: View {
     @ObservedObject var historico: Historico
     let fundoEscuro: Bool
@@ -12,9 +11,10 @@ struct ListaAbas: View {
     let onDelete: (Set<UUID>) -> Void
     let onClose: () -> Void
 
-    private var larguraTela: CGFloat { UIScreen.main.bounds.width }
-    private var larguraCartao: CGFloat { larguraTela * 0.74 }
-    private var alturaCartao: CGFloat { min(UIScreen.main.bounds.height * 0.6, larguraCartao * 1.6) }
+    private let colunas = [
+        GridItem(.flexible(), spacing: 14),
+        GridItem(.flexible(), spacing: 14)
+    ]
 
     private var contagem: String {
         let n = historico.abas.count
@@ -23,15 +23,16 @@ struct ListaAbas: View {
 
     var body: some View {
         PainelVidro(titulo: "Abas", fundoEscuro: fundoEscuro, aoFechar: onClose) {
-            VStack(spacing: 14) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 18) {
+            VStack(spacing: 0) {
+                ScrollView {
+                    LazyVGrid(columns: colunas, spacing: 14) {
                         ForEach(historico.abas) { aba in
                             cartao(aba)
                         }
                     }
-                    .padding(.horizontal, (larguraTela - larguraCartao) / 2)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
                 }
 
                 HStack {
@@ -53,7 +54,7 @@ struct ListaAbas: View {
                     .buttonStyle(EstiloToque(forma: .capsula))
                 }
                 .padding(.horizontal, 24)
-                .padding(.bottom, 28)
+                .padding(.vertical, 14)
             }
         }
     }
@@ -62,60 +63,46 @@ struct ListaAbas: View {
         let ativa = aba.id == historico.abaAtual.id
         let host = aba.entradaAtual?.host ?? ""
 
-        return ZStack(alignment: .top) {
-            miniatura(aba)
-                .frame(width: larguraCartao, height: alturaCartao)
-                .clipped()
-
-            HStack(spacing: 8) {
-                if !host.isEmpty {
-                    IconeDoSite(host: host, tamanho: 24)
+        return ZStack(alignment: .topTrailing) {
+            Button {
+                onSelect(aba.id)
+            } label: {
+                VStack(spacing: 12) {
+                    if host.isEmpty {
+                        Image(systemName: "globe")
+                            .font(.system(size: 34, weight: .light))
+                            .frame(width: 64, height: 64)
+                            .opacity(0.6)
+                    } else {
+                        IconeDoSite(host: host, tamanho: 64)
+                    }
+                    Text(host.isEmpty ? "Nova aba" : host)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
                 }
-                Text(host.isEmpty ? "Nova aba" : host)
-                    .font(.system(size: 15, weight: .semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Button {
-                    onDelete([aba.id])
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 30, height: 30)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(EstiloToque(forma: .circulo))
-                .accessibilityLabel("Fechar aba")
+                .frame(maxWidth: .infinity)
+                .frame(height: 152)
+                .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             }
-            .padding(.horizontal, 10)
-            .frame(width: larguraCartao, height: 46)
-            .background(Rectangle().fill(.ultraThinMaterial))
-        }
-        .frame(width: larguraCartao, height: alturaCartao)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(ativa ? Color.accentColor : (fundoEscuro ? Color.white.opacity(0.16) : Color.black.opacity(0.1)),
-                        lineWidth: ativa ? 3 : 0.8)
-        )
-        .shadow(color: fundoEscuro ? Color.white.opacity(0.14) : Color.black.opacity(0.22), radius: 12, x: 0, y: 4)
-        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .onTapGesture { onSelect(aba.id) }
-    }
+            .buttonStyle(EstiloToque(forma: .retangulo(24)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.accentColor, lineWidth: ativa ? 2.5 : 0)
+                    .allowsHitTesting(false)
+            )
 
-    @ViewBuilder
-    private func miniatura(_ aba: Aba) -> some View {
-        if let imagem = MiniaturasAbas.compartilhada.imagem(para: aba.id) {
-            Image(uiImage: imagem)
-                .resizable()
-                .scaledToFill()
-                .frame(width: larguraCartao, height: alturaCartao, alignment: .top)
-        } else {
-            ZStack {
-                Rectangle().fill(Color.primary.opacity(0.08))
-                Image(systemName: "globe")
-                    .font(.system(size: 40, weight: .light))
-                    .opacity(0.4)
+            Button {
+                onDelete([aba.id])
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+                    .opacity(0.7)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Fechar aba")
         }
     }
 }

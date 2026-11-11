@@ -9,6 +9,7 @@ pub mod ffi;
 pub mod html;
 pub mod layout;
 pub mod preparo;
+pub mod svg;
 
 /// Retorna a versão do motor.
 pub fn version() -> &'static str {

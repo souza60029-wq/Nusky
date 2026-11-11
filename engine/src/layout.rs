@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use crate::css::{self, Display, Estilo, Folha, Info};
+use crate::svg::{self, FormaSvg, Tinta};
 use crate::html::{Element, Node};
 
 /// Responsável por medir texto. No iPhone, a casca implementa com CoreText.
@@ -85,12 +86,16 @@ pub struct Saida {
     /// Cor de fundo do `html` ou do `body`, se a página definiu.
     pub fundo_pagina: Option<[u8; 3]>,
     pub imagens: Vec<Imagem>,
+    /// Formas de SVG já posicionadas na página.
+    pub formas: Vec<FormaSvg>,
 }
 
 /// Limite de caixas de fundo, para uma página enorme não ocupar memória demais.
 const MAX_FUNDOS: usize = 4000;
 /// Limite de imagens por página.
 const MAX_IMAGENS: usize = 80;
+/// Limite de formas de SVG por página.
+const MAX_FORMAS: usize = 4000;
 /// Marca de quebra de linha (`<br>`) dentro do texto acumulado.
 const QUEBRA: &str = "\u{1}";
 
@@ -225,6 +230,7 @@ struct Ctx<'a> {
     fundos: Vec<Fundo>,
     fundo_pagina: Option<[u8; 3]>,
     imagens: Vec<Imagem>,
+    formas: Vec<FormaSvg>,
     /// Tamanho natural das imagens já baixadas, por endereço.
     tamanhos: &'a HashMap<String, (f32, f32)>,
     /// O próximo elemento tratado vira bloco (filho de flex).
@@ -325,6 +331,7 @@ pub fn layout_com_imagens(
         fundos: Vec::new(),
         fundo_pagina: None,
         imagens: Vec::new(),
+        formas: Vec::new(),
         tamanhos,
         forcar_bloco: false,
         gap: 0.0,
@@ -350,6 +357,7 @@ pub fn layout_com_imagens(
         fundos: ctx.fundos,
         fundo_pagina: ctx.fundo_pagina,
         imagens: ctx.imagens,
+        formas: ctx.formas,
     }
 }
 
@@ -504,6 +512,12 @@ fn tratar_elemento(
     if el.tag == "img" {
         flush_inline(buf, style, ctx);
         colocar_imagem(el, &css, style, link, ctx);
+        return info;
+    }
+
+    if el.tag == "svg" {
+        flush_inline(buf, style, ctx);
+        colocar_svg(el, &css, style, ctx);
         return info;
     }
 
@@ -706,6 +720,54 @@ fn colocar_imagem(
     ctx.y += h;
 }
 
+/// Tamanho pedido para o SVG, em pontos: CSS, atributos ou `viewBox`. (0, 0) se não der para saber.
+fn dimensoes_svg(el: &Element, css: &Estilo) -> (f32, f32) {
+    let largura = css.largura.filter(|v| *v > 0.0).or(numero_do_atributo(el, "width"));
+    let altura = css.altura.filter(|v| *v > 0.0).or(numero_do_atributo(el, "height"));
+    match (largura, altura, svg::tamanho_natural(el)) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some((nw, nh))) => (w, w * nh / nw),
+        (None, Some(h), Some((nw, nh))) => (h * nw / nh, h),
+        (None, None, Some((nw, nh))) => (nw, nh),
+        (Some(w), None, None) => (w, w),
+        (None, Some(h), None) => (h, h),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Põe um SVG em bloco, na linha atual, como formas desenhadas pela casca.
+fn colocar_svg(el: &Element, css: &Estilo, style: Style, ctx: &mut Ctx<'_>) {
+    let (mut w, mut h) = dimensoes_svg(el, css);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    if w > ctx.width && ctx.width > 0.0 {
+        h *= ctx.width / w;
+        w = ctx.width;
+    }
+    let deslocamento = match style.align {
+        1 => ((ctx.width - w) / 2.0).max(0.0),
+        2 => (ctx.width - w).max(0.0),
+        _ => 0.0,
+    };
+    if ctx.formas.len() < MAX_FORMAS {
+        let mut formas = svg::extrair(el, ctx.x0 + deslocamento, ctx.y, w, h);
+        // `currentColor` vale a cor do texto, quando a página definiu uma (no próprio SVG ou acima dele).
+        if let Some([r, g, b]) = cor_do_css(css.cor).or(style.color) {
+            for forma in formas.iter_mut() {
+                if forma.preenchimento == Tinta::Atual {
+                    forma.preenchimento = Tinta::Rgb(r, g, b);
+                }
+                if forma.traco == Tinta::Atual {
+                    forma.traco = Tinta::Rgb(r, g, b);
+                }
+            }
+        }
+        ctx.formas.extend(formas);
+    }
+    ctx.y += h;
+}
+
 /// Maior largura entre as imagens visíveis da subárvore. None quando não há imagem.
 /// Imagem de tamanho ainda desconhecido conta 1 pt, só para o elemento não ser tratado como vazio.
 fn largura_das_imagens(nodes: &[Node], ctx: &mut Ctx<'_>) -> Option<f32> {
@@ -723,6 +785,11 @@ fn largura_das_imagens(nodes: &[Node], ctx: &mut Ctx<'_>) -> Option<f32> {
                 if let Some(src) = origem_da_imagem(el) {
                     let (w, _) = tamanho_da_imagem(el, &css, &src, ctx);
                     maior = Some(maior.unwrap_or(0.0).max(w.max(1.0)));
+                }
+            } else if el.tag == "svg" {
+                let (w, h) = dimensoes_svg(el, &css);
+                if w > 0.0 && h > 0.0 {
+                    maior = Some(maior.unwrap_or(0.0).max(w));
                 }
             } else {
                 ctx.pais.push(info.clone());
@@ -1139,7 +1206,7 @@ fn texto_visivel(nodes: &[Node], ctx: &mut Ctx<'_>, saida: &mut String) {
                 let info = info_do_elemento(el, ctx.folha.nomes_atributos());
                 let ultimo = Some(i) == ultimo_idx;
                 let css = estilo_do_elemento(el, &info, &irmaos, ultimo, ctx);
-                let visivel = !SKIP_TAGS.contains(&el.tag.as_str()) && !css.oculto;
+                let visivel = !SKIP_TAGS.contains(&el.tag.as_str()) && !css.oculto && el.tag != "svg";
                 if visivel {
                     if el.tag == "br" {
                         saida.push(' ');
@@ -1915,6 +1982,39 @@ mod tests {
         assert!(s.comandos.iter().all(|c| match c {
             DrawCommand::Text { x, .. } => *x > s.imagens[0].x,
         }));
+    }
+
+    #[test]
+    fn svg_vira_formas_na_posicao_da_pagina() {
+        let s = completo(
+            "<svg width=\"20\" height=\"20\" viewBox=\"0 0 10 10\"><path d=\"M0 0 L10 10\" stroke=\"currentColor\" fill=\"none\"/></svg><p>oi</p>",
+            408.0,
+        );
+        assert_eq!(s.formas.len(), 1);
+        assert_eq!(s.formas[0].caminho, "M 8.00 8.00 L 28.00 28.00");
+        match &s.comandos[0] {
+            DrawCommand::Text { y, .. } => assert!(*y >= 28.0),
+        }
+    }
+
+    #[test]
+    fn svg_com_tamanho_do_css_e_current_color() {
+        let s = completo(
+            "<style>.i{width:16px;height:16px;color:#ff0000}</style><svg class=\"i\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><rect width=\"24\" height=\"24\"/></svg>",
+            408.0,
+        );
+        assert_eq!(s.formas.len(), 1);
+        assert_eq!(s.formas[0].preenchimento, Tinta::Rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn svg_em_flex_nao_some() {
+        let s = completo(
+            "<style>.f{display:flex}</style><div class=f><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"8\"/></svg><span>oi</span></div>",
+            400.0,
+        );
+        assert_eq!(s.formas.len(), 1);
+        assert_eq!(s.comandos.len(), 1);
     }
 
     #[test]

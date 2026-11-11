@@ -104,6 +104,12 @@ enum ModoNoturnoForcado {
                 raio: f.raio
             )
         }
+        saida.formas = pagina.formas.map { forma in
+            var f = forma
+            f.preenchimento = inverterTinta(forma.preenchimento)
+            f.traco = inverterTinta(forma.traco)
+            return f
+        }
         saida.itens = pagina.itens.map { i in
             DrawItem(
                 x: i.x, y: i.y, fontSize: i.fontSize, bold: i.bold, href: i.href,
@@ -114,6 +120,14 @@ enum ModoNoturnoForcado {
             )
         }
         return saida
+    }
+
+    private static func inverterTinta(_ tinta: TintaSvg) -> TintaSvg {
+        if case .rgb(let r, let g, let b) = tinta {
+            let nova = inverter(CorTexto(r: r, g: g, b: b))
+            return .rgb(nova.r, nova.g, nova.b)
+        }
+        return tinta
     }
 
     private static func inverter(_ cor: CorTexto) -> CorTexto {
@@ -330,29 +344,37 @@ private struct CorpoDoBotao: View {
                 }
                 forma.stroke(escuro ? Color.white.opacity(0.14) : Color.black.opacity(0.08), lineWidth: 0.5)
             }
-            .shadow(color: escuro ? Color.white.opacity(0.16) : Color.black.opacity(0.2), radius: 6, x: 0, y: 2)
+            .shadow(color: escuro ? Color.white.opacity(0.1) : Color.black.opacity(0.16), radius: 5, x: 0, y: 2)
         }
     }
 
-    /// Brilho que nasce no ponto do toque e se espalha pelo botão, ficando mais fraco quanto mais longe vai.
+    /// Uma bolinha de luz desfocada que nasce no ponto do toque e se espalha por todo o botão.
+    /// Quanto mais longe ela vai, mais fraca fica, até sumir.
     @ViewBuilder
     private var brilho: some View {
         if luminoso && progresso < 1 {
-            let raioFinal = max(tamanho.width, tamanho.height) * 1.1 + 20
-            let diametro = max(2, raioFinal * 2 * progresso)
-            let cor: Color = escuro ? Color.white : Color.accentColor
+            let raioFinal = max(tamanho.width, tamanho.height) * 1.2 + 30
+            // Sai rápido do ponto do toque e desacelera.
+            let avanco = 1 - (1 - progresso) * (1 - progresso)
+            let raio = 12 + raioFinal * avanco
+            let forca = padrao.forca * Double((1 - progresso) * (1 - progresso))
+            let cor: Color = escuro ? Color.white : Color(red: 0.2, green: 0.45, blue: 1.0)
             Circle()
                 .fill(
                     RadialGradient(
-                        gradient: Gradient(colors: [cor.opacity(padrao.forca), cor.opacity(0)]),
+                        gradient: Gradient(stops: [
+                            .init(color: cor.opacity(forca), location: 0),
+                            .init(color: cor.opacity(forca * 0.5), location: 0.5),
+                            .init(color: cor.opacity(0), location: 1)
+                        ]),
                         center: .center,
                         startRadius: 0,
-                        endRadius: diametro / 2
+                        endRadius: raio
                     )
                 )
-                .frame(width: diametro, height: diametro)
+                .frame(width: raio * 2, height: raio * 2)
+                .blur(radius: 5)
                 .position(x: origem.x, y: origem.y)
-                .opacity(Double(1 - progresso))
                 .clipShape(forma)
                 .allowsHitTesting(false)
         }
@@ -443,15 +465,18 @@ struct PainelVidro<Conteudo: View>: View {
     }
 }
 
-/// Etiqueta das opções que podem pesar no desempenho.
+/// Etiqueta de desempenho: laranja nas opções que podem pesar, azul nas que ajudam.
 struct EtiquetaDesempenho: View {
+    var ajuda = false
+
     var body: some View {
+        let cor: Color = ajuda ? Color.blue : Color.orange
         Text("Desempenho")
             .font(.system(size: 10, weight: .bold))
-            .foregroundColor(Color.orange)
+            .foregroundColor(cor)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
-            .background(Capsule().fill(Color.orange.opacity(0.22)))
+            .background(Capsule().fill(cor.opacity(0.22)))
     }
 }
 

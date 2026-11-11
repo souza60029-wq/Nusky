@@ -7,6 +7,7 @@ struct PaginaView: UIViewRepresentable {
     let itens: [DrawItem]
     let fundos: [Fundo]
     let imagens: [ImagemPagina]
+    let formas: [FormaVetor]
     /// Endereço da página, para completar os endereços relativos das imagens.
     let baseURL: URL?
     let fundoPagina: CorTexto?
@@ -18,8 +19,8 @@ struct PaginaView: UIViewRepresentable {
     let aoTocarPagina: () -> Void
     /// O dedo começou a arrastar a página (a barra recolhe).
     let aoComecarRolar: () -> Void
-    /// Dá acesso à tela desenhada, para tirar a miniatura da aba.
-    let controle: PaginaControle
+    /// Desenha a página na GPU (Metal), quando o aparelho dá suporte.
+    let usarMetal: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -45,22 +46,27 @@ struct PaginaView: UIViewRepresentable {
             scroll.backgroundColor = escuro ? .black : .white
         }
         scroll.alturaDaPagina = altura
-        controle.desenho = scroll.desenho
-        controle.rolagem = scroll
+        scroll.definirMetal(usarMetal)
+        scroll.vistaMetal?.corDeFundo = scroll.backgroundColor ?? .white
 
         let desenho = scroll.desenho
         if desenho.escuro != escuroEfetivo {
             desenho.escuro = escuroEfetivo
             desenho.setNeedsDisplay()
+            scroll.vistaMetal?.escuro = escuroEfetivo
+            scroll.vistaMetal?.limparCache()
+            scroll.setNeedsLayout()
         }
         desenho.aoTocarLink = { link in c.pai.aoAbrirLink(link) }
         desenho.aoTocarPagina = { c.pai.aoTocarPagina() }
 
         // Página nova: o primeiro item muda, porque cada carregamento gera ids novos.
-        let identificacao = itens.first?.id ?? fundos.first?.id ?? imagens.first?.id
+        let identificacao = itens.first?.id ?? fundos.first?.id ?? imagens.first?.id ?? formas.first?.id
         if identificacao != c.identificacao {
             c.identificacao = identificacao
-            desenho.trocarItens(itens, fundos: fundos, imagens: imagens, base: baseURL)
+            desenho.trocarItens(itens, fundos: fundos, imagens: imagens, formas: formas, base: baseURL)
+            scroll.vistaMetal?.limparCache()
+            scroll.setNeedsLayout()
             scroll.layoutIfNeeded()
             scroll.setContentOffset(CGPoint(x: 0, y: restoreY), animated: false)
         }
@@ -87,6 +93,29 @@ struct PaginaView: UIViewRepresentable {
 /// UIScrollView que contém o desenho e ajusta o tamanho da página.
 final class PaginaScroll: UIScrollView {
     let desenho = DesenhoPagina()
+    /// Desenho na GPU, quando ligado nos ajustes e o aparelho aceita.
+    private(set) var vistaMetal: VistaMetal?
+
+    /// Liga ou desliga o desenho em Metal. Se o Metal não estiver disponível, fica o desenho normal.
+    func definirMetal(_ ativo: Bool) {
+        if ativo {
+            if vistaMetal == nil, let nova = VistaMetal.criar() {
+                nova.fonte = desenho
+                nova.escuro = desenho.escuro
+                addSubview(nova)
+                vistaMetal = nova
+            }
+        } else if vistaMetal != nil {
+            vistaMetal?.removeFromSuperview()
+            vistaMetal = nil
+        }
+        let ligado = vistaMetal != nil
+        if desenho.modoMetal != ligado {
+            desenho.modoMetal = ligado
+            desenho.setNeedsDisplay()
+            setNeedsLayout()
+        }
+    }
 
     var alturaDaPagina: CGFloat = 0 {
         didSet {
@@ -109,6 +138,12 @@ final class PaginaScroll: UIScrollView {
         super.layoutSubviews()
         desenho.frame = CGRect(x: 0, y: 0, width: bounds.width, height: alturaDaPagina)
         contentSize = desenho.frame.size
+        // A vista Metal acompanha a parte visível; rolar só muda o deslocamento.
+        if let metal = vistaMetal {
+            metal.frame = bounds
+            metal.deslocamento = bounds.origin.y
+            metal.renderizar()
+        }
     }
 }
 
@@ -120,8 +155,11 @@ final class DesenhoPagina: UIView {
     /// Imagens da página, cada uma com a chave do cache (nil se o endereço não vale).
     private var figuras: [(imagem: ImagemPagina, chave: String?)] = []
     private var observador: NSObjectProtocol?
+    private var vetores: [FormaVetor] = []
 
     var escuro = false
+    /// Com o Metal ligado, este desenho não pinta nada: só guarda os dados e recebe os toques.
+    var modoMetal = false
     var aoTocarLink: ((String) -> Void)?
     var aoTocarPagina: (() -> Void)?
 
@@ -155,7 +193,7 @@ final class DesenhoPagina: UIView {
         fatalError("não usado")
     }
 
-    func trocarItens(_ novos: [DrawItem], fundos: [Fundo], imagens: [ImagemPagina], base: URL?) {
+    func trocarItens(_ novos: [DrawItem], fundos: [Fundo], imagens: [ImagemPagina], formas: [FormaVetor], base: URL?) {
         let ordenados = novos.sorted { CGFloat($0.y) < CGFloat($1.y) }
         let preparadas: [(imagem: ImagemPagina, chave: String?)] = imagens.map { img in
             guard let base, let url = resolverEnderecoDeImagem(img.src, base: base) else { return (img, nil) }
@@ -165,6 +203,7 @@ final class DesenhoPagina: UIView {
         lista = ordenados
         caixas = fundos
         figuras = preparadas
+        vetores = formas
         trava.unlock()
         setNeedsDisplay()
     }
@@ -175,24 +214,48 @@ final class DesenhoPagina: UIView {
         return lista
     }
 
-    /// Imagem da parte da página que está na tela, para a tela de abas.
-    func miniatura(tamanho: CGSize, deslocamento: CGFloat, fundo: UIColor) -> UIImage? {
-        let formato = UIGraphicsImageRendererFormat()
-        formato.scale = 1
-        formato.opaque = true
-        let renderizador = UIGraphicsImageRenderer(size: tamanho, format: formato)
-        return renderizador.image { contexto in
-            fundo.setFill()
-            contexto.fill(CGRect(origin: .zero, size: tamanho))
-            contexto.cgContext.translateBy(x: 0, y: -deslocamento)
-            draw(CGRect(x: 0, y: deslocamento, width: tamanho.width, height: tamanho.height))
-        }
-    }
-
     private func copiaCaixas() -> [Fundo] {
         trava.lock()
         defer { trava.unlock() }
         return caixas
+    }
+
+    private func copiaVetores() -> [FormaVetor] {
+        trava.lock()
+        defer { trava.unlock() }
+        return vetores
+    }
+
+    /// Cor de uma tinta de SVG. `currentColor` vale a cor padrão do texto.
+    private func cor(de tinta: TintaSvg, opacidade: CGFloat) -> UIColor? {
+        switch tinta {
+        case .nenhuma:
+            return nil
+        case .atual:
+            return (escuro ? UIColor.white : UIColor.black).withAlphaComponent(opacidade)
+        case .rgb(let r, let g, let b):
+            return UIColor(red: CGFloat(r), green: CGFloat(g), blue: CGFloat(b), alpha: opacidade)
+        }
+    }
+
+    /// Desenha os ícones e logotipos em SVG que tocam o bloco.
+    private func desenharFormas(_ rect: CGRect) {
+        guard let contexto = UIGraphicsGetCurrentContext() else { return }
+        for forma in copiaVetores() where forma.caixa.intersects(rect) {
+            if let cor = cor(de: forma.preenchimento, opacidade: forma.opacidadePreenchimento) {
+                contexto.setFillColor(cor.cgColor)
+                contexto.addPath(forma.caminho)
+                contexto.fillPath(using: forma.parImpar ? .evenOdd : .winding)
+            }
+            if forma.larguraTraco > 0, let cor = cor(de: forma.traco, opacidade: forma.opacidadeTraco) {
+                contexto.setStrokeColor(cor.cgColor)
+                contexto.setLineWidth(forma.larguraTraco)
+                contexto.setLineCap(.round)
+                contexto.setLineJoin(.round)
+                contexto.addPath(forma.caminho)
+                contexto.strokePath()
+            }
+        }
     }
 
     private func copiaFiguras() -> [(imagem: ImagemPagina, chave: String?)] {
@@ -241,9 +304,25 @@ final class DesenhoPagina: UIView {
         }
     }
 
+    /// Cópia dos dados da página para a vista Metal.
+    struct DadosParaGPU {
+        let itens: [DrawItem]
+        let caixas: [Fundo]
+        let figuras: [(imagem: ImagemPagina, chave: String?)]
+        let vetores: [FormaVetor]
+    }
+
+    func dadosParaGPU() -> DadosParaGPU {
+        trava.lock()
+        defer { trava.unlock() }
+        return DadosParaGPU(itens: lista, caixas: caixas, figuras: figuras, vetores: vetores)
+    }
+
     override func draw(_ rect: CGRect) {
+        if modoMetal { return }
         desenharFundos(rect)
         desenharImagens(rect)
+        desenharFormas(rect)
         let itens = copia()
         var i = primeiroAPartir(itens, rect.minY - 80)
         while i < itens.count && CGFloat(itens[i].y) <= rect.maxY {
@@ -264,7 +343,7 @@ final class DesenhoPagina: UIView {
         texto.draw(at: CGPoint(x: CGFloat(item.x), y: CGFloat(item.y)))
     }
 
-    private func atributos(_ item: DrawItem) -> [NSAttributedString.Key: Any] {
+    func atributos(_ item: DrawItem) -> [NSAttributedString.Key: Any] {
         var a: [NSAttributedString.Key: Any] = [
             .font: fonte(item),
             .foregroundColor: cor(item)
@@ -365,16 +444,4 @@ private func luminanciaRelativa(_ cor: CorTexto) -> Double {
 /// Razão de contraste entre duas luminâncias: de 1 (igual) a 21 (preto contra branco).
 private func razaoDeContraste(_ a: Double, _ b: Double) -> Double {
     (max(a, b) + 0.05) / (min(a, b) + 0.05)
-}
-
-/// Ponte entre a tela e o código que tira a miniatura da aba.
-final class PaginaControle {
-    weak var desenho: DesenhoPagina?
-    weak var rolagem: UIScrollView?
-
-    /// Miniatura do que aparece na tela agora. Nil se a página ainda não foi desenhada.
-    func miniatura(tamanho: CGSize, fundo: UIColor) -> UIImage? {
-        guard let desenho else { return nil }
-        return desenho.miniatura(tamanho: tamanho, deslocamento: rolagem?.contentOffset.y ?? 0, fundo: fundo)
-    }
 }

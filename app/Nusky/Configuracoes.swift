@@ -32,6 +32,7 @@ struct PainelAjustes: View {
     @AppStorage(JSRodador.chaveAtivo) private var javascriptLigado = true
     @AppStorage(BrowserModel.chaveImagens) private var imagensLigadas = true
     @AppStorage(ChavesTema.desfoque) private var desfoque = true
+    @AppStorage("usarMetal") private var usarMetal = false
     @AppStorage(ChavesTema.forcarNoturno) private var forcarNoturno = false
     @AppStorage(ChavesTema.feedbackLuminoso) private var feedbackLuminoso = true
     @AppStorage(ChavesTema.feedbackExpansivo) private var feedbackExpansivo = true
@@ -258,6 +259,14 @@ struct PainelAjustes: View {
                     desempenho: true
                 )
             }
+            cartao {
+                linhaChave(
+                    "Metal (desenho na GPU)",
+                    detalhe: "O texto, as imagens e os ícones viram texturas na GPU, e rolar a página não redesenha nada pela CPU. Se o aparelho não aceitar, o desenho normal continua.",
+                    valor: $usarMetal,
+                    ajuda: true
+                )
+            }
         }
     }
 
@@ -372,14 +381,20 @@ struct PainelAjustes: View {
             .padding(.leading, 16)
     }
 
-    private func linhaChave(_ titulo: String, detalhe: String?, valor: Binding<Bool>, desempenho: Bool = false) -> some View {
+    private func linhaChave(
+        _ titulo: String,
+        detalhe: String?,
+        valor: Binding<Bool>,
+        desempenho: Bool = false,
+        ajuda: Bool = false
+    ) -> some View {
         Toggle(isOn: valor) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(titulo)
                         .font(.system(size: 17))
-                    if desempenho {
-                        EtiquetaDesempenho()
+                    if desempenho || ajuda {
+                        EtiquetaDesempenho(ajuda: ajuda)
                     }
                 }
                 if let detalhe {

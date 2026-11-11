@@ -114,6 +114,14 @@ pub extern "C" fn nusky_render(
     nusky_render_imagens(html, viewport_width, measure, ptr::null())
 }
 
+fn formatar_tinta(tinta: crate::svg::Tinta) -> String {
+    match tinta {
+        crate::svg::Tinta::Nenhuma => String::new(),
+        crate::svg::Tinta::Atual => "cur".to_string(),
+        crate::svg::Tinta::Rgb(r, g, b) => format!("{},{},{}", r, g, b),
+    }
+}
+
 /// Lê o tamanho natural das imagens já baixadas: uma linha por imagem, `endereco<TAB>largura<TAB>altura`.
 fn ler_tamanhos(texto: &str) -> HashMap<String, (f32, f32)> {
     let mut mapa = HashMap::new();
@@ -196,6 +204,20 @@ pub extern "C" fn nusky_render_imagens(
             i.h,
             sanitize(i.href.as_deref().unwrap_or("")),
             sanitize(&i.src),
+        ));
+    }
+    // Formas de SVG: `V<TAB>preenchimento opac. traço opac. largura par-ímpar caminho`.
+    // Tinta: vazio = nenhuma, `cur` = cor do texto, ou `r,g,b`.
+    for forma in &saida.formas {
+        out.push_str(&format!(
+            "V\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            formatar_tinta(forma.preenchimento),
+            forma.opacidade_preenchimento,
+            formatar_tinta(forma.traco),
+            forma.opacidade_traco,
+            forma.largura_traco,
+            forma.par_impar as u8,
+            sanitize(&forma.caminho),
         ));
     }
     for cmd in saida.comandos {
@@ -606,6 +628,15 @@ mod tests {
         let out = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
         nusky_free_string(p);
         assert_eq!(out, "I\t8\t8\t30\t20\t\tb.png\n");
+    }
+
+    #[test]
+    fn render_envia_formas_de_svg() {
+        let saida = render_with(
+            "<svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"><path d=\"M0 0 L10 10\" stroke=\"red\" fill=\"none\"/></svg>",
+            None,
+        );
+        assert_eq!(saida, "V\t\t1\t255,0,0\t1\t1\t0\tM 8.00 8.00 L 18.00 18.00\n");
     }
 
     #[test]

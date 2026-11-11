@@ -12,6 +12,8 @@ final class BrowserModel: ObservableObject {
     @Published var fundoPagina: CorTexto? = nil
     /// Imagens da página, com a posição já calculada.
     @Published var imagens: [ImagemPagina] = []
+    /// Formas de SVG da página (ícones, logotipos).
+    @Published var formas: [FormaVetor] = []
     @Published var contentHeight: CGFloat = 0
     @Published var status = ""
     @Published var pageVersion = 0
@@ -255,6 +257,7 @@ final class BrowserModel: ObservableObject {
         items = []
         fundos = []
         imagens = []
+        formas = []
         fundoPagina = nil
         contentHeight = 0
         carregando = true
@@ -358,11 +361,13 @@ final class BrowserModel: ObservableObject {
         items = novosItens
         fundos = desenhada.fundos
         imagens = desenhada.imagens
+        formas = desenhada.formas
         fundoPagina = desenhada.fundoPagina
         let fimTexto = novosItens.map { CGFloat($0.y) + CGFloat($0.fontSize) }.max() ?? 0
         let fimFundos = desenhada.fundos.map { $0.y + $0.h }.max() ?? 0
         let fimImagens = desenhada.imagens.map { $0.y + $0.h }.max() ?? 0
-        contentHeight = max(fimTexto, max(fimFundos, fimImagens)) + 80
+        let fimFormas = desenhada.formas.map { $0.caixa.maxY }.max() ?? 0
+        contentHeight = max(max(fimTexto, fimFundos), max(fimImagens, fimFormas)) + 80
     }
 
     /// Baixa as imagens da página aos poucos (6 por vez, no máximo 60). A cada lote, se algum

@@ -13,16 +13,11 @@ enum ChavesTermos {
 // MARK: - Boas-vindas
 
 /// Primeira abertura: três telas de apresentação com ícones animados e, depois, os termos.
-///
-/// Escondido: cinco toques rápidos no primeiro ícone abrem o teste dos termos novos
-/// (fonte própria, espera de 3 segundos e rubrica com corte). Esse teste não grava aceite.
 struct BoasVindas: View {
     let aoAceitar: () -> Void
 
     @Environment(\.colorScheme) private var esquema
     @State private var etapa = 0
-    @State private var modoTeste = false
-    @State private var toquesNoIcone: [Date] = []
 
     private var escuro: Bool { esquema == .dark }
     private var texto: Color { escuro ? .white : .black }
@@ -48,14 +43,7 @@ struct BoasVindas: View {
             if etapa < paginas.count {
                 apresentacao
             } else {
-                TermosDeUso(
-                    aoAceitar: modoTeste ? nil : aoAceitar,
-                    modoTeste: modoTeste,
-                    aoConcluirTeste: {
-                        modoTeste = false
-                        etapa = 0
-                    }
-                )
+                TermosDeUso(aoAceitar: aoAceitar)
             }
         }
         .animation(.easeInOut(duration: 0.3), value: etapa)
@@ -137,23 +125,10 @@ struct BoasVindas: View {
         switch etapa {
         case 0:
             IconeNuvem()
-                .contentShape(Rectangle())
-                .onTapGesture { contarToque() }
         case 1:
             IconeBusca(escuro: escuro)
         default:
             IconeCadeado(escuro: escuro)
-        }
-    }
-
-    /// Cinco toques em menos de dois segundos abrem o teste dos termos.
-    private func contarToque() {
-        let agora = Date()
-        toquesNoIcone = toquesNoIcone.filter { agora.timeIntervalSince($0) < 2 } + [agora]
-        if toquesNoIcone.count >= 5 {
-            toquesNoIcone = []
-            modoTeste = true
-            etapa = paginas.count
         }
     }
 }
@@ -193,31 +168,43 @@ private struct FundoColorido: View {
 }
 
 /// A nuvem do Nusky flutuando, com a órbita girando e estrelas piscando.
+/// A bolinha da órbita passa por trás da nuvem quando está na metade de trás do círculo.
 private struct IconeNuvem: View {
     var body: some View {
         TimelineView(.animation) { contexto in
             let t = contexto.date.timeIntervalSinceReferenceDate
             let flutua = CGFloat(sin(t * 1.6)) * 8
             let angulo = t * 1.9
+            let atras = sin(angulo) < 0
             ZStack {
                 Ellipse()
                     .stroke(Color.yellow.opacity(0.9), lineWidth: 5)
                     .frame(width: 180, height: 50)
                     .offset(y: 18 + flutua)
 
+                if atras {
+                    bolinha(angulo, flutua)
+                }
+
                 nuvem
                     .offset(y: flutua)
 
-                Circle()
-                    .fill(Color.yellow)
-                    .frame(width: 14, height: 14)
-                    .offset(x: CGFloat(cos(angulo)) * 90, y: 18 + flutua + CGFloat(sin(angulo)) * 25)
+                if !atras {
+                    bolinha(angulo, flutua)
+                }
 
                 estrela(t, fase: 0).offset(x: -78, y: -70)
                 estrela(t, fase: 1.7).offset(x: 80, y: -52)
                 estrela(t, fase: 3.1).offset(x: 62, y: 74)
             }
         }
+    }
+
+    private func bolinha(_ angulo: Double, _ flutua: CGFloat) -> some View {
+        Circle()
+            .fill(Color.yellow)
+            .frame(width: 14, height: 14)
+            .offset(x: CGFloat(cos(angulo)) * 90, y: 18 + flutua + CGFloat(sin(angulo)) * 25)
     }
 
     private var nuvem: some View {
@@ -243,18 +230,19 @@ private struct IconeNuvem: View {
     }
 }
 
-/// Uma barra de busca digitando "arena", com resultados que aparecem em seguida.
+/// Uma barra de busca digitando "com.nusky", com resultados que aparecem em seguida.
 private struct IconeBusca: View {
     let escuro: Bool
+    private let endereco = "com.nusky"
 
     var body: some View {
         TimelineView(.animation) { contexto in
             let t = contexto.date.timeIntervalSinceReferenceDate
-            let ciclo = t.truncatingRemainder(dividingBy: 5.0)
-            let letras = min(5, max(0, Int(ciclo * 2.4)))
-            let digitado = String("arena".prefix(letras))
+            let ciclo = t.truncatingRemainder(dividingBy: 6.0)
+            let letras = min(endereco.count, max(0, Int(ciclo * 3.0)))
+            let digitado = String(endereco.prefix(letras))
             let mostrarCursor = Int(t * 2.5) % 2 == 0
-            let resultados = letras >= 4
+            let resultados = letras >= 7
 
             VStack(spacing: 14) {
                 HStack(spacing: 10) {
@@ -262,12 +250,12 @@ private struct IconeBusca: View {
                         .font(.system(size: 20, weight: .semibold))
                         .offset(x: CGFloat(sin(t * 3)) * 2)
                     Text(digitado + (mostrarCursor ? "|" : " "))
-                        .font(.system(size: 22, weight: .medium, design: .rounded))
+                        .font(.system(size: 20, weight: .medium, design: .rounded))
                     Spacer(minLength: 0)
                 }
                 .foregroundColor(escuro ? Color.white : Color.black)
                 .padding(.horizontal, 18)
-                .frame(width: 190, height: 54)
+                .frame(width: 200, height: 54)
                 .background(Capsule().fill(Color.accentColor.opacity(0.22)))
                 .overlay(Capsule().stroke(Color.accentColor.opacity(0.6), lineWidth: 1.5))
 
@@ -287,7 +275,7 @@ private struct IconeBusca: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
-        .frame(width: 170, height: 30)
+        .frame(width: 180, height: 30)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.08)))
         .opacity(aparece ? 1 : 0)
         .offset(y: aparece ? 0 : 10)
@@ -295,7 +283,7 @@ private struct IconeBusca: View {
     }
 }
 
-/// Um celular com um cadeado que abre e fecha, e ondas saindo dele.
+/// Um celular com um cadeado que fecha e abre, e ondas saindo dele.
 private struct IconeCadeado: View {
     let escuro: Bool
 
@@ -303,7 +291,8 @@ private struct IconeCadeado: View {
         TimelineView(.animation) { contexto in
             let t = contexto.date.timeIntervalSinceReferenceDate
             let onda = CGFloat(t.truncatingRemainder(dividingBy: 2.4) / 2.4)
-            let aberto = sin(t * 1.3) > 0.55
+            // Fica fechado a maior parte do tempo e abre por um instante.
+            let aberto = sin(t * 1.3) > 0.8
             ZStack {
                 Circle()
                     .stroke(Color.green.opacity(Double(1 - onda) * 0.6), lineWidth: 3)
@@ -314,14 +303,17 @@ private struct IconeCadeado: View {
                     .frame(width: 96, height: 160)
 
                 VStack(spacing: -2) {
+                    // Argola do cadeado: as duas pernas ficam sempre; a da direita sobe quando abre.
                     Path { p in
+                        p.move(to: CGPoint(x: 4, y: 36))
+                        p.addLine(to: CGPoint(x: 4, y: 22))
                         p.addArc(center: CGPoint(x: 20, y: 22), radius: 16, startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
-                        p.addLine(to: CGPoint(x: 36, y: aberto ? 22 : 36))
+                        p.addLine(to: CGPoint(x: 36, y: aberto ? 26 : 36))
                     }
-                    .stroke(Color.green, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .stroke(Color.green, style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
                     .frame(width: 40, height: 40)
-                    .offset(y: aberto ? -6 : 0)
-                    .animation(.easeInOut(duration: 0.3), value: aberto)
+                    .offset(y: aberto ? -5 : 0)
+                    .animation(.easeInOut(duration: 0.25), value: aberto)
 
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.green)
@@ -335,78 +327,31 @@ private struct IconeCadeado: View {
 
 // MARK: - Termos
 
-/// Termos de uso. Com `aoAceitar`, mostra o botão "Li e aceito".
-/// Sem ele (por exemplo, em Ajustes), mostra só o texto.
-///
-/// Em `modoTeste` os termos usam fonte com serifa, esperam 3 segundos e pedem uma rubrica com o dedo,
-/// que se corta deslizando para o lado. Nada disso grava aceite.
+/// Termos de uso, em fonte com serifa. Com `aoAceitar` (primeira abertura), uma linha fina no pé da tela
+/// se enche em 3 segundos, de ponta a ponta, e então sobe, se expande e vira o botão "Aceitar os termos".
+/// Sem `aoAceitar` (por exemplo, em Ajustes), mostra só o texto.
 struct TermosDeUso: View {
     var aoAceitar: (() -> Void)? = nil
-    var modoTeste = false
-    var aoConcluirTeste: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var esquema
     private var texto: Color { esquema == .dark ? .white : .black }
 
-    // Estado do teste
-    @State private var segundos = 3
-    @State private var tracos: [[CGPoint]] = []
-    @State private var tracoAtual: [CGPoint] = []
-    @State private var comprimento: CGFloat = 0
-    @State private var etiquetaPronta = false
-    @State private var corte: CGFloat = 0
-    @State private var termosSumiram = false
-    @State private var testeConcluido = false
-    private let relogio = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// Quanto da linha de espera já encheu (0 a 1).
+    @State private var progresso: CGFloat = 0
+    @State private var pronto = false
 
-    private var fonteTitulo: Font {
-        modoTeste ? .system(size: 26, weight: .bold, design: .serif) : .system(size: 24, weight: .bold)
-    }
-
-    private var fonteClausula: Font {
-        modoTeste ? .system(size: 17, weight: .semibold, design: .serif) : .system(size: 17, weight: .semibold)
-    }
-
-    private var fonteCorpo: Font {
-        modoTeste ? .system(size: 16, design: .serif) : .system(size: 16)
-    }
+    private var fonteTitulo: Font { .system(size: 26, weight: .bold, design: .serif) }
+    private var fonteClausula: Font { .system(size: 17, weight: .semibold, design: .serif) }
+    private var fonteCorpo: Font { .system(size: 16, design: .serif) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if testeConcluido {
-                concluido
-            } else {
-                lista
-                    .opacity(termosSumiram ? 0 : 1)
-                    .scaleEffect(termosSumiram ? 0.92 : 1)
-                    .blur(radius: termosSumiram ? 12 : 0)
-
-                if modoTeste {
-                    if !termosSumiram {
-                        rodapeDoTeste
-                            .padding(.bottom, 24)
-                    }
-                } else if let aoAceitar = aoAceitar {
-                    Button(action: aoAceitar) {
-                        Text("Li e aceito")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
-                            .background(Capsule().fill(Color.accentColor))
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(EstiloToque(forma: .capsula, comFundo: false))
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 24)
-                }
+        ZStack(alignment: .bottom) {
+            lista
+            if aoAceitar != nil {
+                rodape
             }
         }
-        .onReceive(relogio) { _ in
-            if modoTeste && segundos > 0 {
-                segundos -= 1
-            }
-        }
+        .onAppear { iniciarEspera() }
     }
 
     private var lista: some View {
@@ -428,197 +373,59 @@ struct TermosDeUso: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.vertical, 24)
+            .padding(.top, 24)
+            .padding(.bottom, aoAceitar != nil ? 110 : 24)
         }
     }
 
-    // MARK: Teste: espera, rubrica e corte
-
-    @ViewBuilder
-    private var rodapeDoTeste: some View {
-        if segundos > 0 {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle().stroke(texto.opacity(0.2), lineWidth: 4)
-                    Circle()
-                        .trim(from: 0, to: CGFloat(3 - segundos) / 3)
-                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(.linear(duration: 1), value: segundos)
-                    Text("\(segundos)")
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .foregroundColor(texto)
-                }
-                .frame(width: 40, height: 40)
-                Text("Leia os termos. Em \(segundos) segundo\(segundos == 1 ? "" : "s") você poderá assinar.")
-                    .font(.system(size: 15, design: .serif))
-                    .foregroundColor(texto.opacity(0.8))
-            }
-            .padding(.horizontal, 24)
-            .frame(height: 150)
-        } else {
-            VStack(spacing: 10) {
-                areaDaRubrica
-                if etiquetaPronta {
-                    etiqueta
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .padding(.horizontal, 24)
-        }
-    }
-
-    private var areaDaRubrica: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.primary.opacity(0.07))
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(texto.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [6, 5]))
-
-            if tracos.isEmpty && tracoAtual.isEmpty {
-                Text("Faça sua rubrica aqui com o dedo")
-                    .font(.system(size: 15, design: .serif))
-                    .foregroundColor(texto.opacity(0.45))
-            }
-
-            ForEach(Array((tracos + [tracoAtual]).enumerated()), id: \.offset) { _, traco in
-                caminho(traco)
-                    .stroke(Color.yellow.opacity(0.6), style: StrokeStyle(lineWidth: 16, lineCap: .round, lineJoin: .round))
-                caminho(traco)
-                    .stroke(texto.opacity(0.85), style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-            }
-        }
-        .frame(height: 120)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { valor in
-                    if let ultimo = tracoAtual.last {
-                        comprimento += hypot(valor.location.x - ultimo.x, valor.location.y - ultimo.y)
-                    }
-                    tracoAtual.append(valor.location)
-                }
-                .onEnded { _ in
-                    tracos.append(tracoAtual)
-                    tracoAtual = []
-                    if comprimento > 140 && !etiquetaPronta {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
-                            etiquetaPronta = true
-                        }
-                    }
-                }
-        )
-    }
-
-    private func caminho(_ pontos: [CGPoint]) -> Path {
-        var p = Path()
-        guard let primeiro = pontos.first else { return p }
-        p.move(to: primeiro)
-        for ponto in pontos.dropFirst() {
-            p.addLine(to: ponto)
-        }
-        return p
-    }
-
-    /// A etiqueta da rubrica. Deslizar para o lado corta a etiqueta em duas e some com os termos.
-    private var etiqueta: some View {
-        ZStack {
-            metadeDaEtiqueta(esquerda: true)
-            metadeDaEtiqueta(esquerda: false)
-        }
-        .frame(height: 52)
-        .gesture(
-            DragGesture(minimumDistance: 4)
-                .onChanged { valor in
-                    guard corte < 1 else { return }
-                    corte = min(0.6, abs(valor.translation.width) / 260)
-                }
-                .onEnded { valor in
-                    if abs(valor.translation.width) > 110 {
-                        cortar()
-                    } else {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { corte = 0 }
-                    }
-                }
-        )
-    }
-
-    private func metadeDaEtiqueta(esquerda: Bool) -> some View {
-        let sinal: CGFloat = esquerda ? -1 : 1
-        return HStack(spacing: 8) {
-            if esquerda {
-                Image(systemName: "scissors")
-                    .font(.system(size: 16, weight: .bold))
-            }
-            Text(esquerda ? "Deslize para o lado" : "para cortar")
-                .font(.system(size: 15, weight: .semibold, design: .serif))
-        }
-        .foregroundColor(Color.black.opacity(0.8))
-        .frame(maxWidth: .infinity)
-        .frame(height: 46)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.yellow.opacity(0.9))
-        )
-        .mask(
-            HStack(spacing: 0) {
-                if esquerda {
+    /// A linha de espera e o botão são o mesmo elemento: a linha sobe, cresce e ganha o texto.
+    private var rodape: some View {
+        ZStack(alignment: .bottom) {
+            // Linha de espera: uma faixa de ponta a ponta no pé da tela, que enche da esquerda para a direita.
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(texto.opacity(0.15))
                     Rectangle()
-                    Color.clear
-                } else {
-                    Color.clear
-                    Rectangle()
+                        .fill(Color.accentColor)
+                        .frame(width: geo.size.width * progresso)
                 }
             }
-        )
-        .offset(x: sinal * corte * 150, y: corte * 12)
-        .rotationEffect(.degrees(Double(sinal * corte) * 14))
-        .opacity(Double(1 - max(0, corte - 0.6) * 2.5))
-    }
+            .frame(height: 4)
+            .opacity(pronto ? 0 : 1)
+            .ignoresSafeArea(edges: .bottom)
 
-    private func cortar() {
-        withAnimation(.easeIn(duration: 0.45)) {
-            corte = 1
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            withAnimation(.easeOut(duration: 0.7)) {
-                termosSumiram = true
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
-            withAnimation(.easeInOut(duration: 0.4)) {
-                testeConcluido = true
-            }
-        }
-    }
-
-    private var concluido: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 64))
-                .foregroundColor(Color.green)
-            Text("Teste concluído")
-                .font(.system(size: 26, weight: .bold, design: .serif))
-                .foregroundColor(texto)
-            Text("Este foi só um teste: nenhum aceite foi gravado.")
-                .font(.system(size: 16, design: .serif))
-                .foregroundColor(texto.opacity(0.7))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Spacer()
             Button {
-                aoConcluirTeste?()
+                aoAceitar?()
             } label: {
-                Text("Voltar ao início")
+                Text("Aceitar os termos")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundColor(texto)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 52)
+                    .frame(height: pronto ? 54 : 4)
+                    .opacity(pronto ? 1 : 0)
                     .contentShape(Capsule())
             }
             .buttonStyle(EstiloToque(forma: .capsula))
-            .padding(.horizontal, 24)
-            .padding(.bottom, 32)
+            .padding(.horizontal, pronto ? 24 : 0)
+            .padding(.bottom, pronto ? 28 : 0)
+            .scaleEffect(x: 1, y: pronto ? 1 : 0.05, anchor: .bottom)
+            .opacity(pronto ? 1 : 0)
+            .disabled(!pronto)
+        }
+    }
+
+    /// Enche a linha em 3 segundos e depois abre o botão.
+    private func iniciarEspera() {
+        guard aoAceitar != nil else { return }
+        progresso = 0
+        pronto = false
+        withAnimation(.linear(duration: 3)) {
+            progresso = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.05) {
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) {
+                pronto = true
+            }
         }
     }
 

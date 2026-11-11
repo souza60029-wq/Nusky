@@ -18,6 +18,7 @@ struct ContentView: View {
     @AppStorage("themeAuto") private var automatico = true
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage(ChavesTema.desfoque) private var desfoque = true
+    @AppStorage("usarMetal") private var usarMetal = false
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
     @AppStorage(ChavesTermos.versaoAceita) private var versaoAceita = ""
     @AppStorage(ChavesTermos.dataAceite) private var dataAceite = ""
@@ -34,7 +35,6 @@ struct ContentView: View {
     @State private var painel: PainelAtivo? = nil
     @State private var versaoNaAbertura = false
     @State private var mostrarBoasVindas = false
-    @State private var controle = PaginaControle()
 
     // Medidas da barra
     private let alturaReservada: CGFloat = 56   // área de toque da barra
@@ -42,7 +42,8 @@ struct ContentView: View {
     private let alturaFina: CGFloat = 24        // altura da barra recolhida, como a barra de status
     private let alturaFerramentas: CGFloat = 48
     private let folgaPescoco: CGFloat = 18      // distância entre a barra e as ferramentas, com tudo aberto
-    private let espacoDaPagina: CGFloat = 36    // espaço que a página deixa para a barra recolhida
+    private let espacoDaPagina: CGFloat = 24    // espaço que a página deixa para a barra recolhida
+    private let alturaToqueRecolhida: CGFloat = 36  // área de toque da barra recolhida
 
     // MARK: - Cores
 
@@ -106,7 +107,9 @@ struct ContentView: View {
                 .ignoresSafeArea(edges: .top)
                 .allowsHitTesting(false)
         }
-        .preferredColorScheme(esquemaPreferido)
+        // Os ícones da barra de status (hora, bateria) seguem a claridade da página, não só o tema do app:
+        // fundo escuro, ícones claros; fundo claro, ícones escuros.
+        .preferredColorScheme(fundoEscuro ? .dark : .light)
         // Boas-vindas e termos: aparecem na primeira abertura e quando a versão dos termos muda.
         .fullScreenCover(isPresented: $mostrarBoasVindas) {
             BoasVindas(aoAceitar: aceitarTermos)
@@ -163,7 +166,6 @@ struct ContentView: View {
                 },
                 onDelete: { ids in
                     model.fecharAbas(ids)
-                    for id in ids { MiniaturasAbas.compartilhada.apagar(id) }
                 },
                 onClose: { fecharPainel() }
             )
@@ -187,7 +189,6 @@ struct ContentView: View {
 
     private func abrirPainel(_ novo: PainelAtivo) {
         if novo == .ajustes { versaoNaAbertura = versaoDesktop }
-        if novo == .abas { capturarMiniatura() }
         recolher()
         withAnimation(.easeInOut(duration: 0.25)) { painel = novo }
     }
@@ -202,15 +203,6 @@ struct ContentView: View {
         if versaoDesktop != versaoNaAbertura {
             versaoNaAbertura = versaoDesktop
             model.reload()
-        }
-    }
-
-    /// Guarda a miniatura da aba aberta, para a tela de abas.
-    private func capturarMiniatura() {
-        guard !model.items.isEmpty || !model.imagens.isEmpty else { return }
-        let tamanho = CGSize(width: UIScreen.main.bounds.width, height: 620)
-        if let imagem = controle.miniatura(tamanho: tamanho, fundo: UIColor(fundo)) {
-            MiniaturasAbas.compartilhada.guardar(imagem, para: model.historico.abaAtual.id)
         }
     }
 
@@ -360,6 +352,7 @@ struct ContentView: View {
                 itens: model.items,
                 fundos: model.fundos,
                 imagens: model.imagens,
+                formas: model.formas,
                 baseURL: model.currentURL,
                 fundoPagina: model.fundoPagina,
                 altura: CGFloat(model.contentHeight),
@@ -374,28 +367,20 @@ struct ContentView: View {
                 aoComecarRolar: {
                     if expandida { recolher() }
                 },
-                controle: controle
+                usarMetal: usarMetal
             )
 
-            if model.items.isEmpty && model.imagens.isEmpty {
+            if model.items.isEmpty && model.imagens.isEmpty && model.formas.isEmpty {
                 telaVazia
             }
         }
         .padding(barraEmbaixo ? .bottom : .top, espacoDaPagina)
     }
 
-    /// Enquanto a página não está pronta: barra de progresso no centro, ou a mensagem de erro.
+    /// Mensagem de erro, quando a página não abriu. O progresso do carregamento aparece só na linha da barra.
     @ViewBuilder
     private var telaVazia: some View {
-        if model.carregando {
-            VStack(spacing: 14) {
-                ProgressView(value: model.progresso, total: 1)
-                    .frame(width: 180)
-                Text("Carregando…")
-                    .font(.system(size: 15))
-                    .foregroundColor(.gray)
-            }
-        } else if !model.status.isEmpty {
+        if !model.carregando && !model.status.isEmpty {
             Text(model.status)
                 .foregroundColor(.gray)
         }
@@ -435,8 +420,8 @@ struct ContentView: View {
                 painelBusca
             }
         }
-        .padding(.horizontal, 12)
-        .padding(barraEmbaixo ? .bottom : .top, 6)
+        .padding(.horizontal, expandida ? 12 : 0)
+        .padding(barraEmbaixo ? .bottom : .top, expandida ? 6 : 0)
         .environment(\.colorScheme, fundoEscuro ? .dark : .light)
     }
 
@@ -446,7 +431,7 @@ struct ContentView: View {
             ferramentasComPescoco
             pilulaDeEndereco
         }
-        .frame(height: alturaReservada)
+        .frame(height: expandida ? alturaReservada : alturaToqueRecolhida)
     }
 
     // Distância do centro da barra ao centro das ferramentas, com tudo aberto.
@@ -552,14 +537,14 @@ struct ContentView: View {
                 Button(action: expandir) {
                     corpoDaPilula
                         .frame(maxWidth: .infinity)
-                        .frame(height: alturaReservada)
+                        .frame(height: alturaToqueRecolhida, alignment: barraEmbaixo ? .bottom : .top)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(EstiloToque(forma: .capsula, comFundo: false))
+                .buttonStyle(EstiloToque(forma: .retangulo(0), comFundo: false))
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: alturaReservada)
+        .frame(height: expandida ? alturaReservada : alturaToqueRecolhida, alignment: barraEmbaixo ? .bottom : .top)
     }
 
     private var corpoDaPilula: some View {
@@ -570,23 +555,46 @@ struct ContentView: View {
                 .opacity(expandida ? 1 : 0)
                 .allowsHitTesting(expandida)
         }
-        .frame(width: larguraTela, height: expandida ? alturaPilula : alturaFina)
+        .frame(width: expandida ? larguraTela : UIScreen.main.bounds.width, height: expandida ? alturaPilula : alturaFina)
         .background(
-            vidroCapsula
+            fundoDaPilula
                 .overlay(alignment: .bottom) { linhaDeProgresso }
         )
+    }
+
+    /// Aberta: cápsula de vidro. Recolhida: faixa de ponta a ponta encostada na borda da tela. Em cima, ela
+    /// tem a cor da página, para se misturar com a barra de status como se fosse parte dela.
+    @ViewBuilder
+    private var fundoDaPilula: some View {
+        if expandida {
+            vidroCapsula
+        } else if barraEmbaixo {
+            ZStack {
+                if desfoque {
+                    Rectangle().fill(.ultraThinMaterial)
+                    Rectangle().fill(corPilula.opacity(0.35))
+                } else {
+                    Rectangle().fill(corPilula)
+                }
+            }
+            .overlay(alignment: .top) {
+                Rectangle().fill(corBorda).frame(height: 0.5)
+            }
+        } else {
+            Rectangle().fill(fundo)
+        }
     }
 
     @ViewBuilder
     private var linhaDeProgresso: some View {
         if model.carregando {
             GeometryReader { geo in
-                Capsule()
+                Rectangle()
                     .fill(Color.accentColor)
                     .frame(width: max(6, geo.size.width * CGFloat(model.progresso)), height: 3)
                     .frame(maxHeight: .infinity, alignment: .bottom)
             }
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: expandida ? alturaPilula / 2 : 0, style: .continuous))
         }
     }
 

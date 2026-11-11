@@ -58,11 +58,92 @@ struct ImagemPagina: Identifiable {
     let src: String
 }
 
-/// Tudo o que o motor desenha numa página: textos, caixas de fundo, imagens e a cor de fundo da página.
+/// Tinta de uma forma de SVG.
+enum TintaSvg {
+    case nenhuma
+    /// `currentColor`: a cor do texto da página.
+    case atual
+    case rgb(Double, Double, Double)
+
+    /// Lê `""` (nenhuma), `cur` ou `r,g,b`.
+    init(_ texto: Substring) {
+        if texto.isEmpty {
+            self = .nenhuma
+        } else if texto == "cur" {
+            self = .atual
+        } else {
+            let partes = texto.split(separator: ",").compactMap { Double($0) }
+            if partes.count == 3 {
+                self = .rgb(partes[0] / 255, partes[1] / 255, partes[2] / 255)
+            } else {
+                self = .nenhuma
+            }
+        }
+    }
+}
+
+/// Um caminho de SVG já na posição da página.
+struct FormaVetor: Identifiable {
+    let id = UUID()
+    var preenchimento: TintaSvg
+    var opacidadePreenchimento: CGFloat
+    var traco: TintaSvg
+    var opacidadeTraco: CGFloat
+    var larguraTraco: CGFloat
+    var parImpar: Bool
+    let caminho: CGPath
+    /// Retângulo que contém o caminho, com a folga do traço.
+    let caixa: CGRect
+
+    /// Lê os comandos `M x y`, `L x y`, `C x1 y1 x2 y2 x y` e `Z`.
+    static func caminho(de texto: Substring) -> CGPath? {
+        let caminho = CGMutablePath()
+        let t = texto.split(separator: " ")
+        var i = 0
+        func numeros(_ n: Int) -> [CGFloat]? {
+            guard i + n <= t.count else { return nil }
+            var saida: [CGFloat] = []
+            for k in 0..<n {
+                guard let v = Double(t[i + k]) else { return nil }
+                saida.append(CGFloat(v))
+            }
+            i += n
+            return saida
+        }
+        while i < t.count {
+            let comando = t[i]
+            i += 1
+            switch comando {
+            case "M":
+                guard let n = numeros(2) else { return nil }
+                caminho.move(to: CGPoint(x: n[0], y: n[1]))
+            case "L":
+                guard let n = numeros(2) else { return nil }
+                caminho.addLine(to: CGPoint(x: n[0], y: n[1]))
+            case "C":
+                guard let n = numeros(6) else { return nil }
+                caminho.addCurve(
+                    to: CGPoint(x: n[4], y: n[5]),
+                    control1: CGPoint(x: n[0], y: n[1]),
+                    control2: CGPoint(x: n[2], y: n[3])
+                )
+            case "Z":
+                caminho.closeSubpath()
+            default:
+                return nil
+            }
+        }
+        return caminho
+    }
+}
+
+/// Tudo o que o motor desenha numa página: textos, caixas de fundo, imagens, formas de SVG
+/// e a cor de fundo da página.
 struct PaginaDesenhada {
     var itens: [DrawItem] = []
     var fundos: [Fundo] = []
     var imagens: [ImagemPagina] = []
+    var formas: [FormaVetor] = []
     var fundoPagina: CorTexto? = nil
 }
 
@@ -128,8 +209,28 @@ enum Engine {
         var items: [DrawItem] = []
         var fundos: [Fundo] = []
         var imagens: [ImagemPagina] = []
+        var formas: [FormaVetor] = []
         var fundoPagina: CorTexto? = nil
         for line in output.split(separator: "\n") {
+            if line.hasPrefix("V\t") {
+                let c = line.split(separator: "\t", maxSplits: 7, omittingEmptySubsequences: false)
+                guard c.count == 8,
+                      let opPreenchimento = Double(c[2]), let opTraco = Double(c[4]),
+                      let largura = Double(c[5]),
+                      let caminho = FormaVetor.caminho(de: c[7]) else { continue }
+                let folga = CGFloat(largura) + 1
+                formas.append(FormaVetor(
+                    preenchimento: TintaSvg(c[1]),
+                    opacidadePreenchimento: CGFloat(opPreenchimento),
+                    traco: TintaSvg(c[3]),
+                    opacidadeTraco: CGFloat(opTraco),
+                    larguraTraco: CGFloat(largura),
+                    parImpar: c[6] == "1",
+                    caminho: caminho,
+                    caixa: caminho.boundingBoxOfPath.insetBy(dx: -folga, dy: -folga)
+                ))
+                continue
+            }
             if line.hasPrefix("I\t") {
                 let c = line.split(separator: "\t", omittingEmptySubsequences: false)
                 guard c.count == 7,
@@ -184,7 +285,7 @@ enum Engine {
                 fundo: parseCor(fields[7])
             ))
         }
-        return PaginaDesenhada(itens: items, fundos: fundos, imagens: imagens, fundoPagina: fundoPagina)
+        return PaginaDesenhada(itens: items, fundos: fundos, imagens: imagens, formas: formas, fundoPagina: fundoPagina)
     }
 
     /// Árvore do HTML em JSON (o parser do motor), para o JavaScript montar o document.
