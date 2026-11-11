@@ -898,6 +898,23 @@ fn layout_flex_linha(
                 &css_f,
             );
             let (mut minimo, mut ideal, mut vazia) = medir_celula(filho, estilo_f, ctx);
+            // O próprio item pode ser a imagem ou o SVG (um ícone solto dentro do flex).
+            if filho.tag == "svg" {
+                let (w, h) = dimensoes_svg(filho, &css_f);
+                if w > 0.0 && h > 0.0 {
+                    minimo = w;
+                    ideal = w - 1.0;
+                    vazia = false;
+                }
+            } else if filho.tag == "img" {
+                if let Some(src) = origem_da_imagem(filho) {
+                    let (w, _) = tamanho_da_imagem(filho, &css_f, &src, ctx);
+                    let w = w.max(1.0);
+                    minimo = w;
+                    ideal = w - 1.0;
+                    vazia = false;
+                }
+            }
             // `width` fixo em pontos manda no tamanho do item, mesmo sem texto (ícones, avatares).
             if let Some(w) = css_f.largura.filter(|w| *w > 0.0) {
                 minimo = w;
@@ -2014,6 +2031,16 @@ mod tests {
             400.0,
         );
         assert_eq!(s.formas.len(), 1);
+        assert_eq!(s.comandos.len(), 1);
+    }
+
+    #[test]
+    fn imagem_filha_direta_do_flex_nao_some() {
+        let s = completo(
+            "<style>.f{display:flex}</style><div class=f><img src=\"a.png\" width=\"20\" height=\"20\"><span>oi</span></div>",
+            400.0,
+        );
+        assert_eq!(s.imagens.len(), 1);
         assert_eq!(s.comandos.len(), 1);
     }
 
