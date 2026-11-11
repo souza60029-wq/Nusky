@@ -1,6 +1,6 @@
 # Nusky
 
-Nusky é um navegador para iPhone feito do zero. Ele não usa o motor de desenho do WebKit (o motor que o Safari usa): tem um motor próprio, escrito em Rust, que lê o HTML, aplica o CSS e desenha a página. A tela do app é feita em Swift e SwiftUI.
+Navegador para iPhone feito do zero. Ele não usa o motor de desenho do WebKit (o motor que o Safari usa): tem um motor próprio, escrito em Rust, que lê o HTML, aplica o CSS e desenha a página. A tela do app é feita em Swift e SwiftUI.
 
 Versão atual: **0.0.5**
 
@@ -21,20 +21,20 @@ Em **Ajustes > Sobre** há duas opções, e nada é verificado sozinho:
 
 ## O que o Nusky faz
 
-- Abre sites http e https, com links clicáveis, tabelas, imagens (PNG, JPEG, GIF e WebP) e as cores, fundos, bordas e disposições (flex) que a página define.
+- Abre sites http e https, com links clicáveis, tabelas, imagens (PNG, JPEG, GIF e WebP), ícones e logotipos em SVG, e as cores, fundos, bordas, destaques de texto, fontes com serifa e disposições (flex) que a página define.
 - Executa o JavaScript das páginas, por até 6 segundos, para sites que montam a página no aparelho. Sites muito pesados podem abrir incompletos.
 - Encontra sites pelo nome. A busca roda numa lista que fica no aparelho, aceita erro de digitação e não envia o que você pesquisa.
-- Abas em cartões grandes, com miniatura da página, como a tela de apps recentes do iOS.
+- Abas numa grade de cartões, cada um com o ícone e o nome do site.
 - Favoritos e histórico, com o ícone de cada site.
 - Compartilhar, recarregar, voltar e avançar.
-- Barra de endereço que fica fina, do tamanho da barra de status, e se abre com um toque. Ao tocar no campo, o endereço fica todo selecionado.
+- Barra de endereço que fica fina, encostada na borda da tela como a do Safari (em cima, ela se mistura com a barra de status), e se abre com um toque. Ao tocar no campo, o endereço fica todo selecionado.
 - Diagnóstico da página aberta, com relatório de texto para copiar.
 
 ## Ajustes
 
 - **Aparência:** tema automático ou noturno, forçar modo noturno nos sites (escurece páginas claras), barra em cima ou embaixo e efeito de desfoque.
 - **Toque:** feedback luminoso, expansivo e tátil, cada um liga e desliga sozinho, com intensidade Leve, Padrão ou Extravagante.
-- **Navegação:** versão desktop, mostrar imagens e executar JavaScript.
+- **Navegação:** versão desktop, mostrar imagens, executar JavaScript e Metal. O Metal desenha o texto, as imagens e os ícones na GPU; a etiqueta azul indica que ele ajuda no desempenho. Se o aparelho não aceitar, o desenho normal continua.
 - **Privacidade:** limpar histórico, cookies e cache.
 - **Sobre:** versão, lista de sites, atualizações, repositório do projeto, diagnóstico e termos de uso.
 
@@ -47,7 +47,7 @@ Histórico, favoritos, pesquisas, miniaturas das abas, cookies e sessões ficam 
 ## Limitações
 
 - O Nusky ainda não é um navegador completo: nem todo site abre, e cada um precisa ser testado no aparelho.
-- Não desenha SVG, campos de formulário, fontes próprias dos sites nem fileiras que rolam de lado (viram uma lista vertical).
+- Não desenha gradientes e máscaras de SVG, campos de formulário, fontes próprias dos sites nem fileiras que rolam de lado (viram uma lista vertical).
 - O JavaScript de páginas grandes usa bastante memória e pode ser cortado nos 6 segundos.
 
 ## Para quem quer compilar
