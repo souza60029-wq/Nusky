@@ -320,6 +320,8 @@ final class DesenhoPagina: UIView {
 
     override func draw(_ rect: CGRect) {
         if modoMetal { return }
+        let inicioDoBloco = CACurrentMediaTime()
+        defer { Desempenho.compartilhado.registrarDesenho((CACurrentMediaTime() - inicioDoBloco) * 1000) }
         desenharFundos(rect)
         desenharImagens(rect)
         desenharFormas(rect)

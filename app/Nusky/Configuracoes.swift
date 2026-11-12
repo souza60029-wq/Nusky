@@ -371,7 +371,6 @@ struct PainelAjustes: View {
             conteudo()
         }
         .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.primary.opacity(0.09)))
-        .shadow(color: fundoEscuro ? Color.white.opacity(0.08) : Color.black.opacity(0.1), radius: 6, x: 0, y: 2)
     }
 
     private var divisor: some View {

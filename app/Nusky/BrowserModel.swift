@@ -347,7 +347,10 @@ final class BrowserModel: ObservableObject {
         let width = Float(textWidth)
         let tamanhos = tamanhosImagens
         return await Task.detached(priority: .userInitiated) {
-            Engine.renderCompleto(html: html, width: width, tamanhos: tamanhos)
+            let inicio = CACurrentMediaTime()
+            let pagina = Engine.renderCompleto(html: html, width: width, tamanhos: tamanhos)
+            Desempenho.compartilhado.registrarLayout((CACurrentMediaTime() - inicio) * 1000)
+            return pagina
         }.value
     }
 
@@ -366,6 +369,9 @@ final class BrowserModel: ObservableObject {
         let fimTexto = novosItens.map { CGFloat($0.y) + CGFloat($0.fontSize) }.max() ?? 0
         let fimFundos = desenhada.fundos.map { $0.y + $0.h }.max() ?? 0
         let fimImagens = desenhada.imagens.map { $0.y + $0.h }.max() ?? 0
+        Desempenho.compartilhado.conteudo = (
+            desenhada.itens.count, desenhada.fundos.count, desenhada.imagens.count, desenhada.formas.count
+        )
         let fimFormas = desenhada.formas.map { $0.caixa.maxY }.max() ?? 0
         contentHeight = max(max(fimTexto, fimFundos), max(fimImagens, fimFormas)) + 80
     }

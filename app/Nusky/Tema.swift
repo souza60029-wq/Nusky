@@ -2,6 +2,8 @@
 import SwiftUI
 import UIKit
 import AudioToolbox
+import CoreImage
+import Metal
 
 // MARK: - Chaves dos ajustes de aparência e toque
 
@@ -64,6 +66,72 @@ enum PadraoFeedback: Int, CaseIterable, Identifiable {
         case .padrao: return 0.55
         case .extravagante: return 0.3
         }
+    }
+}
+
+// MARK: - Valores de ambiente dos menus
+
+private struct ChaveFundoInstantaneo: EnvironmentKey {
+    static let defaultValue: UIImage? = nil
+}
+
+private struct ChaveVidroSolido: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Foto borrada da tela, tirada uma vez quando o menu abre. É o fundo do menu no lugar do
+    /// desfoque ao vivo, que obrigava a GPU a borrar a página de novo a cada quadro.
+    var fundoInstantaneo: UIImage? {
+        get { self[ChaveFundoInstantaneo.self] }
+        set { self[ChaveFundoInstantaneo.self] = newValue }
+    }
+
+    /// Dentro dos menus, os botões usam um fundo liso e translúcido em vez de vidro com desfoque.
+    var vidroSolido: Bool {
+        get { self[ChaveVidroSolido.self] }
+        set { self[ChaveVidroSolido.self] = newValue }
+    }
+}
+
+// MARK: - Foto borrada da tela
+
+enum FundoCapturado {
+    /// O Core Image roda na GPU quando recebe um dispositivo Metal.
+    private static let contexto: CIContext = {
+        if let dispositivo = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: dispositivo)
+        }
+        return CIContext()
+    }()
+
+    /// Tira uma foto da janela em um quarto do tamanho e a borra na GPU. Leva alguns milissegundos e é feita
+    /// uma vez por menu aberto. Devolve nil se não conseguir.
+    @MainActor
+    static func capturar() -> UIImage? {
+        let janelas = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+        guard let janela = janelas.first(where: { $0.isKeyWindow }) ?? janelas.first else { return nil }
+
+        let escala: CGFloat = 0.25
+        let tamanho = CGSize(width: janela.bounds.width * escala, height: janela.bounds.height * escala)
+        guard tamanho.width > 4, tamanho.height > 4 else { return nil }
+
+        let formato = UIGraphicsImageRendererFormat()
+        formato.scale = 1
+        formato.opaque = true
+        let reduzida = UIGraphicsImageRenderer(size: tamanho, format: formato).image { _ in
+            janela.drawHierarchy(in: CGRect(origin: .zero, size: tamanho), afterScreenUpdates: false)
+        }
+
+        guard let entrada = CIImage(image: reduzida),
+              let filtro = CIFilter(name: "CIGaussianBlur") else { return reduzida }
+        filtro.setValue(entrada.clampedToExtent(), forKey: kCIInputImageKey)
+        filtro.setValue(5.0, forKey: kCIInputRadiusKey)
+        guard let saida = filtro.outputImage?.cropped(to: entrada.extent),
+              let pronta = contexto.createCGImage(saida, from: entrada.extent) else { return reduzida }
+        return UIImage(cgImage: pronta)
     }
 }
 
@@ -304,6 +372,7 @@ private struct CorpoDoBotao: View {
     @AppStorage(ChavesTema.feedbackTatil) private var tatil = true
     @AppStorage(ChavesTema.padraoFeedback) private var padraoBruto = 1
     @Environment(\.colorScheme) private var esquema
+    @Environment(\.vidroSolido) private var solido
 
     /// Progresso do brilho: 0 = começou, 1 = acabou (sem brilho).
     @State private var progresso: CGFloat = 1
@@ -336,15 +405,26 @@ private struct CorpoDoBotao: View {
     @ViewBuilder
     private var fundoDeVidro: some View {
         if comFundo {
-            ZStack {
-                if desfoque {
-                    forma.fill(.ultraThinMaterial)
-                } else {
-                    forma.fill(escuro ? Color(white: 0.18) : Color(white: 0.94))
-                }
-                forma.stroke(escuro ? Color.white.opacity(0.14) : Color.black.opacity(0.08), lineWidth: 0.5)
+            if solido {
+                // Nos menus: sem desfoque e sem sombra, que são o que mais pesa para a GPU.
+                camadasDoVidro
+            } else {
+                camadasDoVidro
+                    .shadow(color: escuro ? Color.white.opacity(0.1) : Color.black.opacity(0.16), radius: 5, x: 0, y: 2)
             }
-            .shadow(color: escuro ? Color.white.opacity(0.1) : Color.black.opacity(0.16), radius: 5, x: 0, y: 2)
+        }
+    }
+
+    private var camadasDoVidro: some View {
+        ZStack {
+            if solido {
+                forma.fill(escuro ? Color.white.opacity(0.13) : Color.black.opacity(0.07))
+            } else if desfoque {
+                forma.fill(.ultraThinMaterial)
+            } else {
+                forma.fill(escuro ? Color(white: 0.18) : Color(white: 0.94))
+            }
+            forma.stroke(escuro ? Color.white.opacity(0.14) : Color.black.opacity(0.08), lineWidth: 0.5)
         }
     }
 
@@ -414,10 +494,18 @@ private struct CorpoDoBotao: View {
 struct FundoDeMenu: View {
     let fundoEscuro: Bool
     @AppStorage(ChavesTema.desfoque) private var desfoque = true
+    @Environment(\.fundoInstantaneo) private var instantaneo
 
     var body: some View {
         ZStack {
-            if desfoque {
+            if desfoque, let instantaneo {
+                // Foto borrada uma vez: abrir o menu e animá-lo não custa desfoque nenhum.
+                Image(uiImage: instantaneo)
+                    .resizable()
+                    .scaledToFill()
+                    .clipped()
+                (fundoEscuro ? Color.black.opacity(0.35) : Color.white.opacity(0.4))
+            } else if desfoque {
                 Rectangle().fill(.ultraThinMaterial)
                 (fundoEscuro ? Color.black.opacity(0.25) : Color.white.opacity(0.25))
             } else {
@@ -462,6 +550,7 @@ struct PainelVidro<Conteudo: View>: View {
         }
         .foregroundColor(fundoEscuro ? Color.white : Color.black)
         .environment(\.colorScheme, fundoEscuro ? .dark : .light)
+        .environment(\.vidroSolido, true)
     }
 }
 

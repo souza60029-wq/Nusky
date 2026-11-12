@@ -385,6 +385,8 @@ final class VistaMetal: UIView {
     /// Desenha um quadro. Só mexe com o que está perto da tela.
     func renderizar() {
         guard bounds.width > 0, bounds.height > 0, let fonte else { return }
+        let inicioDoQuadro = CACurrentMediaTime()
+        defer { Desempenho.compartilhado.registrarMetal((CACurrentMediaTime() - inicioDoQuadro) * 1000) }
         guard let drawable = camada.nextDrawable() else { return }
         let dados = fonte.dadosParaGPU()
         let topo = Float(deslocamento) - 80

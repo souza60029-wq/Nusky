@@ -34,6 +34,16 @@ pub struct Info {
     pub atributos: Vec<(String, String)>,
 }
 
+/// `position`: só o que o motor entende.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Posicao {
+    Relativa,
+    /// Sai do fluxo e se posiciona pelo bloco do ancestral posicionado mais próximo.
+    Absoluta,
+    /// Tratada como absoluta em relação à página.
+    Fixa,
+}
+
 /// Como o elemento se comporta na página (só o que o motor entende).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Display {
@@ -83,6 +93,12 @@ pub struct Estilo {
     pub italico: Option<bool>,
     /// A primeira fonte reconhecida da lista de `font-family` tem serifa (Georgia, Times, `serif`).
     pub serifa: Option<bool>,
+    pub posicao: Option<Posicao>,
+    /// `top`, `left`, `right` e `bottom` em pontos (só valores absolutos).
+    pub topo: Option<f32>,
+    pub esquerda: Option<f32>,
+    pub direita: Option<f32>,
+    pub base: Option<f32>,
 }
 
 /// Regra que o motor não aplicou, com o motivo.
@@ -346,6 +362,11 @@ struct Decl {
     altura: Option<f32>,
     italico: Option<bool>,
     serifa: Option<bool>,
+    posicao: Option<Posicao>,
+    topo: Option<f32>,
+    esquerda: Option<f32>,
+    direita: Option<f32>,
+    base: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -618,6 +639,25 @@ fn declaracoes_com(texto: &str, vars: &HashMap<String, String>) -> Decl {
                 if let Some(v) = comprimento(valor) {
                     d.tamanho = Some(v);
                 }
+            }
+            "position" => {
+                d.posicao = match valor.trim().to_ascii_lowercase().as_str() {
+                    "absolute" => Some(Posicao::Absoluta),
+                    "fixed" => Some(Posicao::Fixa),
+                    "relative" | "sticky" => Some(Posicao::Relativa),
+                    _ => None,
+                };
+            }
+            "top" => d.topo = comprimento(valor),
+            "left" => d.esquerda = comprimento(valor),
+            "right" => d.direita = comprimento(valor),
+            "bottom" => d.base = comprimento(valor),
+            "inset" => {
+                let v = comprimento(valor);
+                d.topo = v;
+                d.esquerda = v;
+                d.direita = v;
+                d.base = v;
             }
             "font-style" => {
                 let v = valor.trim().to_ascii_lowercase();
@@ -927,6 +967,21 @@ fn aplica(dst: &mut Decl, src: &Decl) {
     if src.serifa.is_some() {
         dst.serifa = src.serifa;
     }
+    if src.posicao.is_some() {
+        dst.posicao = src.posicao;
+    }
+    if src.topo.is_some() {
+        dst.topo = src.topo;
+    }
+    if src.esquerda.is_some() {
+        dst.esquerda = src.esquerda;
+    }
+    if src.direita.is_some() {
+        dst.direita = src.direita;
+    }
+    if src.base.is_some() {
+        dst.base = src.base;
+    }
 }
 
 fn para_estilo(d: Decl) -> Estilo {
@@ -955,6 +1010,11 @@ fn para_estilo(d: Decl) -> Estilo {
         altura: d.altura,
         italico: d.italico,
         serifa: d.serifa,
+        posicao: d.posicao,
+        topo: d.topo,
+        esquerda: d.esquerda,
+        direita: d.direita,
+        base: d.base,
     }
 }
 
@@ -1870,6 +1930,19 @@ mod testes {
     fn oculto(css: &str, alvo: &Info, pais: &[Info], irmaos: &[Info]) -> bool {
         let f = Folha::parse(css);
         estilo_completo(&f, alvo, pais, irmaos, None).oculto
+    }
+
+    #[test]
+    fn posicao_e_deslocamentos() {
+        let f = Folha::parse(".a{position:absolute;top:.5rem;right:10px;left:auto}.b{position:relative;inset:0}");
+        let a = estilo_para(&f, "div", "", &["a".to_string()], None);
+        assert_eq!(a.posicao, Some(Posicao::Absoluta));
+        assert_eq!(a.topo, Some(8.0));
+        assert_eq!(a.direita, Some(10.0));
+        assert_eq!(a.esquerda, None);
+        let b = estilo_para(&f, "div", "", &["b".to_string()], None);
+        assert_eq!(b.posicao, Some(Posicao::Relativa));
+        assert_eq!((b.topo, b.esquerda, b.direita, b.base), (Some(0.0), Some(0.0), Some(0.0), Some(0.0)));
     }
 
     #[test]

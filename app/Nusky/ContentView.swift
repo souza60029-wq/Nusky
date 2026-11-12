@@ -35,6 +35,8 @@ struct ContentView: View {
     @State private var painel: PainelAtivo? = nil
     @State private var versaoNaAbertura = false
     @State private var mostrarBoasVindas = false
+    /// Foto borrada da tela, tirada ao abrir um menu. É o fundo do menu enquanto ele está aberto.
+    @State private var fundoInstantaneo: UIImage? = nil
 
     // Medidas da barra
     private let alturaReservada: CGFloat = 56   // área de toque da barra
@@ -96,6 +98,7 @@ struct ContentView: View {
             }
             if let ativo = painel {
                 conteudoDoPainel(ativo)
+                    .environment(\.fundoInstantaneo, fundoInstantaneo)
                     .transition(.opacity)
                     .zIndex(10)
             }
@@ -118,6 +121,7 @@ struct ContentView: View {
         .onAppear {
             model.start()
             mostrarBoasVindas = versaoAceita != versaoDosTermos
+            Desempenho.compartilhado.iniciar()
         }
         .onChange(of: scenePhase) { fase in
             if fase != .active { model.saveSession() }
@@ -189,6 +193,10 @@ struct ContentView: View {
 
     private func abrirPainel(_ novo: PainelAtivo) {
         if novo == .ajustes { versaoNaAbertura = versaoDesktop }
+        Desempenho.compartilhado.marcar("Abrir o menu")
+        // A foto borrada é tirada antes de qualquer mudança na tela. Com o Metal ligado, a foto não pega
+        // a página, então o menu usa o desfoque ao vivo.
+        fundoInstantaneo = (desfoque && !usarMetal) ? FundoCapturado.capturar() : nil
         recolher()
         withAnimation(.easeInOut(duration: 0.25)) { painel = novo }
     }
@@ -200,6 +208,10 @@ struct ContentView: View {
     /// Fecha o menu. Se a opção de versão desktop mudou, recarrega a página.
     private func fecharPainel() {
         withAnimation(.easeInOut(duration: 0.25)) { painel = nil }
+        // A foto sai depois do fim da animação, para o menu não piscar sem fundo.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            if painel == nil { fundoInstantaneo = nil }
+        }
         if versaoDesktop != versaoNaAbertura {
             versaoNaAbertura = versaoDesktop
             model.reload()
@@ -365,6 +377,7 @@ struct ContentView: View {
                     if expandida { recolher() }
                 },
                 aoComecarRolar: {
+                    Desempenho.compartilhado.marcar("Rolar a página")
                     if expandida { recolher() }
                 },
                 usarMetal: usarMetal
@@ -646,6 +659,7 @@ struct ContentView: View {
     // MARK: - Abrir e recolher
 
     private func expandir() {
+        Desempenho.compartilhado.marcar("Abrir a barra")
         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
             expandida = true
         }

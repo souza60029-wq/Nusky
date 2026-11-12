@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use crate::css::{self, Display, Estilo, Folha, Info};
+use crate::css::{self, Display, Estilo, Folha, Info, Posicao};
 use crate::svg::{self, FormaSvg, Tinta};
 use crate::html::{Element, Node};
 
@@ -239,6 +239,12 @@ struct Ctx<'a> {
     gap: f32,
     /// Os filhos do próximo `layout_children` viram blocos (filhos de flex em coluna).
     filhos_bloco: bool,
+    /// O próximo elemento já foi posicionado (`position: absolute`) e não deve sair do fluxo de novo.
+    sem_posicao: bool,
+    /// Caixas dos ancestrais posicionados: (x, y, largura). O último é o bloco de referência.
+    blocos: Vec<(f32, f32, f32)>,
+    /// Largura útil da página, sem as margens.
+    largura_util: f32,
 }
 
 /// Célula de tabela já resolvida: CSS calculado, colunas que ocupa e medidas do texto.
@@ -336,6 +342,9 @@ pub fn layout_com_imagens(
         forcar_bloco: false,
         gap: 0.0,
         filhos_bloco: false,
+        sem_posicao: false,
+        blocos: Vec::new(),
+        largura_util: (viewport_width - 2.0 * PAGE_MARGIN).max(0.0),
     };
     let root = Style {
         font_size: BASE_FONT,
@@ -491,12 +500,21 @@ fn tratar_elemento(
 ) -> Info {
     // Filho de flex vira bloco; o pedido vale só para este elemento.
     let forcar = std::mem::take(&mut ctx.forcar_bloco);
+    let ja_posicionado = std::mem::take(&mut ctx.sem_posicao);
     if SKIP_TAGS.contains(&el.tag.as_str()) {
         return info;
     }
     let css = estilo_do_elemento(el, &info, irmaos, ultimo, ctx);
     if css.oculto {
         return info;
+    }
+    // `position: absolute` e `fixed` saem do fluxo e se posicionam pelo bloco de referência.
+    if !ja_posicionado
+        && el.tag != "br"
+        && matches!(css.posicao, Some(Posicao::Absoluta) | Some(Posicao::Fixa))
+    {
+        flush_inline(buf, style, ctx);
+        return colocar_fora_do_fluxo(el, info, irmaos, ultimo, style, link, &css, ctx);
     }
     if el.tag == "br" {
         // Quebra de linha forçada: `flush_inline` entende esta marca.
@@ -600,6 +618,13 @@ fn tratar_elemento(
         ctx.width = (largura_caixa - pad_esq - pad_dir - 2.0 * borda_l).max(0.0);
         ctx.y += pad_topo + borda_l;
 
+        let posicionado = matches!(
+            css.posicao,
+            Some(Posicao::Relativa) | Some(Posicao::Absoluta) | Some(Posicao::Fixa)
+        );
+        if posicionado {
+            ctx.blocos.push((x_antes, topo_caixa, largura_caixa));
+        }
         ctx.pais.push(info);
         let flex_linha = css.display == Some(Display::Flex) && css.coluna != Some(true);
         if flex_linha {
@@ -613,6 +638,9 @@ fn tratar_elemento(
         }
         let info = ctx.pais.pop().unwrap_or_default();
         flush_inline(buf, block, ctx);
+        if posicionado {
+            ctx.blocos.pop();
+        }
 
         ctx.y += pad_base + borda_l;
         // `height` fixo em pontos vale como altura mínima da caixa.
@@ -807,6 +835,95 @@ fn largura_das_imagens(nodes: &[Node], ctx: &mut Ctx<'_>) -> Option<f32> {
     maior
 }
 
+/// Largura de uma imagem ou de um SVG que é o próprio elemento posicionado.
+fn largura_propria(el: &Element, css: &Estilo, ctx: &Ctx<'_>) -> Option<f32> {
+    if el.tag == "svg" {
+        let (w, h) = dimensoes_svg(el, css);
+        return if w > 0.0 && h > 0.0 { Some(w) } else { None };
+    }
+    if el.tag == "img" {
+        let src = origem_da_imagem(el)?;
+        let (w, _) = tamanho_da_imagem(el, css, &src, ctx);
+        return Some(w.max(1.0));
+    }
+    None
+}
+
+/// Posiciona um elemento `absolute` ou `fixed`: ele sai do fluxo (não ocupa espaço) e fica no canto do
+/// bloco de referência indicado por `top`, `left` e `right`. Sem `top`, fica na altura em que apareceria.
+/// `bottom` ainda não é usado, porque a altura do bloco de referência só se sabe no fim.
+/// Elemento todo fora da página (esconderijos, como `left: -9999px`) não é desenhado.
+#[allow(clippy::too_many_arguments)]
+fn colocar_fora_do_fluxo(
+    el: &Element,
+    info: Info,
+    irmaos: &[Info],
+    ultimo: bool,
+    style: Style,
+    link: Option<&str>,
+    css: &Estilo,
+    ctx: &mut Ctx<'_>,
+) -> Info {
+    let (cx, cy, cw) = if css.posicao == Some(Posicao::Fixa) {
+        (PAGE_MARGIN, PAGE_MARGIN, ctx.largura_util)
+    } else {
+        ctx.blocos.last().copied().unwrap_or((PAGE_MARGIN, PAGE_MARGIN, ctx.largura_util))
+    };
+    let extra = css.pad_esq.unwrap_or(0.0).max(0.0)
+        + css.pad_dir.unwrap_or(0.0).max(0.0)
+        + 2.0 * css.borda_largura.unwrap_or(0.0).max(0.0);
+
+    let largura = if let Some(w) = css.largura.filter(|w| *w > 0.0) {
+        w.min(cw)
+    } else if let (Some(l), Some(r)) = (css.esquerda, css.direita) {
+        (cw - l - r).max(0.0)
+    } else if let Some(w) = largura_propria(el, css, ctx) {
+        w
+    } else {
+        let estilo_el = aplicar(
+            Style { color: style.color, align: style.align, italic: style.italic, serif: style.serif, ..style_for(&el.tag) },
+            css,
+        );
+        let (_, ideal, vazia) = medir_celula(el, estilo_el, ctx);
+        if vazia {
+            cw
+        } else {
+            (ideal + extra + 1.0).min(cw)
+        }
+    };
+
+    let x = if let Some(l) = css.esquerda {
+        cx + l
+    } else if let Some(r) = css.direita {
+        cx + cw - r - largura
+    } else {
+        ctx.x0
+    };
+    let y = match css.topo {
+        Some(t) => cy + t,
+        None => ctx.y,
+    };
+
+    let fim_da_pagina = PAGE_MARGIN * 2.0 + ctx.largura_util;
+    if largura <= 0.0 || x + largura < 0.0 || x > fim_da_pagina + 50.0 {
+        return info;
+    }
+
+    let salvo = (ctx.x0, ctx.width, ctx.y);
+    ctx.x0 = x;
+    ctx.width = largura;
+    ctx.y = y;
+    ctx.sem_posicao = true;
+    ctx.forcar_bloco = true;
+    let mut buf: Vec<Span> = Vec::new();
+    let info = tratar_elemento(el, info, irmaos, ultimo, style, link, &mut buf, ctx);
+    flush_inline(&mut buf, style, ctx);
+    ctx.x0 = salvo.0;
+    ctx.width = salvo.1;
+    ctx.y = salvo.2;
+    info
+}
+
 /// Reserva um lugar na lista de fundos para o bloco que começa em `topo`.
 /// A altura só se sabe no fim; `fechar_fundo` completa. Devolve None quando o bloco
 /// não tem fundo nem borda visíveis.
@@ -882,6 +999,8 @@ fn layout_flex_linha(
     let ultimo_idx = el.children.iter().rposition(|n| matches!(n, Node::Element(_)));
     let mut infos: Vec<Info> = Vec::new();
     let mut itens: Vec<ItemFlex<'_>> = Vec::new();
+    // Filhos `absolute` não entram na conta das larguras: ficam fora do fluxo.
+    let mut fora: Vec<(&Element, usize, bool)> = Vec::new();
     for (i, node) in el.children.iter().enumerate() {
         let filho = match node {
             Node::Element(f) => f,
@@ -892,7 +1011,10 @@ fn layout_flex_linha(
         let pos = infos.len();
         let irmaos_f: &[Info] = if guarda_irmaos { &infos[..] } else { &[] };
         let css_f = estilo_do_elemento(filho, &info, irmaos_f, ultimo, ctx);
-        if !SKIP_TAGS.contains(&filho.tag.as_str()) && !css_f.oculto {
+        let absoluto = matches!(css_f.posicao, Some(Posicao::Absoluta) | Some(Posicao::Fixa));
+        if absoluto && !css_f.oculto && !SKIP_TAGS.contains(&filho.tag.as_str()) {
+            fora.push((filho, pos, ultimo));
+        } else if !SKIP_TAGS.contains(&filho.tag.as_str()) && !css_f.oculto {
             let estilo_f = aplicar(
                 Style { color: style.color, align: style.align, italic: style.italic, serif: style.serif, ..style_for(&filho.tag) },
                 &css_f,
@@ -933,6 +1055,13 @@ fn layout_flex_linha(
         } else {
             infos.push(Info::default());
         }
+    }
+    // Os absolutos se posicionam pelo bloco de referência, na altura do começo da linha.
+    for (filho, pos, ultimo_f) in &fora {
+        let info = info_do_elemento(filho, ctx.folha.nomes_atributos());
+        let irmaos: &[Info] = if guarda_irmaos { &infos[..*pos] } else { &[] };
+        let mut buf: Vec<Span> = Vec::new();
+        tratar_elemento(filho, info, irmaos, *ultimo_f, style, link, &mut buf, ctx);
     }
     if itens.is_empty() {
         return;
@@ -2042,6 +2171,47 @@ mod tests {
         );
         assert_eq!(s.imagens.len(), 1);
         assert_eq!(s.comandos.len(), 1);
+    }
+
+    #[test]
+    fn absoluto_vai_para_o_canto_e_nao_ocupa_espaco() {
+        let cmds = run(
+            "<style>.p{position:relative;height:100px}.a{position:absolute;top:10px;right:10px}</style><div class=p><span class=a>oi</span></div><p>x</p>",
+            408.0,
+        );
+        let mut pos: Vec<(String, f32, f32)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCommand::Text { text, x, y, .. } => (text.clone(), *x, *y),
+            })
+            .collect();
+        pos.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        assert_eq!(pos.len(), 2);
+        assert_eq!(pos[0].0, "oi");
+        assert!(pos[0].1 > 360.0 && pos[0].1 < 385.0);
+        assert_eq!(pos[0].2, 18.0);
+        // A caixa de referência tem 100 pt de altura; o parágrafo vem depois dela.
+        assert!(pos[1].2 >= 108.0);
+    }
+
+    #[test]
+    fn absoluto_com_esquerda_e_direita_ocupa_a_largura_toda() {
+        let s = completo(
+            "<style>.p{position:relative}.a{position:absolute;left:0;right:0;background-color:#123456;height:20px}</style><div class=p><div class=a></div></div>",
+            408.0,
+        );
+        assert_eq!(s.fundos.len(), 1);
+        assert_eq!(s.fundos[0].x, 8.0);
+        assert_eq!(s.fundos[0].w, 392.0);
+    }
+
+    #[test]
+    fn absoluto_fora_da_pagina_nao_e_desenhado() {
+        let cmds = run(
+            "<style>.a{position:absolute;left:-9999px}</style><div class=a>escondido</div><p>x</p>",
+            408.0,
+        );
+        assert_eq!(cmds.len(), 1);
     }
 
     #[test]

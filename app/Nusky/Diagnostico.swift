@@ -530,6 +530,7 @@ final class DiagnosticoModel: ObservableObject {
             // O JavaScript roda por último e fora da conta dos tempos acima,
             // para não mudar os números que já eram medidos antes.
             let js = await DiagnosticoJS.analisar(html: comFolhas, base: base, largura: largura)
+                + "\n\n" + Desempenho.compartilhado.relatorio()
 
             let total = CFAbsoluteTimeGetCurrent() - inicioTotal
             texto = montarTexto(
