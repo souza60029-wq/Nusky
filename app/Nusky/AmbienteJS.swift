@@ -14,6 +14,8 @@ enum AmbienteJS {
   var inicioMs = Date.now();
   var nada = function () {};
   var doc = null;
+  // Conta mudanças no DOM. O modo vivo só redesenha quando esse número anda.
+  var sujeira = 0;
 
   // ---------- util ----------
   function kebab(s) { return String(s).replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
@@ -190,6 +192,10 @@ enum AmbienteJS {
   function disparar(alvo, ev) {
     var l = alvo.__ev && alvo.__ev[ev.type];
     var h = alvo['on' + ev.type];
+    if (typeof h !== 'function' && alvo.__attrs) {
+      var av = alvo.getAttribute('on' + ev.type);
+      if (av) { try { h = alvo['on' + ev.type] = new Function('event', av); } catch (e) { erro('on' + ev.type + ': ' + e); h = null; } }
+    }
     ev.currentTarget = alvo;
     if (typeof h === 'function') { try { h.call(alvo, ev); } catch (e) { erro('evento ' + ev.type + ': ' + e); } }
     if (!l) return;
@@ -207,6 +213,7 @@ enum AmbienteJS {
       var m = this.__ev || (this.__ev = {}), l = m[t] || (m[t] = []);
       for (var i = 0; i < l.length; i++) if (l[i].fn === fn) return;
       l.push({ fn: fn, once: !!(opt && typeof opt === 'object' && opt.once) });
+      if (vivo && (t === 'click' || t === 'mousedown' || t === 'mouseup' || t === 'pointerdown' || t === 'pointerup' || t === 'touchend')) { sujeira++; pedirTick(); }
     },
     removeEventListener: function (t, fn) {
       var l = this.__ev && this.__ev[t]; if (!l) return;
@@ -298,10 +305,23 @@ enum AmbienteJS {
     if (a === 0) return pos === b;
     return (pos - b) / a >= 0 && (pos - b) % a === 0;
   }
+  // Caminho quente de qualquer seletor: lê os atributos direto, sem criar classList a cada elemento.
+  function atributoDireto(el, nome) { var a = el.__attrs; for (var i = 0; i < a.length; i++) if (a[i][0] === nome) return a[i][1]; return null; }
+  function temClasse(el, c) {
+    var v = atributoDireto(el, 'class');
+    if (v === null || v === '') return false;
+    var i = v.indexOf(c), n = c.length;
+    while (i >= 0) {
+      var a = i === 0 ? 32 : v.charCodeAt(i - 1), b = i + n >= v.length ? 32 : v.charCodeAt(i + n);
+      if ((a === 32 || a === 9 || a === 10 || a === 13 || a === 12) && (b === 32 || b === 9 || b === 10 || b === 13 || b === 12)) return true;
+      i = v.indexOf(c, i + 1);
+    }
+    return false;
+  }
   function casaSimples(el, sm) {
     if (sm.tag && el.localName !== sm.tag) return false;
-    if (sm.id !== null && el.getAttribute('id') !== sm.id) return false;
-    for (var i = 0; i < sm.cls.length; i++) if (!el.classList.contains(sm.cls[i])) return false;
+    if (sm.id !== null && atributoDireto(el, 'id') !== sm.id) return false;
+    for (var i = 0; i < sm.cls.length; i++) if (!temClasse(el, sm.cls[i])) return false;
     for (i = 0; i < sm.attrs.length; i++) {
       var a = sm.attrs[i], v = el.getAttribute(a.n);
       if (v === null) return false;
@@ -354,7 +374,42 @@ enum AmbienteJS {
     return false;
   }
   function casaLista(el, lista) { for (var i = 0; i < lista.length; i++) if (casaCadeia(el, lista[i], lista[i].length - 1)) return true; return false; }
+  // Índice de ids. Todo acerto é conferido (o elemento ainda tem esse id e continua na página), então nunca
+  // devolve elemento errado. Quando o DOM não mudou desde que o índice foi montado, o índice é completo: um id
+  // que não está nele não existe, e a resposta é imediata. Se a página muda a cada consulta, montar o índice
+  // inteiro não compensa; nesse caso vale a busca com saída antecipada de sempre (modo "seguidas").
+  var cacheId = Object.create(null), indexadoEm = -1, ultimaConsulta = -1, seguidas = 0;
+  function dentroDe(c, raiz) { for (var p = c.parentNode; p; p = p.parentNode) if (p === raiz) return true; return false; }
+  function caminhaIds(raiz, id) {
+    var achado = null;
+    (function visita(n) {
+      for (var i = 0; i < n.childNodes.length; i++) {
+        var f = n.childNodes[i];
+        if (f.nodeType !== 1) continue;
+        var v = atributoDireto(f, 'id');
+        if (v !== null && v !== '') { if (id === null) { if (!(v in cacheId)) cacheId[v] = f; } else if (v === id) { achado = f; return true; } }
+        if (f.childNodes.length && visita(f)) return true;
+      }
+      return false;
+    })(raiz);
+    return achado;
+  }
+  function porId(raiz, id) {
+    var c = cacheId[id];
+    if (c && atributoDireto(c, 'id') === id && (raiz === doc ? c.isConnected : dentroDe(c, raiz))) return c;
+    if (raiz === doc) {
+      if (indexadoEm === sujeira) return null;
+      seguidas = sujeira === ultimaConsulta ? 0 : seguidas + 1;
+      ultimaConsulta = sujeira;
+      if (seguidas <= 3) { cacheId = Object.create(null); caminhaIds(doc, null); indexadoEm = sujeira; return cacheId[id] || null; }
+    }
+    var achado = caminhaIds(raiz, id);
+    if (achado) cacheId[id] = achado;
+    return achado;
+  }
+  var RE_SO_ID = /^#([A-Za-z_][\w-]*)$/;
   function buscar(raiz, texto, primeiro) {
+    if (primeiro) { var mi = RE_SO_ID.exec(texto); if (mi) { var ei = porId(raiz, mi[1]); return ei ? [ei] : []; } }
     var lista = seletor(texto), achados = [];
     (function visita(n) {
       for (var i = 0; i < n.childNodes.length; i++) {
@@ -396,8 +451,8 @@ enum AmbienteJS {
       }
     }
   });
-  Node.prototype.__limpar = function () { for (var i = 0; i < this.childNodes.length; i++) this.childNodes[i].parentNode = null; this.childNodes = []; };
-  Node.prototype.__anexar = function (n) { n.parentNode = this; this.childNodes.push(n); };
+  Node.prototype.__limpar = function () { sujeira++; for (var i = 0; i < this.childNodes.length; i++) this.childNodes[i].parentNode = null; this.childNodes = []; };
+  Node.prototype.__anexar = function (n) { sujeira++; n.parentNode = this; this.childNodes.push(n); };
   Node.prototype.hasChildNodes = function () { return this.childNodes.length > 0; };
   Node.prototype.getRootNode = function () { var n = this; while (n.parentNode) n = n.parentNode; return n; };
   Node.prototype.contains = function (n) { while (n) { if (n === this) return true; n = n.parentNode; } return false; };
@@ -409,7 +464,7 @@ enum AmbienteJS {
     var idx = ref ? this.childNodes.indexOf(ref) : this.childNodes.length;
     if (idx < 0) throw new Error('NotFoundError');
     this.childNodes.splice(idx, 0, n);
-    n.parentNode = this;
+    n.parentNode = this; sujeira++;
     if (n.nodeType === 1 && this.isConnected) iniciarScripts(n);
     return n;
   };
@@ -417,7 +472,7 @@ enum AmbienteJS {
   Node.prototype.removeChild = function (n) {
     var i = this.childNodes.indexOf(n);
     if (i < 0) throw new Error('NotFoundError');
-    this.childNodes.splice(i, 1); n.parentNode = null; return n;
+    this.childNodes.splice(i, 1); n.parentNode = null; sujeira++; return n;
   };
   Node.prototype.replaceChild = function (novo, velho) { this.insertBefore(novo, velho); this.removeChild(velho); return velho; };
   Node.prototype.remove = function () { if (this.parentNode) this.parentNode.removeChild(this); };
@@ -450,8 +505,9 @@ enum AmbienteJS {
     return c;
   };
 
-  function Text(d) { Node.call(this, 3); this.data = d === undefined ? '' : String(d); }
+  function Text(d) { Node.call(this, 3); this.__d = d === undefined ? '' : String(d); }
   Text.prototype = Object.create(Node.prototype); Text.prototype.constructor = Text;
+  Object.defineProperty(Text.prototype, 'data', { get: function () { return this.__d; }, set: function (v) { v = String(v); if (v !== this.__d) { this.__d = v; sujeira++; } }, configurable: true });
   def(Text.prototype, { nodeName: { get: function () { return '#text'; } }, length: { get: function () { return this.data.length; } }, wholeText: { get: function () { return this.data; } } });
   function Comment(d) { Node.call(this, 8); this.data = d === undefined ? '' : String(d); }
   Comment.prototype = Object.create(Node.prototype); Comment.prototype.constructor = Comment;
@@ -522,9 +578,9 @@ enum AmbienteJS {
     id: { get: function () { return this.getAttribute('id') || ''; }, set: function (v) { this.setAttribute('id', v); } },
     className: { get: function () { return this.getAttribute('class') || ''; }, set: function (v) { this.setAttribute('class', v); } },
     children: { get: function () { return filhosEl(this); } },
-    childElementCount: { get: function () { return filhosEl(this).length; } },
-    firstElementChild: { get: function () { return filhosEl(this)[0] || null; } },
-    lastElementChild: { get: function () { var f = filhosEl(this); return f[f.length - 1] || null; } },
+    childElementCount: { get: function () { var c = 0, a = this.childNodes; for (var i = 0; i < a.length; i++) if (a[i].nodeType === 1) c++; return c; } },
+    firstElementChild: { get: function () { var a = this.childNodes; for (var i = 0; i < a.length; i++) if (a[i].nodeType === 1) return a[i]; return null; } },
+    lastElementChild: { get: function () { var a = this.childNodes; for (var i = a.length - 1; i >= 0; i--) if (a[i].nodeType === 1) return a[i]; return null; } },
     attributes: { get: function () { return this.__attrs.map(function (a) { return { name: a[0], value: a[1], nodeName: a[0], nodeValue: a[1] }; }); } },
     style: { get: function () { if (!this.__estilo) { this.__estilo = new Estilo(this); var s = this.getAttribute('style'); if (s) this.__estilo.__carregar(s); } return this.__estilo; },
              set: function (v) { this.style.cssText = v; } },
@@ -552,8 +608,8 @@ enum AmbienteJS {
     offsetParent: { get: function () { return null; } }
   });
   Element.prototype.__definirAttr = function (n, v, deEstilo) {
-    for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { this.__attrs[i][1] = v; return; }
-    this.__attrs.push([n, v]);
+    for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { if (this.__attrs[i][1] !== v) { this.__attrs[i][1] = v; sujeira++; } return; }
+    this.__attrs.push([n, v]); sujeira++;
   };
   Element.prototype.setAttribute = function (n, v) {
     n = String(n).toLowerCase(); v = String(v);
@@ -567,7 +623,7 @@ enum AmbienteJS {
   };
   Element.prototype.hasAttribute = function (n) { return this.getAttribute(n) !== null; };
   Element.prototype.removeAttribute = function (n) {
-    n = String(n).toLowerCase();
+    n = String(n).toLowerCase(); sujeira++;
     for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { this.__attrs.splice(i, 1); break; }
     if (n === 'style' && this.__estilo) this.__estilo.__carregar('');
   };
@@ -610,8 +666,8 @@ enum AmbienteJS {
     function lista() { return (el.getAttribute('class') || '').split(/\s+/).filter(Boolean); }
     function grava(l) { el.setAttribute('class', l.join(' ')); }
     return {
-      add: function () { var l = lista(); for (var i = 0; i < arguments.length; i++) if (l.indexOf(arguments[i]) < 0) l.push(String(arguments[i])); grava(l); },
-      remove: function () { var l = lista(); for (var i = 0; i < arguments.length; i++) { var k = l.indexOf(String(arguments[i])); if (k >= 0) l.splice(k, 1); } grava(l); },
+      add: function () { var l = lista(), mudou = false; for (var i = 0; i < arguments.length; i++) if (l.indexOf(String(arguments[i])) < 0) { l.push(String(arguments[i])); mudou = true; } if (mudou) grava(l); },
+      remove: function () { var l = lista(), mudou = false; for (var i = 0; i < arguments.length; i++) { var k = l.indexOf(String(arguments[i])); if (k >= 0) { l.splice(k, 1); mudou = true; } } if (mudou) grava(l); },
       toggle: function (c, f) { c = String(c); var tem = lista().indexOf(c) >= 0, q = f === undefined ? !tem : !!f; if (q && !tem) this.add(c); else if (!q && tem) this.remove(c); return q; },
       contains: function (c) { return lista().indexOf(String(c)) >= 0; },
       replace: function (a, b) { var l = lista(), k = l.indexOf(a); if (k < 0) return false; l[k] = b; grava(l); return true; },
@@ -642,20 +698,82 @@ enum AmbienteJS {
   var MouseEvent = subEvento('MouseEvent');
 
   // ---------- serialização e fragmentos ----------
-  function serializar(n, o, ignorarScripts) {
+  // ---------- cliques: quais elementos o toque deve entregar ao JavaScript ----------
+  var marcando = false, mapaClique = {}, proxNid = 1;
+  var RE_EVT = /^on(click|mousedown|mouseup|pointerdown|pointerup|touchend)$/;
+  var EVC = ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchend'];
+  var TAGS_CLIC = { button: 1, summary: 1, label: 1, select: 1 };
+  var ROLES_CLIC = { button: 1, tab: 1, menuitem: 1, link: 1, 'switch': 1, checkbox: 1, radio: 1, option: 1, treeitem: 1 };
+  EVC.forEach(function (t) {
+    Object.defineProperty(Node.prototype, 'on' + t, {
+      get: function () { return this['__on' + t] || null; },
+      set: function (v) { this['__on' + t] = v; if (vivo) { sujeira++; pedirTick(); } },
+      configurable: true
+    });
+  });
+  function temOuvinteClique(a) {
+    var m = a.__ev;
+    if (m) for (var i = 0; i < EVC.length; i++) if (m[EVC[i]] && m[EVC[i]].length) return true;
+    for (var j = 0; j < EVC.length; j++) if (typeof a['on' + EVC[j]] === 'function') return true;
+    if (a.__attrs) for (var k = 0; k < a.__attrs.length; k++) if (RE_EVT.test(a.__attrs[k][0])) return true;
+    return false;
+  }
+  function temTextoDireto(n) {
+    for (var i = 0; i < n.childNodes.length; i++) { var f = n.childNodes[i]; if (f.nodeType === 3 && /\S/.test(f.data)) return true; }
+    return false;
+  }
+  // cob: 0 = ninguém escuta cliques acima; 1 = escuta no document/body; 2 = escuta num ancestral.
+  // Em 2, o elemento mais interno com texto (ou imagem) é o alvo, como o dedo acertaria de verdade.
+  function ehClicavel(n, cob) {
+    var t = n.localName;
+    if (temOuvinteClique(n)) return true;
+    if (t === 'a') { var h = n.getAttribute('href'); return !!(cob && h && h.charAt(0) !== '#' && !/^\s*javascript:/i.test(h)); }
+    if (TAGS_CLIC[t]) return true;
+    if (t === 'input') { var ty = (n.getAttribute('type') || '').toLowerCase(); return ty === 'checkbox' || ty === 'radio' || ty === 'button' || ty === 'submit' || ty === 'reset'; }
+    var r = n.getAttribute('role');
+    if (r && ROLES_CLIC[r.toLowerCase()]) return true;
+    if (cob === 2 && (t === 'img' || temTextoDireto(n))) return true;
+    if (cob) {
+      var e = n.getAttribute('style');
+      if (e && /cursor\s*:\s*pointer/i.test(e)) return true;
+      if (n.hasAttribute('data-toggle') || n.hasAttribute('data-bs-toggle') || n.hasAttribute('data-action') || n.hasAttribute('data-target') || n.hasAttribute('data-href')) return true;
+    }
+    return false;
+  }
+  // Destino de navegação do toque: o <a href> mais próximo (vazio se não houver).
+  function hrefDe(n) {
+    while (n && n.nodeType === 1) {
+      if (n.localName === 'a') {
+        var h = n.getAttribute('href');
+        if (h && h.charAt(0) !== '#' && !/^\s*javascript:/i.test(h)) { var u = resolver(h); return u && /^https?:/i.test(u) ? u : ''; }
+      }
+      n = n.parentNode;
+    }
+    return '';
+  }
+  function serializar(n, o, ignorarScripts, cob) {
     if (n.nodeType === 3) {
       var p = n.parentNode;
       o.push(p && p.nodeType === 1 && CRUS[p.localName] ? n.data : esc(n.data));
     } else if (n.nodeType === 8) { o.push('<!--' + n.data + '-->'); }
-    else if (n.nodeType === 11 || n.nodeType === 9) { for (var i = 0; i < n.childNodes.length; i++) serializar(n.childNodes[i], o, ignorarScripts); }
+    else if (n.nodeType === 11 || n.nodeType === 9) { for (var i = 0; i < n.childNodes.length; i++) serializar(n.childNodes[i], o, ignorarScripts, cob); }
     else if (n.nodeType === 1) {
       var t = n.localName;
       if (ignorarScripts && (t === 'script' || t === 'noscript')) return;
       o.push('<' + t);
       for (var j = 0; j < n.__attrs.length; j++) o.push(' ' + n.__attrs[j][0] + '="' + escAttr(n.__attrs[j][1]) + '"');
+      var cobFilhos = cob;
+      if (marcando) {
+        if (ehClicavel(n, cob)) {
+          var nid = n.__nid || (n.__nid = proxNid++);
+          mapaClique[nid] = n;
+          o.push(' data-nusky-js="' + escAttr('nusky-js:' + nid + '|' + hrefDe(n)) + '"');
+        }
+        if (cob < 2 && n !== doc.documentElement && n !== doc.body && temOuvinteClique(n)) cobFilhos = 2;
+      }
       o.push('>');
       if (VAZIAS[t]) return;
-      for (var k = 0; k < n.childNodes.length; k++) serializar(n.childNodes[k], o, ignorarScripts);
+      for (var k = 0; k < n.childNodes.length; k++) serializar(n.childNodes[k], o, ignorarScripts, cobFilhos);
       o.push('</' + t + '>');
     }
   }
@@ -728,7 +846,7 @@ enum AmbienteJS {
   Document.prototype.createEvent = function (t) { return new Event(''); };
   Document.prototype.createRange = function () { return { setStart: nada, setEnd: nada, selectNodeContents: nada, collapse: nada, getBoundingClientRect: function () { return { top: 0, left: 0, width: 0, height: 0, right: 0, bottom: 0 }; }, getClientRects: function () { return []; }, createContextualFragment: function (h) { var f = new DocumentFragment(); fragmento(h, null).forEach(function (n) { f.appendChild(n); }); return f; } }; };
   Document.prototype.createTreeWalker = function () { return { nextNode: function () { return null; } }; };
-  Document.prototype.getElementById = function (id) { return buscar(this, '[id="' + String(id).replace(/"/g, '\\"') + '"]', true)[0] || null; };
+  Document.prototype.getElementById = function (id) { return porId(this, String(id)); };
   Document.prototype.getElementsByTagName = Element.prototype.getElementsByTagName;
   Document.prototype.getElementsByClassName = Element.prototype.getElementsByClassName;
   Document.prototype.getElementsByName = function (n) { return buscar(this, '[name="' + n + '"]', false); };
@@ -780,38 +898,101 @@ enum AmbienteJS {
   }
 
   // ---------- temporizadores (tempo virtual) ----------
-  var fila = [], proxId = 1, agora = 0, execTimers = 0, HORIZONTE = 10000, MAX_TIMERS = 4000;
+  var fila = [], reserva = [], proxId = 1, agora = 0, execTimers = 0, HORIZONTE = 10000, MAX_TIMERS = 4000;
+  // Modo vivo: depois da primeira exibição o JavaScript continua, com relógio de verdade
+  // e frequência limitada (economia de CPU, bateria e memória no iPhone 6s).
+  var vivo = false, pausado = false, pausadoEm = 0, proximoDue = Infinity;
   function agendar(fn, ms, args, repete) {
     ms = Math.max(0, Number(ms) || 0);
-    var t = { id: proxId++, fn: fn, args: args, due: agora + ms, ms: Math.max(ms, 1), repete: repete, vezes: 0 };
-    fila.push(t); return t.id;
+    if (vivo) ms = Math.max(ms, 4);
+    var t = { id: proxId++, fn: fn, args: args, due: (vivo ? Date.now() : agora) + ms, ms: Math.max(ms, 1), repete: repete, vezes: 0 };
+    fila.push(t);
+    if (vivo && !pausado && t.due < proximoDue) { proximoDue = t.due; acordar(t.due - Date.now()); }
+    return t.id;
   }
+  function acordar(ms) { try { G.__acordar(Math.max(0, ms)); } catch (e) {} }
+  function pedirTick() { if (vivo) agendar(nada, 0, [], false); }
   G.setTimeout = function (fn, ms) { if (typeof fn !== 'function') return 0; return agendar(fn, ms, Array.prototype.slice.call(arguments, 2), false); };
   G.setInterval = function (fn, ms) { if (typeof fn !== 'function') return 0; return agendar(fn, ms, Array.prototype.slice.call(arguments, 2), true); };
-  G.clearTimeout = G.clearInterval = function (id) { fila = fila.filter(function (t) { return t.id !== id; }); };
-  G.requestAnimationFrame = function (fn) { return agendar(function () { fn(Date.now() - inicioMs); }, 16, [], false); };
+  G.clearTimeout = G.clearInterval = function (id) { fila = fila.filter(function (t) { return t.id !== id; }); if (reserva.length) reserva = reserva.filter(function (t) { return t.id !== id; }); };
+  // Quadros: 60 por segundo, até o desenho da tela ficar caro. Aí o nativo informa o custo e os quadros que
+  // ninguém chegaria a ver deixam de ser calculados (como um navegador que perde quadros sob carga).
+  var cadencia = 16;
+  G.__cadencia = function (ms) { cadencia = Math.max(16, Math.min(1000, Number(ms) || 16)); };
+  G.requestAnimationFrame = function (fn) { return agendar(function () { fn(Date.now() - inicioMs); }, vivo ? cadencia : 16, [], false); };
   G.cancelAnimationFrame = G.clearTimeout;
   G.requestIdleCallback = function (fn) { return agendar(function () { fn({ didTimeout: false, timeRemaining: function () { return 10; } }); }, 1, [], false); };
   G.cancelIdleCallback = G.clearTimeout;
   G.queueMicrotask = function (fn) { Promise.resolve().then(fn).catch(function (e) { erro('microtask: ' + e); }); };
   function drenar() {
+    if (vivo) return;
     while (fila.length && execTimers < MAX_TIMERS) {
       var k = 0;
       for (var i = 1; i < fila.length; i++) if (fila[i].due < fila[k].due || (fila[i].due === fila[k].due && fila[i].id < fila[k].id)) k = i;
       var t = fila[k];
-      if (t.due > HORIZONTE) { fila = []; break; }
+      if (t.due > HORIZONTE) break;
       fila.splice(k, 1); agora = Math.max(agora, t.due); execTimers++;
-      if (t.repete) { t.vezes++; if (t.vezes < 10) { t.due = agora + t.ms; fila.push(t); } }
+      if (t.repete) { t.vezes++; t.due = agora + t.ms; if (t.vezes < 10) fila.push(t); else reserva.push(t); }
       try { t.fn.apply(G, t.args); } catch (e) { erro('temporizador: ' + e); }
     }
+    // O que sobrou (muito adiante, ou o limite de tempo virtual) não se perde: espera o modo vivo.
+    if (fila.length) { reserva = reserva.concat(fila); fila = []; }
   }
+  var entregue = 0, avisoPend = false;
+  function notificar() {
+    if (!vivo || avisoPend || sujeira === entregue) return;
+    avisoPend = true;
+    try { G.__aviso(); } catch (e) { avisoPend = false; }
+  }
+  G.__vivo = function () {
+    if (vivo) return;
+    var todos = fila.concat(reserva), real = Date.now();
+    fila = []; reserva = [];
+    vivo = true; proximoDue = Infinity;
+    for (var i = 0; i < todos.length; i++) {
+      var t = todos[i]; t.vezes = 0;
+      t.due = real + Math.max(16, t.due - agora);
+      fila.push(t);
+    }
+    entregue = sujeira;
+    rearmar();
+  };
+  function rearmar() {
+    var m = Infinity;
+    for (var i = 0; i < fila.length; i++) if (fila[i].due < m) m = fila[i].due;
+    proximoDue = m;
+    if (m !== Infinity) acordar(m - Date.now());
+  }
+  G.__tick = function () {
+    if (!vivo || pausado) return;
+    var inicio = Date.now(), n = 0;
+    for (;;) {
+      var agoraR = Date.now(), k = -1;
+      for (var i = 0; i < fila.length; i++) if (fila[i].due <= agoraR && (k < 0 || fila[i].due < fila[k].due)) k = i;
+      if (k < 0 || n >= 100 || agoraR - inicio > 50) break;
+      var t = fila.splice(k, 1)[0]; n++;
+      if (t.repete) { t.due = Date.now() + t.ms; fila.push(t); }
+      try { t.fn.apply(G, t.args); } catch (e) { erro('temporizador: ' + e); }
+    }
+    rearmar();
+    notificar();
+  };
+  G.__pausar = function () { if (vivo && !pausado) { pausado = true; pausadoEm = Date.now(); } };
+  G.__retomar = function () {
+    if (!pausado) return;
+    pausado = false;
+    var d = Date.now() - pausadoEm;
+    for (var i = 0; i < fila.length; i++) fila[i].due += d;
+    rearmar();
+  };
 
   // ---------- rede ----------
   var pedidos = {}, proxPedido = 1, pendentes = 0;
-  function pedir(url, metodo, cab, corpo, ok, falha) {
+  function pedir(url, metodo, cab, corpo, ok, falha, guardar) {
     var id = proxPedido++; pendentes++;
     pedidos[id] = { ok: ok, falha: falha };
-    try { G.__pedir(id, String(url), String(metodo || 'GET'), JSON.stringify(cab || {}), corpo == null ? '' : String(corpo)); }
+    if (bloqueado(url)) { estat.bloqueados++; agendar(function () { G.__resposta(id, 204, '{}', '', ''); }, 0, [], false); return id; }
+    try { G.__pedir(id, String(url), String(metodo || 'GET'), JSON.stringify(cab || {}), corpo == null ? '' : String(corpo), !!guardar); }
     catch (e) { delete pedidos[id]; pendentes--; falha(e); }
     return id;
   }
@@ -823,6 +1004,7 @@ enum AmbienteJS {
       else p.ok({ status: status, cab: JSON.parse(cabJson || '{}'), texto: texto });
     } catch (e) { erro('rede: ' + e); }
     avancar();
+    pedirTick();
   };
   function Headers(init) {
     this.__m = {};
@@ -938,10 +1120,368 @@ enum AmbienteJS {
 
   // ---------- scripts ----------
   var fase = { pronto: false };
+  // ---------- módulos ES ----------
+  // O JavaScriptCore não expõe carregador de módulos. Então o módulo é reescrito, por tokens (strings, templates,
+  // regex e comentários não confundem a leitura), numa função comum: import vira leitura do módulo já executado,
+  // export vira um getter (ligação viva), import() vira uma chamada ao carregador e import.meta vira um objeto.
+  var PALAVRAS_REGEX = { 'return': 1, 'typeof': 1, 'instanceof': 1, 'in': 1, 'of': 1, 'new': 1, 'delete': 1, 'void': 1, 'throw': 1, 'case': 1, 'do': 1, 'else': 1, 'yield': 1, 'await': 1 };
+  function ehIdent(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 36 || c > 127; }
+  function regexPermitido(prev) {
+    if (prev === '' ) return true;
+    if (prev === ')' || prev === ']' || prev === '}' || prev === 'num' || prev === 'str') return false;
+    if (prev.length === 1 && !ehIdent(prev.charCodeAt(0))) return true;
+    return !!PALAVRAS_REGEX[prev];
+  }
+  function pularString(src, i, q) {
+    for (i++; i < src.length; i++) { var c = src.charCodeAt(i); if (c === 92) i++; else if (c === q || c === 10) return i + 1; }
+    return src.length;
+  }
+  function pularRegex(src, i) {
+    var dentro = false;
+    for (i++; i < src.length; i++) {
+      var c = src.charCodeAt(i);
+      if (c === 92) i++;
+      else if (c === 10) return i;
+      else if (c === 91) dentro = true;
+      else if (c === 93) dentro = false;
+      else if (c === 47 && !dentro) { i++; while (i < src.length && ehIdent(src.charCodeAt(i))) i++; return i; }
+    }
+    return src.length;
+  }
+  // devolve o índice logo depois do '}' que fecha o "${" aberto antes de i
+  function pularCodigoAte(src, i) {
+    var prof = 0, prev = '';
+    while (i < src.length) {
+      var c = src.charCodeAt(i);
+      if (c <= 32) { i++; continue; }
+      if (c === 47) {
+        var d = src.charCodeAt(i + 1);
+        if (d === 47) { var f = src.indexOf('\n', i); i = f < 0 ? src.length : f; continue; }
+        if (d === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? src.length : g + 2; continue; }
+        if (regexPermitido(prev)) { i = pularRegex(src, i); prev = 'num'; continue; }
+        i++; prev = '/'; continue;
+      }
+      if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }
+      if (c === 96) { i = pularTemplate(src, i); prev = 'str'; continue; }
+      if (c === 123) { prof++; i++; prev = '{'; continue; }
+      if (c === 125) { if (prof === 0) return i + 1; prof--; i++; prev = '}'; continue; }
+      if (ehIdent(c)) { var j = i; while (j < src.length && ehIdent(src.charCodeAt(j))) j++; var w = src.slice(i, j); prev = c >= 48 && c <= 57 ? 'num' : w; i = j; continue; }
+      prev = src.charAt(i); i++;
+    }
+    return i;
+  }
+  function pularTemplate(src, i) {
+    for (i++; i < src.length; i++) {
+      var c = src.charCodeAt(i);
+      if (c === 92) i++;
+      else if (c === 96) return i + 1;
+      else if (c === 36 && src.charCodeAt(i + 1) === 123) i = pularCodigoAte(src, i + 2) - 1;
+    }
+    return src.length;
+  }
+  var RE_IMP_EFEITO = /import\s*(['"])((?:\\.|(?!\1)[^\\\n])*)\1[ \t]*;?/y;
+  var RE_IMP = /import\s*([\s\S]*?)\s*from\s*(['"])((?:\\.|(?!\2)[^\\\n])*)\2[ \t]*;?/y;
+  var RE_EXP_LISTA = /export\s*\{([\s\S]*?)\}\s*(?:from\s*(['"])((?:\\.|(?!\2)[^\\\n])*)\2)?[ \t]*;?/y;
+  var RE_EXP_ESTRELA = /export\s*\*\s*(?:as\s+([\w$]+)\s*)?from\s*(['"])((?:\\.|(?!\2)[^\\\n])*)\2[ \t]*;?/y;
+  var RE_EXP_PADRAO = /export\s+default\s+/y;
+  var RE_DECL_FN = /(?:async\s+function\b\s*\*?\s*|function\b\s*\*?\s*|class\b\s*)([A-Za-z_$][\w$]*)?/y;
+  var RE_EXP_DECL = /export\s+(?=(?:async\s+function|function|class|const|let|var)\b)/y;
+  function partesTopo(t) {
+    var r = [], prof = 0, ini = 0;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charCodeAt(i);
+      if (c === 39 || c === 34) { i = pularString(t, i, c) - 1; continue; }
+      if (c === 123 || c === 91 || c === 40) prof++; else if (c === 125 || c === 93 || c === 41) prof--;
+      else if (c === 44 && prof === 0) { r.push(t.slice(ini, i)); ini = i + 1; }
+    }
+    r.push(t.slice(ini)); return r;
+  }
+  function semPadrao(e) {
+    var prof = 0;
+    for (var i = 0; i < e.length; i++) { var c = e.charCodeAt(i); if (c === 123 || c === 91 || c === 40) prof++; else if (c === 125 || c === 93 || c === 41) prof--; else if (c === 61 && prof === 0) return e.slice(0, i); }
+    return e;
+  }
+  function nomesPadrao(p, out) {
+    p = p.trim();
+    var a = p.charAt(0);
+    if (a === '{' || a === '[') {
+      partesTopo(p.slice(1, -1)).forEach(function (e) {
+        e = e.trim(); if (!e) return;
+        if (e.indexOf('...') === 0) { nomesPadrao(semPadrao(e.slice(3)), out); return; }
+        if (a === '{') { var prof = 0, dp = -1; for (var i = 0; i < e.length; i++) { var c = e.charCodeAt(i); if (c === 123 || c === 91 || c === 40) prof++; else if (c === 125 || c === 93 || c === 41) prof--; else if (c === 58 && prof === 0) { dp = i; break; } if (c === 61 && prof === 0) break; } if (dp >= 0) { nomesPadrao(semPadrao(e.slice(dp + 1)), out); return; } }
+        nomesPadrao(semPadrao(e), out);
+      });
+    } else { var m = /^[\w$]+/.exec(p); if (m) out.push(m[0]); }
+  }
+  // Depois de "export const|let|var": nomes declarados (inclui desestruturação e vários declaradores).
+  function nomesDeclarados(src, i) {
+    var nomes = [];
+    for (;;) {
+      while (i < src.length && src.charCodeAt(i) <= 32) i++;
+      var c = src.charAt(i);
+      if (c === '{' || c === '[') {
+        var ini = i, prof = 0;
+        for (; i < src.length; i++) { var k = src.charCodeAt(i); if (k === 39 || k === 34) { i = pularString(src, i, k) - 1; continue; } if (k === 96) { i = pularTemplate(src, i) - 1; continue; } if (k === 123 || k === 91 || k === 40) prof++; else if (k === 125 || k === 93 || k === 41) { prof--; if (prof === 0) { i++; break; } } }
+        nomesPadrao(src.slice(ini, i), nomes);
+      } else {
+        var m = /[\w$]+/y; m.lastIndex = i; var r = m.exec(src); if (!r) return nomes; nomes.push(r[0]); i += r[0].length;
+      }
+      // pula o inicializador até a vírgula que separa declaradores (ou o fim da declaração)
+      var prof2 = 0, prev = '';
+      for (; i < src.length; ) {
+        var d = src.charCodeAt(i);
+        if (d === 39 || d === 34) { i = pularString(src, i, d); prev = 'str'; continue; }
+        if (d === 96) { i = pularTemplate(src, i); prev = 'str'; continue; }
+        if (d === 47) { var e2 = src.charCodeAt(i + 1); if (e2 === 47) { var f = src.indexOf('\n', i); i = f < 0 ? src.length : f; continue; } if (e2 === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? src.length : g + 2; continue; } if (regexPermitido(prev)) { i = pularRegex(src, i); prev = 'num'; continue; } }
+        if (d === 123 || d === 91 || d === 40) { prof2++; prev = src.charAt(i); i++; continue; }
+        if (d === 125 || d === 93 || d === 41) { prof2--; if (prof2 < 0) return nomes; prev = src.charAt(i); i++; continue; }
+        if (prof2 === 0 && d === 59) return nomes;
+        if (prof2 === 0 && d === 44) { i++; break; }
+        if (prof2 === 0 && d === 10) {
+          var q = i + 1; while (q < src.length && (src.charCodeAt(q) === 32 || src.charCodeAt(q) === 9 || src.charCodeAt(q) === 13 || src.charCodeAt(q) === 10)) q++;
+          var nx = src.charAt(q), terminaExpr = prev === 'str' || prev === 'num' || prev === ')' || prev === ']' || prev === '}' || (prev !== '' && ehIdent(prev.charCodeAt(0)));
+          if (terminaExpr && (nx === '' || ehIdent(nx.charCodeAt(0)) || nx === '}')) return nomes;
+        }
+        if (d <= 32) { i++; continue; }
+        if (ehIdent(d)) { var j = i; while (j < src.length && ehIdent(src.charCodeAt(j))) j++; var w = src.slice(i, j); prev = d >= 48 && d <= 57 ? 'num' : w; i = j; continue; }
+        prev = src.charAt(i); i++;
+      }
+      if (i >= src.length) return nomes;
+    }
+  }
+  function transformarModulo(src) {
+    if (src.charCodeAt(0) === 35 && src.charCodeAt(1) === 33) src = '//' + src.slice(2);   // #! de arquivo executável
+    var n = src.length, i = 0, ini = 0, prev = '', prof = 0;
+    var out = [], specs = [], cabeca = [], getters = [], reexp = [];
+    function spec(s) { var k = specs.indexOf(s); if (k < 0) { specs.push(s); k = specs.length - 1; } return k; }
+    function corta(de, ate, troca) { out.push(src.slice(ini, de)); if (troca) out.push(troca); ini = ate; }
+    function usa(re, pos) { re.lastIndex = pos; return re.exec(src); }
+    while (i < n) {
+      var c = src.charCodeAt(i);
+      if (c <= 32) { i++; continue; }
+      if (c === 47) {
+        var d = src.charCodeAt(i + 1);
+        if (d === 47) { var f = src.indexOf('\n', i); i = f < 0 ? n : f; continue; }
+        if (d === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? n : g + 2; continue; }
+        if (regexPermitido(prev)) { i = pularRegex(src, i); prev = 'num'; continue; }
+        i++; prev = '/'; continue;
+      }
+      if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }
+      if (c === 96) { i = pularTemplate(src, i); prev = 'str'; continue; }
+      if (c === 40 || c === 91 || c === 123) { prof++; prev = src.charAt(i); i++; continue; }
+      if (c === 41 || c === 93 || c === 125) { prof--; prev = src.charAt(i); i++; continue; }
+      if (ehIdent(c)) {
+        var j = i; while (j < n && ehIdent(src.charCodeAt(j))) j++;
+        var w = src.slice(i, j), antesPonto = prev === '.';
+        if (c >= 48 && c <= 57) { prev = 'num'; i = j; continue; }
+        if (w === 'import' && !antesPonto) {
+          var k2 = j; while (k2 < n && src.charCodeAt(k2) <= 32) k2++;
+          var nx = src.charAt(k2);
+          if (nx === '(') { corta(i, j, '__import'); i = j; prev = 'import'; continue; }
+          if (nx === '.') { var mm = usa(/\.\s*meta\b/y, k2); if (mm) { corta(i, k2 + mm[0].length, '__meta'); i = k2 + mm[0].length; prev = 'meta'; continue; } }
+          if (prof === 0) {
+            var m1 = usa(RE_IMP_EFEITO, i);
+            if (m1) { spec(m1[2]); corta(i, i + m1[0].length, ''); i = ini; prev = ';'; continue; }
+            var m2 = usa(RE_IMP, i);
+            if (m2) {
+              var idx = spec(m2[3]), cl = m2[1].trim(), br = cl.indexOf('{');
+              var pre = (br >= 0 ? cl.slice(0, br) : cl).replace(/,\s*$/, '').trim();
+              var chaves = br >= 0 ? cl.slice(br + 1, cl.lastIndexOf('}')) : '';
+              if (pre) pre.split(',').forEach(function (p) {
+                p = p.trim(); if (!p) return;
+                var ns = /^\*\s*as\s+([\w$]+)$/.exec(p);
+                if (ns) cabeca.push('var ' + ns[1] + '=__imp[' + idx + '];'); else cabeca.push('var ' + p + '=__imp[' + idx + '].default;');
+              });
+              chaves.split(',').forEach(function (p) {
+                p = p.trim(); if (!p) return;
+                var q = /^([\w$]+|'[^']*'|"[^"]*")(?:\s+as\s+([\w$]+))?$/.exec(p); if (!q) return;
+                var orig = q[1].charAt(0) === '"' || q[1].charAt(0) === "'" ? q[1].slice(1, -1) : q[1];
+                cabeca.push('var ' + (q[2] || orig) + '=__imp[' + idx + '][' + JSON.stringify(orig) + '];');
+              });
+              corta(i, i + m2[0].length, ''); i = ini; prev = ';'; continue;
+            }
+          }
+        }
+        if (w === 'export' && !antesPonto && prof === 0) {
+          var e1 = usa(RE_EXP_PADRAO, i);
+          if (e1) {
+            var df = usa(RE_DECL_FN, i + e1[0].length);
+            if (df && df[1] && df[1] !== 'extends') { getters.push(['default', df[1]]); corta(i, i + e1[0].length, ''); }
+            else { getters.push(['default', '__padrao']); corta(i, i + e1[0].length, 'var __padrao='); }
+            i = i + e1[0].length; prev = ';'; continue;
+          }
+          var e2 = usa(RE_EXP_LISTA, i);
+          if (e2) {
+            var ik = e2[3] !== undefined ? spec(e2[3]) : -1;
+            e2[1].split(',').forEach(function (p) {
+              p = p.trim(); if (!p) return;
+              var q = /^([\w$]+|'[^']*'|"[^"]*")(?:\s+as\s+([\w$]+|'[^']*'|"[^"]*"))?$/.exec(p); if (!q) return;
+              var un = function (x) { return x.charAt(0) === '"' || x.charAt(0) === "'" ? x.slice(1, -1) : x; };
+              var local = un(q[1]), expo = q[2] ? un(q[2]) : local;
+              getters.push([expo, ik >= 0 ? '__imp[' + ik + '][' + JSON.stringify(local) + ']' : local]);
+            });
+            corta(i, i + e2[0].length, ''); i = ini; prev = ';'; continue;
+          }
+          var e3 = usa(RE_EXP_ESTRELA, i);
+          if (e3) {
+            var ie = spec(e3[3]);
+            if (e3[1]) getters.push([e3[1], '__imp[' + ie + ']']); else reexp.push(ie);
+            corta(i, i + e3[0].length, ''); i = ini; prev = ';'; continue;
+          }
+          var e4 = usa(RE_EXP_DECL, i);
+          if (e4) {
+            var pos = i + e4[0].length, kw = /(?:async\s+function|function|class|const|let|var)/y; kw.lastIndex = pos;
+            var kwm = kw.exec(src), kwTxt = kwm[0];
+            if (kwTxt === 'const' || kwTxt === 'let' || kwTxt === 'var') nomesDeclarados(src, pos + kwTxt.length).forEach(function (nm) { getters.push([nm, nm]); });
+            else { var fm = usa(RE_DECL_FN, pos); if (fm && fm[1]) getters.push([fm[1], fm[1]]); }
+            corta(i, i + e4[0].length, ''); i = i + e4[0].length; prev = ';'; continue;
+          }
+        }
+        prev = w; i = j; continue;
+      }
+      prev = src.charAt(i); i++;
+    }
+    out.push(src.slice(ini));
+    var topo = '(function(__exp,__imp,__meta,__import,__rex){"use strict";';
+    getters.forEach(function (g) { topo += 'Object.defineProperty(__exp,' + JSON.stringify(g[0]) + ',{enumerable:true,configurable:true,get:function(){return ' + g[1] + '}});'; });
+    reexp.forEach(function (k) { topo += '__rex(__exp,__imp[' + k + ']);'; });
+    topo += cabeca.join('');
+    return { codigo: topo + out.join('') + '\n})', specs: specs };
+  }
+
+  // ---------- carregador de módulos ----------
+  // estado: 0 baixando, 1 pronto para executar, 2 executando, 3 executado, 4 com erro
+  var modulos = Object.create(null), mapaImp = Object.create(null), adiados = [], proxInline = 0;
+  function resolverModulo(spec, base) {
+    spec = String(spec);
+    var m = mapaImp[spec];
+    if (m === undefined) {
+      var ks = Object.keys(mapaImp);
+      for (var i = 0; i < ks.length; i++) { var k = ks[i]; if (k.charAt(k.length - 1) === '/' && spec.indexOf(k) === 0) { m = mapaImp[k] + spec.slice(k.length); break; } }
+    }
+    if (m !== undefined) spec = m;
+    else if (!/^(\.{0,2}\/|[a-z][a-z0-9+.-]*:)/i.test(spec)) return null;
+    return resolver(spec, base);
+  }
+  function modulo(url, texto) {
+    var r = modulos[url];
+    if (r) return r;
+    r = modulos[url] = { url: url, base: url, estado: 0, exports: {}, deps: [], fn: null, espera: [], erro: null };
+    if (texto !== undefined) { r.base = pagina.href; preparar(r, texto); return r; }
+    pedir(url, 'GET', { accept: '*/*' }, '', function (x) {
+      if (x.status >= 200 && x.status < 300) preparar(r, x.texto); else falharModulo(r, new Error('HTTP ' + x.status + ' em ' + url));
+    }, function () { falharModulo(r, new Error('falha de rede em ' + url)); });
+    return r;
+  }
+  function acordarEspera(r) { var e = r.espera; r.espera = []; e.forEach(function (f) { f(); }); }
+  function falharModulo(r, e) { r.estado = 4; r.erro = e; erro('módulo ' + r.url + ': ' + (e && e.message || e)); acordarEspera(r); }
+  function preparar(r, texto) {
+    try {
+      var t = transformarModulo(texto);
+      r.fn = (0, eval)(t.codigo + '\n//# sourceURL=' + r.url);
+      r.deps = t.specs.map(function (sp) {
+        var u = resolverModulo(sp, r.base);
+        if (!u) throw new TypeError('Failed to resolve module specifier "' + sp + '"');
+        return modulo(u);
+      });
+    } catch (e) { falharModulo(r, e); return; }
+    r.estado = 1; acordarEspera(r);
+  }
+  // chama cb quando o módulo e todas as suas dependências (em qualquer profundidade) já estão baixadas e compiladas
+  function quandoPronto(r, cb) {
+    var vistos = Object.create(null), falta = 0, chamado = false;
+    function fim() { if (!chamado && falta === 0) { chamado = true; cb(); } }
+    function visita(m) {
+      if (vistos[m.url]) return; vistos[m.url] = 1;
+      if (m.estado === 0) { falta++; m.espera.push(function () { falta--; deps(m); fim(); }); return; }
+      deps(m);
+    }
+    function deps(m) { for (var i = 0; i < m.deps.length; i++) visita(m.deps[i]); }
+    visita(r); fim();
+  }
+  function reexportar(alvo, fonte) {
+    Object.keys(fonte).forEach(function (k) {
+      if (k !== 'default' && !(k in alvo)) Object.defineProperty(alvo, k, { enumerable: true, configurable: true, get: function () { return fonte[k]; } });
+    });
+  }
+  function executarModulo(r) {
+    if (r.estado === 4) throw r.erro;
+    if (r.estado >= 2) return;
+    r.estado = 2;
+    try {
+      for (var i = 0; i < r.deps.length; i++) executarModulo(r.deps[i]);
+      var imps = r.deps.map(function (d) { return d.exports; });
+      r.fn.call(undefined, r.exports, imps, { url: r.url }, function (sp) { return importarDinamico(sp, r.base); }, reexportar);
+    } catch (e) { r.estado = 4; r.erro = e; throw e; }
+    r.estado = 3;
+  }
+  function importarDinamico(spec, base) {
+    return new Promise(function (res, rej) {
+      var u = resolverModulo(spec, base);
+      if (!u) { rej(new TypeError('Failed to resolve module specifier "' + spec + '"')); return; }
+      var r = modulo(u);
+      quandoPronto(r, function () { try { executarModulo(r); res(r.exports); } catch (e) { rej(e); } });
+    });
+  }
+  function executarScriptModulo(a) {
+    var src = a.el.getAttribute('src');
+    try { executarModulo(a.r); estat.executados++; if (src) eventoCarga(a.el, 'load'); }
+    catch (e) { erro('módulo ' + a.r.url + ': ' + (e && e.message || e)); if (src) eventoCarga(a.el, 'error'); }
+  }
+  function agendarModulo(s) {
+    var src = s.getAttribute('src'), r;
+    if (src) { var url = resolver(src); if (!url) return; r = modulo(url); }
+    else r = modulo('inline:' + (++proxInline), s.textContent);
+    var a = { r: r, el: s, pronto: false, aguardando: false };
+    if (doc.readyState === 'loading') { adiados.push(a); return; }
+    quandoPronto(r, function () { executarScriptModulo(a); });   // inserido depois do carregamento: roda assim que o grafo chegar
+  }
+  // Módulos da página rodam depois de todos os scripts comuns e antes do DOMContentLoaded, na ordem do documento.
+  // Devolve false enquanto ainda espera algum módulo chegar.
+  function executarAdiados() {
+    while (adiados.length) {
+      var a = adiados[0];
+      if (!a.pronto) {
+        if (!a.aguardando) {
+          a.aguardando = true;
+          var sinc = true;
+          quandoPronto(a.r, function () { a.pronto = true; if (!sinc) avancar(); });
+          sinc = false;
+        }
+        if (!a.pronto) return false;
+      }
+      adiados.shift();
+      executarScriptModulo(a);
+    }
+    return true;
+  }
   var TIPOS_JS = { '': 1, 'text/javascript': 1, 'application/javascript': 1, 'text/ecmascript': 1, 'application/ecmascript': 1, 'text/jscript': 1 };
-  var estat = { executados: 0, ignorados: 0 };
+  var estat = { executados: 0, ignorados: 0, bloqueados: 0 };
+  // Rastreadores e anúncios: não baixam nem rodam. Economiza rede, CPU e memória.
+  var BLOQ = ['google-analytics.com', 'googletagmanager.com', 'googletagservices.com', 'googlesyndication.com', 'googleadservices.com', 'doubleclick.net', '2mdn.net',
+    'connect.facebook.net', 'hotjar.com', 'clarity.ms', 'mixpanel.com', 'segment.com', 'segment.io', 'amplitude.com', 'fullstory.com', 'nr-data.net',
+    'taboola.com', 'outbrain.com', 'criteo.com', 'criteo.net', 'scorecardresearch.com', 'quantserve.com', 'chartbeat.com', 'chartbeat.net', 'adnxs.com',
+    'rubiconproject.com', 'pubmatic.com', 'openx.net', 'amazon-adsystem.com', 'moatads.com', 'adsrvr.org', 'bat.bing.com', 'ads-twitter.com',
+    'analytics.tiktok.com', 'px.ads.linkedin.com', 'hs-analytics.net', 'adform.net', 'casalemedia.com', 'demdex.net', 'omtrdc.net', 'mc.yandex.ru'];
+  function bloqueado(url) {
+    if (!pagina.bloquear) return false;
+    var m = /^[a-z]+:\/\/([^\/?#:@]+)/i.exec(String(url));
+    if (!m) return false;
+    var h = m[1].toLowerCase();
+    for (var i = 0; i < BLOQ.length; i++) { var b = BLOQ[i]; if (h === b || h.length > b.length && h.slice(-b.length - 1) === '.' + b) return true; }
+    return false;
+  }
+  // Scripts de página rodam como "Script", não como eval: let, const e class do topo ficam visíveis aos scripts
+  // seguintes, como num navegador. O texto dos scripts externos nunca passa pelo heap do JavaScript.
+  function rodarScript(url, r) {
+    if (!r.nativo) { rodarCodigo(url, r.texto); return; }
+    estat.executados++;
+    var m = G.__avaliarGuardado(String(url));
+    if (m) erro(m);
+  }
   function rodarCodigo(origem, codigo) {
     estat.executados++;
+    if (typeof G.__avaliar === 'function') { var msg = G.__avaliar(String(origem), String(codigo)); if (msg) erro(msg); return; }
     try { (0, eval)(codigo + '\n//# sourceURL=' + origem); }
     catch (e) {
       var extra = '';
@@ -952,37 +1492,89 @@ enum AmbienteJS {
       erro(origem + ': ' + (e && e.message ? e.message : e) + extra);
     }
   }
+  function ehModulo(s) { return (s.getAttribute('type') || '').toLowerCase().split(';')[0].trim() === 'module'; }
   function podeRodar(s) {
     var tipo = (s.getAttribute('type') || '').toLowerCase().split(';')[0].trim();
-    if (!(tipo in TIPOS_JS)) return false;
+    if (!(tipo in TIPOS_JS) && tipo !== 'module') return false;
     if (s.hasAttribute('nomodule')) return false;
+    var src = s.getAttribute('src');
+    if (src && pagina.bloquear) { var u = resolver(src); if (u && bloqueado(u)) { if (!s.__bq) { s.__bq = 1; estat.bloqueados++; } return false; } }
     return true;
+  }
+  // Como o "preload scanner" dos navegadores: pede todos os scripts de uma vez, em paralelo.
+  // A execução continua na ordem da página; só o download deixa de ser uma fila.
+  function preCarregar() {
+    var n = 0, pre = [];
+    // 1ª passada: mapas de importação precisam existir antes de qualquer módulo ser resolvido
+    (function visita(no) {
+      for (var i = 0; i < no.childNodes.length; i++) {
+        var f = no.childNodes[i];
+        if (f.nodeType !== 1) continue;
+        if (f.localName === 'script' && (f.getAttribute('type') || '').toLowerCase() === 'importmap') {
+          try {
+            var im = JSON.parse(f.textContent).imports || {};
+            Object.keys(im).forEach(function (k) { var u = resolver(im[k]); if (u) mapaImp[k] = u; });
+          } catch (e) { erro('importmap: ' + e); }
+        }
+        visita(f);
+      }
+    })(doc);
+    (function visita(no) {
+      for (var i = 0; i < no.childNodes.length && n < 64; i++) {
+        var f = no.childNodes[i];
+        if (f.nodeType !== 1) continue;
+        if (f.localName === 'script' && f.__parser && podeRodar(f)) {
+          var src = f.getAttribute('src');
+          var u = src ? resolver(src) : null;
+          if (u) { if (ehModulo(f)) modulo(u); else baixarScript(u); n++; }
+        } else if (f.localName === 'link' && (f.getAttribute('rel') || '').toLowerCase() === 'modulepreload') {
+          var h = f.getAttribute('href'), hu = h ? resolver(h) : null;
+          if (hu) { modulo(hu); n++; }
+        }
+        visita(f);
+      }
+    })(doc);
   }
   var baixados = {};
   function baixarScript(url) {
     if (baixados[url]) return baixados[url];
-    var r = baixados[url] = { pronto: false, texto: null, falhou: false, espera: [] };
+    var r = baixados[url] = { pronto: false, texto: null, falhou: false, espera: [], nativo: false };
+    var guardar = typeof G.__avaliarGuardado === 'function';
     pedir(url, 'GET', { accept: '*/*' }, '', function (x) {
-      r.pronto = true; if (x.status >= 200 && x.status < 300) r.texto = x.texto; else r.falhou = true;
+      r.pronto = true; if (x.status >= 200 && x.status < 300) { r.texto = guardar ? null : x.texto; r.nativo = guardar; } else r.falhou = true;
       var e = r.espera; r.espera = []; e.forEach(function (f) { f(); });
-    }, function () { r.pronto = true; r.falhou = true; var e = r.espera; r.espera = []; e.forEach(function (f) { f(); }); });
+    }, function () { r.pronto = true; r.falhou = true; var e = r.espera; r.espera = []; e.forEach(function (f) { f(); }); }, guardar);
     return r;
   }
   function eventoCarga(el, tipo) { var ev = new Event(tipo); ev.target = el; disparar(el, ev); }
   // script inserido depois da montagem (ex.: carregamento de pedaços do site)
+  function acharScripts(raiz) {
+    var r = [];
+    if (raiz.localName === 'script') { r.push(raiz); return r; }
+    (function visita(n) {
+      for (var i = 0; i < n.childNodes.length; i++) {
+        var f = n.childNodes[i];
+        if (f.nodeType !== 1) continue;
+        if (f.localName === 'script') r.push(f); else if (f.childNodes.length) visita(f);
+      }
+    })(raiz);
+    return r;
+  }
   function iniciarScripts(raiz) {
-    var lista = raiz.localName === 'script' ? [raiz] : buscar(raiz, 'script', false);
+    if (raiz.nodeType === 1 && raiz.localName !== 'script' && !raiz.childNodes.length) return;
+    var lista = acharScripts(raiz);
     lista.forEach(function (s) {
       if (s.__ran || s.__parser) return;
       s.__ran = true;
       if (!podeRodar(s)) { estat.ignorados++; return; }
+      if (ehModulo(s)) { agendarModulo(s); return; }
       var src = s.getAttribute('src');
       if (src) {
         var url = resolver(src); if (!url) return;
         var r = baixarScript(url);
         var corre = function () {
           if (r.falhou) { eventoCarga(s, 'error'); return; }
-          var ant = doc.currentScript; doc.currentScript = s; rodarCodigo(url, r.texto); doc.currentScript = ant; eventoCarga(s, 'load');
+          var ant = doc.currentScript; doc.currentScript = s; rodarScript(url, r); doc.currentScript = ant; eventoCarga(s, 'load');
         };
         r.pronto ? corre() : r.espera.push(corre);
       } else {
@@ -1009,6 +1601,7 @@ enum AmbienteJS {
       var s = proximoScript();
       if (!s) { sequencia.acabou = true; return; }
       if (!podeRodar(s)) { s.__ran = true; estat.ignorados++; continue; }
+      if (ehModulo(s)) { s.__ran = true; agendarModulo(s); continue; }
       var src = s.getAttribute('src');
       if (src) {
         var url = resolver(src);
@@ -1017,7 +1610,7 @@ enum AmbienteJS {
         if (!r.pronto) { sequencia.esperando = s; r.espera.push(avancar); return; }
         s.__ran = true;
         if (r.falhou) { eventoCarga(s, 'error'); continue; }
-        doc.currentScript = s; rodarCodigo(url, r.texto); doc.currentScript = null; eventoCarga(s, 'load');
+        doc.currentScript = s; rodarScript(url, r); doc.currentScript = null; eventoCarga(s, 'load');
       } else {
         s.__ran = true; doc.currentScript = s; rodarCodigo('inline', s.textContent); doc.currentScript = null;
       }
@@ -1028,6 +1621,7 @@ enum AmbienteJS {
     if (terminou) return;
     if (!sequencia.acabou) seguirSequencia();
     if (!sequencia.acabou) return;
+    if (!executarAdiados()) return;
     if (doc.readyState === 'loading') {
       doc.readyState = 'interactive'; fase.pronto = true;
       var e1 = new Event('readystatechange'); e1.target = doc; disparar(doc, e1);
@@ -1134,14 +1728,81 @@ enum AmbienteJS {
   G.__iniciar = function (arvoreJson) {
     var json = JSON.parse(arvoreJson);
     montarDocumento(json);
+    preCarregar();
     avancar();
   };
   G.__serializar = function () {
-    var o = []; serializar(doc, o, true);
+    var o = [];
+    if (pagina.vivo) {
+      var cob = (temOuvinteClique(doc) || temOuvinteClique(G) || (doc.documentElement ? temOuvinteClique(doc.documentElement) : false) || (doc.body ? temOuvinteClique(doc.body) : false)) ? 1 : 0;
+      mapaClique = {}; marcando = true;
+      try { serializar(doc, o, true, cob); } finally { marcando = false; }
+    } else serializar(doc, o, true);
     return o.join('');
   };
-  G.__estatisticas = function () { return JSON.stringify({ executados: estat.executados, ignorados: estat.ignorados, timers: execTimers, pendentes: pendentes }); };
+  // Modo vivo: devolve o HTML novo (ou null se nada mudou desde a última entrega).
+  G.__coletar = function () {
+    avisoPend = false;
+    if (sujeira === entregue) return null;
+    entregue = sujeira;
+    return G.__serializar();
+  };
+  function mouse(tipo, el) { var ev = new G.MouseEvent(tipo, { bubbles: true, cancelable: true, clientX: 0, clientY: 0, button: 0, view: G }); ev.target = el; return el.dispatchEvent(ev); }
+  function ponteiro(tipo, el) { var ev = new G.PointerEvent(tipo, { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true, clientX: 0, clientY: 0 }); ev.target = el; return el.dispatchEvent(ev); }
+  function toque(tipo, el) {
+    var pt = { identifier: 0, target: el, clientX: 0, clientY: 0, pageX: 0, pageY: 0, screenX: 0, screenY: 0 };
+    var ev = new G.TouchEvent(tipo, { bubbles: true, cancelable: true, touches: tipo === 'touchend' ? [] : [pt], targetTouches: tipo === 'touchend' ? [] : [pt], changedTouches: [pt] });
+    ev.target = el; return el.dispatchEvent(ev);
+  }
+  function marcarCheck(c, v) { c.checked = v; var i = new Event('input', { bubbles: true }); i.target = c; c.dispatchEvent(i); var h = new Event('change', { bubbles: true }); h.target = c; c.dispatchEvent(h); }
+  // O que o navegador faz sozinho depois de um clique que ninguém cancelou. Devolve um endereço, se for o caso.
+  function acaoPadrao(el, nivel) {
+    for (var n = el; n && n.nodeType === 1; n = n.parentNode) {
+      var t = n.localName;
+      if (t === 'input') {
+        var ty = (n.getAttribute('type') || '').toLowerCase();
+        if (ty === 'checkbox') { marcarCheck(n, !n.checked); return ''; }
+        if (ty === 'radio') {
+          if (!n.checked) {
+            var nome = n.getAttribute('name');
+            if (nome) buscar(doc, 'input[type=radio]', false).forEach(function (r) { if (r !== n && r.getAttribute('name') === nome) r.checked = false; });
+            marcarCheck(n, true);
+          }
+          return '';
+        }
+        return '';
+      }
+      if (t === 'label' && !nivel) {
+        var f = n.getAttribute('for'), c = f ? doc.getElementById(f) : n.querySelector('input,select,textarea');
+        if (c && c !== el) { var ev = new G.MouseEvent('click', { bubbles: true, cancelable: true }); ev.target = c; if (c.dispatchEvent(ev)) return acaoPadrao(c, 1); }
+        return '';
+      }
+      if (t === 'summary' && n.parentNode && n.parentNode.localName === 'details') {
+        var d = n.parentNode; d.hasAttribute('open') ? d.removeAttribute('open') : d.setAttribute('open', '');
+        var tg = new Event('toggle'); tg.target = d; d.dispatchEvent(tg);
+        return '';
+      }
+      if (t === 'a') return hrefDe(n);
+    }
+    return '';
+  }
+  // O toque do usuário vira a sequência de eventos de um toque de verdade.
+  G.__tocar = function (id) {
+    var el = mapaClique[id];
+    if (!el || !el.isConnected) return JSON.stringify({ ok: 0 });
+    var href = '';
+    try {
+      ponteiro('pointerdown', el);
+      toque('touchstart', el);
+      ponteiro('pointerup', el);
+      var seguir = toque('touchend', el);
+      if (seguir) { mouse('mousedown', el); mouse('mouseup', el); }
+      if (seguir && mouse('click', el)) href = acaoPadrao(el, 0);
+    } catch (e) { erro('toque: ' + e); }
+    pedirTick();
+    return JSON.stringify({ ok: 1, href: href });
+  };
+  G.__estatisticas = function () { return JSON.stringify({ executados: estat.executados, ignorados: estat.ignorados, bloqueados: estat.bloqueados, timers: execTimers, pendentes: pendentes, vivo: vivo }); };
 })(this);
-
 """#
 }

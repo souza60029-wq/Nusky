@@ -14,8 +14,15 @@ enum FolhasExternas {
 
     /// Devolve o HTML com o CSS externo no começo. Se nada for baixado, devolve o HTML igual.
     static func incluir(em html: String, base: URL) async -> String {
+        let estilo = await bloco(em: html, base: base)
+        return estilo.isEmpty ? html : estilo + html
+    }
+
+    /// Só o bloco <style> com o CSS externo (vazio se não houver). Separado para poder baixar o CSS
+    /// ao mesmo tempo em que o JavaScript da página roda: um não depende do outro.
+    static func bloco(em html: String, base: URL) async -> String {
         let urls = encontrarFolhas(no: html, base: base)
-        guard !urls.isEmpty else { return html }
+        guard !urls.isEmpty else { return "" }
 
         let textos = await baixarTodas(urls)
         var total = 0
@@ -27,13 +34,13 @@ enum FolhasExternas {
             total += tamanho
             partes.append(texto)
         }
-        guard !partes.isEmpty else { return html }
+        guard !partes.isEmpty else { return "" }
 
         // Um "</style" dentro do CSS fecharia o bloco antes da hora.
         let css = partes
             .joined(separator: "\n")
             .replacingOccurrences(of: "</style", with: "", options: .caseInsensitive)
-        return "<style>\(css)</style>" + html
+        return "<style>\(css)</style>"
     }
 
     /// Lista os endereços absolutos das folhas de estilo da página, sem repetir.

@@ -41,6 +41,14 @@ final class BrowserModel: ObservableObject {
     private var task: Task<Void, Never>?
     private var started = false
 
+    /// JavaScript que continua vivo depois da primeira exibição: cliques, temporizadores e rede.
+    private var sessaoViva: JSRodador?
+    /// Última versão do HTML vinda da sessão viva, esperando o desenho (só a mais nova importa).
+    private var htmlVivoPendente: String?
+    private var atualizandoVivo = false
+    /// Bloco <style> com o CSS externo da página atual. O JavaScript roda sem ele, e ele entra na hora de desenhar.
+    private var cssDaPagina = ""
+
     // Imagens: o HTML fica guardado para refazer o layout quando o tamanho de uma imagem é descoberto.
     private var htmlAtual = ""
     private var tamanhosImagens: [String: CGSize] = [:]
@@ -117,6 +125,10 @@ final class BrowserModel: ObservableObject {
 
     /// Link tocado na página. Resolve relativos pela URL final da página atual.
     func open(href: String) {
+        if href.hasPrefix(BrowserModel.prefixoToqueJS) {
+            tocarJS(href)
+            return
+        }
         guard let base = currentURL,
               let url = URL(string: codificarEndereco(href), relativeTo: base)?.absoluteURL,
               let esquema = url.scheme?.lowercased(),
@@ -233,6 +245,7 @@ final class BrowserModel: ObservableObject {
 
     private func limparPagina() {
         task?.cancel()
+        encerrarSessaoViva()
         items = []
         fundos = []
         fundoPagina = nil
@@ -251,6 +264,7 @@ final class BrowserModel: ObservableObject {
 
     /// Esvazia a tela e mostra o início do carregamento.
     private func iniciarCarregamento() {
+        encerrarSessaoViva()
         tarefaImagens?.cancel()
         geracao += 1
         status = ""
@@ -272,20 +286,27 @@ final class BrowserModel: ObservableObject {
             // Baixa as folhas de estilo externas antes de registrar a página no histórico,
             // para não deixar entrada sem tela se o usuário trocar de página no meio.
             progresso = 0.9
-            let comCSS = await FolhasExternas.incluir(em: html, base: finalURL)
-            guard !Task.isCancelled else { return }
+            // O CSS externo e o JavaScript não dependem um do outro: os dois trabalham ao mesmo tempo
+            // (antes um esperava o outro terminar) e se encontram só na hora de desenhar.
+            async let estiloExterno = FolhasExternas.bloco(em: html, base: finalURL)
             // Roda os scripts da página (se houver) e pega o HTML já alterado por eles.
             // Qualquer falha devolve o HTML original, então a página sempre abre.
             progresso = 0.93
             let rodado = await JSRodador.processar(
-                html: comCSS,
+                html: html,
                 pagina: finalURL,
                 largura: Int(textWidth),
                 escuro: Aparencia.sitesEmModoEscuro()
             )
+            let estilo = await estiloExterno
             ultimoRelatorioJS = rodado.relatorio
-            let completo = rodado.html
-            guard !Task.isCancelled else { return }
+            cssDaPagina = estilo
+            let completo = estilo + rodado.html
+            let minhaGeracao = geracao
+            guard !Task.isCancelled else {
+                rodado.sessao?.fechar()
+                return
+            }
             var id = entradaId
             if navegar {
                 historico.navegar(para: finalURL)
@@ -294,6 +315,11 @@ final class BrowserModel: ObservableObject {
             }
             progresso = 0.95
             await show(html: completo, url: finalURL, entradaId: id, restoreY: y)
+            guard !Task.isCancelled, minhaGeracao == geracao else {
+                rodado.sessao?.fechar()
+                return
+            }
+            anexarSessaoViva(rodado.sessao, geracao: minhaGeracao)
         } catch {
             guard !Task.isCancelled else { return }
             carregando = false
@@ -338,6 +364,82 @@ final class BrowserModel: ObservableObject {
         progresso = 0
         pageVersion += 1
         iniciarImagens(desenhada.imagens, base: url, geracao: geracao)
+    }
+
+    // MARK: JavaScript vivo
+
+    /// Os elementos que o JavaScript escuta chegam do motor como `nusky-js:<id>|<link de reserva>`.
+    private static let prefixoToqueJS = "nusky-js:"
+
+    private func encerrarSessaoViva() {
+        sessaoViva?.fechar()
+        sessaoViva = nil
+        htmlVivoPendente = nil
+    }
+
+    private func anexarSessaoViva(_ sessao: JSRodador?, geracao g: Int) {
+        guard let sessao else { return }
+        sessaoViva = sessao
+        sessao.aoEncerrar = { [weak self] in
+            Task { @MainActor in
+                // Só solta se ainda for a sessão desta página.
+                if self?.sessaoViva === sessao { self?.sessaoViva = nil }
+            }
+        }
+        sessao.ligar { [weak self] html in
+            Task { @MainActor in self?.receberHTMLVivo(html, geracao: g) }
+        }
+    }
+
+    /// O JavaScript mudou a página. Se o desenho anterior ainda não acabou, só a versão mais nova vale.
+    private func receberHTMLVivo(_ html: String, geracao g: Int) {
+        guard g == geracao, sessaoViva != nil else { return }
+        htmlVivoPendente = html
+        guard !atualizandoVivo else { return }
+        atualizandoVivo = true
+        Task { await self.desenharVivo(geracao: g) }
+    }
+
+    private func desenharVivo(geracao g: Int) async {
+        defer { atualizandoVivo = false }
+        while let html = htmlVivoPendente {
+            htmlVivoPendente = nil
+            guard g == geracao, !carregando, let url = currentURL else { return }
+            let completo = cssDaPagina + html
+            if completo == htmlAtual { continue }
+            htmlAtual = completo
+            let inicio = CFAbsoluteTimeGetCurrent()
+            let desenhada = await desenhar(completo)
+            guard g == geracao, !Task.isCancelled else { return }
+            // Mantém a rolagem onde o dedo estava.
+            restoreY = scrollY
+            aplicar(desenhada)
+            iniciarImagens(desenhada.imagens, base: url, geracao: g)
+            // A cadência do JavaScript acompanha o custo real de desenhar esta página.
+            sessaoViva?.informarCusto(CFAbsoluteTimeGetCurrent() - inicio)
+        }
+    }
+
+    /// Toque numa área que o JavaScript escuta. Sem sessão viva, cai no link de reserva (se houver).
+    private func tocarJS(_ carga: String) {
+        let resto = carga.dropFirst(BrowserModel.prefixoToqueJS.count)
+        let partes = resto.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let id = partes.first.flatMap({ Int($0) }) else { return }
+        let reserva = partes.count > 1 ? String(partes[1]) : ""
+        guard let sessao = sessaoViva else {
+            if !reserva.isEmpty { open(href: reserva) }
+            return
+        }
+        let g = geracao
+        Task {
+            let resposta = await sessao.tocar(id: id)
+            guard g == self.geracao else { return }
+            switch resposta {
+            case .navegar(let destino): self.open(href: destino)
+            case .tratado: break
+            case .perdido: if !reserva.isEmpty { self.open(href: reserva) }
+            }
+        }
     }
 
     // MARK: Desenho e imagens

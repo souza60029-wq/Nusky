@@ -550,8 +550,16 @@ fn tratar_elemento(
         return info;
     }
 
+    // Elementos que o JavaScript da página escuta (marcados por `data-nusky-js`) devolvem o
+    // toque ao JavaScript. O mais interno vence, como o dedo acertaria de verdade.
+    let js_link = el
+        .attr("data-nusky-js")
+        .map(str::trim)
+        .filter(|h| h.starts_with("nusky-js:"));
     // Âncoras sem destino real (vazias ou "#topo") não viram links.
-    let own_link = if el.tag == "a" {
+    let own_link = if js_link.is_some() {
+        js_link
+    } else if el.tag == "a" {
         el.attr("href")
             .map(str::trim)
             .filter(|h| !h.is_empty() && !h.starts_with('#'))
@@ -1669,6 +1677,24 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].1, "/wiki");
         assert_eq!(links[0].0.trim(), "aqui");
+    }
+
+    #[test]
+    fn elemento_marcado_pelo_javascript_vira_alvo_de_toque() {
+        let cmds = run(
+            r#"<p><span data-nusky-js="nusky-js:7|">toque</span> <a href="/x" data-nusky-js="nusky-js:8|http://a/x">ir</a></p>"#,
+            400.0,
+        );
+        let links: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { href: Some(h), .. } => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(links.contains(&"nusky-js:7|"));
+        assert!(links.contains(&"nusky-js:8|http://a/x"));
+        assert!(!links.contains(&"/x"));
     }
 
     #[test]

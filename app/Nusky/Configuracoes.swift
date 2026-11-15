@@ -30,6 +30,8 @@ struct PainelAjustes: View {
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage(IdentificacaoNavegador.chaveDesktop) private var versaoDesktop = false
     @AppStorage(JSRodador.chaveAtivo) private var javascriptLigado = true
+    @AppStorage(JSRodador.chaveVivo) private var javascriptVivo = true
+    @AppStorage(JSRodador.chaveBloquear) private var bloquearRastreadores = false
     @AppStorage(BrowserModel.chaveImagens) private var imagensLigadas = true
     @AppStorage(ChavesTema.desfoque) private var desfoque = true
     @AppStorage("usarMetal") private var usarMetal = false
@@ -254,9 +256,23 @@ struct PainelAjustes: View {
                 divisor
                 linhaChave(
                     "Executar JavaScript",
-                    detalhe: "Necessário em sites que montam a página no aparelho. O limite é de 6 segundos.",
+                    detalhe: "Necessário em sites que montam a página no aparelho. A primeira exibição espera até 6 segundos.",
                     valor: $javascriptLigado,
                     desempenho: true
+                )
+                divisor
+                linhaChave(
+                    "JavaScript interativo",
+                    detalhe: "Depois da primeira exibição o JavaScript continua rodando: menus, abas, botões e carregamentos da página respondem ao toque, sem cortar nada. Fecha sozinho ao sair da página ou com pouca memória.",
+                    valor: $javascriptVivo,
+                    desempenho: true
+                )
+                divisor
+                linhaChave(
+                    "Bloquear rastreadores",
+                    detalhe: "Opcional. Não baixa nem executa scripts de anúncios e análise (Google Analytics, Meta Pixel, Hotjar e semelhantes). Fica desligado por padrão porque alguns sites dependem deles.",
+                    valor: $bloquearRastreadores,
+                    ajuda: true
                 )
             }
             cartao {

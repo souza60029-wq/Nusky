@@ -612,6 +612,8 @@ enum DiagnosticoJS {
         let inicio = CFAbsoluteTimeGetCurrent()
         let escuro = await MainActor.run { Aparencia.sitesEmModoEscuro() }
         let rodado = await JSRodador.processar(html: html, pagina: base, largura: Int(largura), escuro: escuro)
+        // O diagnóstico só olha o resultado: a sessão viva não pode ficar aberta (memória).
+        rodado.sessao?.fechar()
         let tempoTotal = CFAbsoluteTimeGetCurrent() - inicio
 
         guard let r = rodado.relatorio else {
@@ -622,6 +624,8 @@ enum DiagnosticoJS {
         linhas.append("Scripts executados: \(r.executados)")
         linhas.append("Scripts ignorados: \(r.ignorados)")
         linhas.append("Pedidos de rede: \(r.requisicoes)")
+        linhas.append("Rastreadores bloqueados: \(r.bloqueados)")
+        linhas.append("JavaScript continuou vivo depois da primeira exibição: \(r.sessaoViva ? "sim" : "não")")
         linhas.append("Tempo do JavaScript: \(formatarSegundos(r.tempo)) (medido de fora: \(formatarSegundos(tempoTotal)))")
         linhas.append("Estourou o limite de tempo: \(r.estourouLimite ? "SIM" : "não")")
         linhas.append("HTML final veio do JavaScript: \(r.usouResultado ? "sim" : "NÃO (usou o HTML original)")")

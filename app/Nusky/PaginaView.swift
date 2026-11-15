@@ -68,7 +68,10 @@ struct PaginaView: UIViewRepresentable {
             scroll.vistaMetal?.limparCache()
             scroll.setNeedsLayout()
             scroll.layoutIfNeeded()
-            scroll.setContentOffset(CGPoint(x: 0, y: restoreY), animated: false)
+            // Atualização viva: não interrompe o dedo nem a inércia da rolagem.
+            if !(scroll.isDragging || scroll.isDecelerating), abs(scroll.contentOffset.y - restoreY) > 0.5 {
+                scroll.setContentOffset(CGPoint(x: 0, y: restoreY), animated: false)
+            }
         }
     }
 
