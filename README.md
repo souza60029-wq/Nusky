@@ -22,7 +22,13 @@ Em **Ajustes > Sobre** há duas opções, e nada é verificado sozinho:
 ## O que o Nusky faz
 
 - Abre sites http e https, com links clicáveis, tabelas, imagens (PNG, JPEG, GIF e WebP), ícones e logotipos em SVG, e as cores, fundos, bordas, destaques de texto, fontes com serifa e disposições (flex) que a página define.
-- Executa o JavaScript das páginas, por até 6 segundos, para sites que montam a página no aparelho. Sites muito pesados podem abrir incompletos.
+- Executa o JavaScript das páginas e **o mantém vivo**: a primeira exibição espera até 6 segundos, e depois disso o JavaScript continua rodando. Menus, abas, botões, carregamentos sob demanda e navegação de sites de página única respondem ao toque. Ele fecha sozinho ao sair da página ou quando a memória fica curta.
+- Entende módulos ES (`<script type="module">`, `import()`, mapas de importação), que é o que sites feitos com Vite, Svelte e Astro usam.
+- Pinta a página em duas fases: primeiro o HTML do servidor com o CSS (sem esperar o JavaScript), depois a versão que o JavaScript montou, mantendo a rolagem.
+- Baixa os scripts de uma vez, em paralelo, e o CSS ao mesmo tempo que o JavaScript roda. HTML, CSS e scripts dividem uma conexão HTTP/2 e um cache em disco.
+- Entende `@layer`, `@supports` e `@media` de tela de toque (orientação, hover, resolução, `prefers-color-scheme`, `width >= 40rem`).
+- Página sem fundo próprio é branca, como no Safari, mesmo com o iPhone no escuro.
+- O Diagnóstico mostra quanto tempo cada etapa do carregamento levou. Veja o `CHANGELOG.md` para tudo que mudou.
 - Encontra sites pelo nome. A busca roda numa lista que fica no aparelho, aceita erro de digitação e não envia o que você pesquisa.
 - Abas numa grade de cartões, cada um com o ícone e o nome do site.
 - Favoritos e histórico, com o ícone de cada site.
@@ -48,11 +54,14 @@ Histórico, favoritos, pesquisas, miniaturas das abas, cookies e sessões ficam 
 
 - O Nusky ainda não é um navegador completo: nem todo site abre, e cada um precisa ser testado no aparelho.
 - Não desenha gradientes e máscaras de SVG, campos de formulário, fontes próprias dos sites nem fileiras que rolam de lado (viram uma lista vertical).
-- O JavaScript de páginas grandes usa bastante memória e pode ser cortado nos 6 segundos.
+- O JavaScript de páginas grandes usa bastante memória. Se ela ficar curta, o JavaScript vivo é fechado e a página fica como estava.
+- Só dá para tocar onde há texto ou imagem: um botão feito só de ícone SVG ou de fundo CSS ainda não recebe o toque.
+- Módulos ES com `await` no nível do arquivo (top-level await) não rodam, e dependências circulares de módulos podem ver valores ainda vazios.
 
 ## Para quem quer compilar
 
 - Testes do motor: `cargo test --manifest-path engine/Cargo.toml`
+- Testes do JavaScript (precisa de Node 18 ou mais novo): `cd testes/js && node rodar-tudo.js`
 - O workflow `iOS` do GitHub Actions gera o `Nusky-unsigned.ipa`. Ao criar uma tag no formato `v0.0.5`, ele publica o arquivo nas versões do repositório.
 
 Mais detalhes de arquitetura estão em `ARCHITECTURE.md`.
