@@ -177,6 +177,11 @@ private let measureCallback: nusky_measure_fn = { text, size, bold in
 }
 
 enum Engine {
+    /// Informa ao motor se o aparelho está no modo escuro. Vale para o `prefers-color-scheme` das folhas de estilo.
+    static func definirEscuro(_ escuro: Bool) {
+        nusky_definir_escuro(escuro ? 1 : 0)
+    }
+
 
     // MARK: - Renderização
 

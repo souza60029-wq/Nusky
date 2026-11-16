@@ -280,52 +280,95 @@ final class BrowserModel: ObservableObject {
 
     private func carregar(_ url: URL, entradaId: UUID?, restoreY y: CGFloat, navegar: Bool) async {
         iniciarCarregamento()
+        let inicio = CFAbsoluteTimeGetCurrent()
+        var etapas: [(String, Double)] = []
+        func marcar(_ nome: String, desde: CFAbsoluteTime) {
+            etapas.append((nome, (CFAbsoluteTimeGetCurrent() - desde) * 1000))
+        }
         do {
             let (html, finalURL) = try await download(url)
             guard !Task.isCancelled else { return }
-            // Baixa as folhas de estilo externas antes de registrar a página no histórico,
-            // para não deixar entrada sem tela se o usuário trocar de página no meio.
+            marcar("HTML", desde: inicio)
             progresso = 0.9
-            // O CSS externo e o JavaScript não dependem um do outro: os dois trabalham ao mesmo tempo
-            // (antes um esperava o outro terminar) e se encontram só na hora de desenhar.
+
+            // Três coisas começam ao mesmo tempo, porque nenhuma depende da outra: baixar o CSS externo,
+            // rodar o JavaScript e (quando o CSS chega) desenhar a página.
+            let inicioCSS = CFAbsoluteTimeGetCurrent()
             async let estiloExterno = FolhasExternas.bloco(em: html, base: finalURL)
-            // Roda os scripts da página (se houver) e pega o HTML já alterado por eles.
-            // Qualquer falha devolve o HTML original, então a página sempre abre.
-            progresso = 0.93
-            let rodado = await JSRodador.processar(
-                html: html,
-                pagina: finalURL,
-                largura: Int(textWidth),
-                escuro: Aparencia.sitesEmModoEscuro()
-            )
+            let largura = Int(textWidth)
+            let escuro = Aparencia.sitesEmModoEscuro()
+            var tarefaJS: Task<JSRodador.Saida, Never>?
+            if JSRodador.vaiRodar(html) {
+                // Qualquer falha devolve o HTML original, então a página sempre abre.
+                tarefaJS = Task {
+                    await JSRodador.processar(html: html, pagina: finalURL, largura: largura, escuro: escuro)
+                }
+            }
+            let inicioJS = CFAbsoluteTimeGetCurrent()
+
             let estilo = await estiloExterno
-            ultimoRelatorioJS = rodado.relatorio
-            cssDaPagina = estilo
-            let completo = estilo + rodado.html
-            let minhaGeracao = geracao
+            marcar("CSS", desde: inicioCSS)
             guard !Task.isCancelled else {
-                rodado.sessao?.fechar()
+                abandonar(tarefaJS)
                 return
             }
+            cssDaPagina = estilo
+            let minhaGeracao = geracao
             var id = entradaId
             if navegar {
                 historico.navegar(para: finalURL)
                 Biblioteca.compartilhada.registrarVisita(finalURL)
                 id = historico.entradaAtual?.id
             }
+
+            // 1ª pintura: o HTML que o servidor mandou, com o CSS, sem esperar o JavaScript.
+            // Páginas que já vêm prontas (a maioria dos sites de notícia) aparecem aqui; as que dependem do
+            // JavaScript ganham o conteúdo na 2ª pintura, sem perder a posição da rolagem.
             progresso = 0.95
-            await show(html: completo, url: finalURL, entradaId: id, restoreY: y)
+            let inicioPintura = CFAbsoluteTimeGetCurrent()
+            await show(html: estilo + html, url: finalURL, entradaId: id, restoreY: y)
+            marcar("1ª pintura", desde: inicioPintura)
             guard !Task.isCancelled, minhaGeracao == geracao else {
-                rodado.sessao?.fechar()
+                abandonar(tarefaJS)
                 return
             }
-            anexarSessaoViva(rodado.sessao, geracao: minhaGeracao)
+
+            if let tarefaJS {
+                let rodado = await tarefaJS.value
+                marcar("JavaScript", desde: inicioJS)
+                ultimoRelatorioJS = rodado.relatorio
+                guard !Task.isCancelled, minhaGeracao == geracao else {
+                    rodado.sessao?.fechar()
+                    return
+                }
+                if rodado.html != html {
+                    let inicioTroca = CFAbsoluteTimeGetCurrent()
+                    await trocarPelaVersaoDoJS(rodado.html, geracao: minhaGeracao)
+                    marcar("2ª pintura", desde: inicioTroca)
+                }
+                anexarSessaoViva(rodado.sessao, geracao: minhaGeracao)
+            }
+            Desempenho.compartilhado.registrarCarregamento(host: finalURL.host ?? "", etapas: etapas)
         } catch {
             guard !Task.isCancelled else { return }
             carregando = false
             progresso = 0
             status = "Não foi possível abrir a página."
         }
+    }
+
+    /// O JavaScript já estava rodando quando o usuário saiu da página: fecha a sessão que ele acabar devolvendo.
+    private func abandonar(_ tarefa: Task<JSRodador.Saida, Never>?) {
+        guard let tarefa else { return }
+        Task { await tarefa.value.sessao?.fechar() }
+    }
+
+    /// A 2ª pintura: troca o HTML do servidor pelo que o JavaScript montou, mantendo a rolagem.
+    private func trocarPelaVersaoDoJS(_ html: String, geracao g: Int) async {
+        htmlVivoPendente = html
+        guard !atualizandoVivo else { return }
+        atualizandoVivo = true
+        await desenharVivo(geracao: g)
     }
 
     private func saveScroll() {
@@ -448,6 +491,8 @@ final class BrowserModel: ObservableObject {
     private func desenhar(_ html: String) async -> PaginaDesenhada {
         let width = Float(textWidth)
         let tamanhos = tamanhosImagens
+        // `prefers-color-scheme` das folhas de estilo responde o mesmo que o `matchMedia` do JavaScript.
+        Engine.definirEscuro(Aparencia.sitesEmModoEscuro())
         return await Task.detached(priority: .userInitiated) {
             let inicio = CACurrentMediaTime()
             let pagina = Engine.renderCompleto(html: html, width: width, tamanhos: tamanhos)

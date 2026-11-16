@@ -59,3 +59,12 @@ Medir antes de otimizar. Nenhuma otimização entra sem uma medição que mostre
 4. **Scripts.** Scripts externos ficam no lado nativo, em UTF-8, e são avaliados como Script pelo JavaScriptCore: `let`, `const` e `class` do topo são compartilhados entre scripts, como num navegador, e o texto nunca vira string do JS. Todas as páginas usam a mesma `JSVirtualMachine`, então o JavaScriptCore reaproveita o código já compilado entre páginas.
 5. **Módulos ES.** O JavaScriptCore não expõe carregador de módulos. O `AmbienteJS` reescreve cada módulo, por tokens, numa função (import vira leitura do módulo já executado, export vira getter, `import()` vira o carregador), carrega o grafo inteiro em paralelo e executa na ordem das dependências.
 6. **Memória.** Menos de 90 MB livres ou alerta do sistema: coleta de lixo, descarte da máquina virtual compartilhada e, se continuar apertado, fecha a sessão viva.
+
+## Carregamento de uma página
+
+1. **HTML.** `DownloadPagina` baixa pela sessão compartilhada (`RedeNusky`), com prioridade alta e progresso por delegate. O `RoteadorDeRede` entrega os pedaços a cada download.
+2. **Em paralelo.** `FolhasExternas.bloco` baixa o CSS externo e o `JSRodador` roda o JavaScript. Nenhum espera o outro.
+3. **1ª pintura.** Quando o CSS chega, o app desenha o HTML do servidor com o CSS. Sem scripts, é a única pintura.
+4. **2ª pintura.** Quando o JavaScript termina, o HTML novo entra pelo mesmo caminho das atualizações do modo vivo (`desenharVivo`), que preserva a rolagem. O bloco de CSS é guardado à parte (`cssDaPagina`) e reaplicado em cada desenho.
+5. **Tema.** Antes de cada layout o Swift informa ao motor se o aparelho está no escuro (`nusky_definir_escuro`), para que `prefers-color-scheme` responda o mesmo que o `matchMedia` do JavaScript. Página sem fundo próprio é branca, a menos que o "forçar modo noturno" esteja ligado.
+6. **Medição.** Cada etapa é cronometrada e aparece no relatório do Diagnóstico.

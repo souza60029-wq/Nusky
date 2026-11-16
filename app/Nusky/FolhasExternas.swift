@@ -111,7 +111,7 @@ enum FolhasExternas {
         pedido.timeoutInterval = tempoLimite
         pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
         do {
-            let (dados, resposta) = try await URLSession.shared.data(for: pedido)
+            let (dados, resposta) = try await RedeNusky.sessao.data(for: pedido)
             guard let http = resposta as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else { return nil }
             guard dados.count <= maximoBytesPorFolha else { return nil }

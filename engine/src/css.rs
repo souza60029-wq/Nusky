@@ -22,6 +22,19 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+
+/// Se o aparelho está no modo escuro. A casca Swift informa antes de cada desenho, e
+/// `prefers-color-scheme` passa a responder o mesmo que o `matchMedia` do JavaScript.
+static MODO_ESCURO: AtomicBool = AtomicBool::new(false);
+
+/// Altura da tela em pontos (iPhone 6s), para `min-height`, `max-height` e `height`.
+const ALTURA_TELA: f32 = 667.0;
+
+/// Informa se o aparelho está no modo escuro.
+pub fn definir_escuro(escuro: bool) {
+    MODO_ESCURO.store(escuro, std::sync::atomic::Ordering::Relaxed);
+}
 
 const ERRO_COMPOSTO: &str = "seletor não suportado (combinador ou composto)";
 
@@ -470,6 +483,12 @@ fn analisa(texto: &str, largura: f32, f: &mut Folha, media: Option<(&str, bool)>
                 let externa = media.map_or(true, |(_, a)| a);
                 let ativa = externa && media_casa(prelude, largura);
                 analisa(corpo, largura, f, Some((prelude, ativa)));
+            } else if nome == "layer"
+                || (nome == "supports" && !prelude.to_ascii_lowercase().starts_with("not"))
+            {
+                // `@layer` e `@supports` só agrupam regras: o conteúdo vale como se estivesse solto.
+                // (`@supports not (...)` é o plano B para navegadores antigos e fica de fora.)
+                analisa(corpo, largura, f, media);
             }
         } else {
             let p = match resto.find('{') {
@@ -1403,25 +1422,123 @@ fn query_casa(q: &str, largura: f32) -> bool {
 
 /// `None` se houver condição desconhecida. Nesse caso a consulta não casa.
 fn partes_casam(q: &str, largura: f32) -> Option<bool> {
+    let escuro = MODO_ESCURO.load(std::sync::atomic::Ordering::Relaxed);
+    partes_casam_com(q, largura, escuro)
+}
+
+fn partes_casam_com(q: &str, largura: f32, escuro: bool) -> Option<bool> {
     let mut tudo = true;
     for parte in q.split(" and ") {
         let parte = parte.trim();
         match parte.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
-            Some(dentro) => {
-                let (nome, valor) = dentro.split_once(':')?;
-                let limite = comprimento(valor)?;
-                match nome.trim() {
-                    "min-width" => tudo = tudo && largura >= limite,
-                    "max-width" => tudo = tudo && largura <= limite,
-                    _ => return None,
-                }
-            }
+            Some(dentro) => tudo = tudo && condicao_casa(dentro, largura, escuro)?,
             None => {
                 if parte != "screen" && parte != "all" {
                     tudo = false;
                 }
             }
         }
+    }
+    Some(tudo)
+}
+
+/// Uma condição entre parênteses. Além da largura, vale o que o iPhone responde sempre do mesmo jeito:
+/// tela de toque (sem hover), em pé, 2x, sem redução de movimento. `None` se for desconhecida.
+fn condicao_casa(dentro: &str, largura: f32, escuro: bool) -> Option<bool> {
+    let dentro = dentro.trim();
+    if let Some((nome, valor)) = dentro.split_once(':') {
+        let nome = nome.trim();
+        let valor = valor.trim();
+        return match nome {
+            "min-width" => Some(largura >= comprimento(valor)?),
+            "max-width" => Some(largura <= comprimento(valor)?),
+            "min-height" => Some(ALTURA_TELA >= comprimento(valor)?),
+            "max-height" => Some(ALTURA_TELA <= comprimento(valor)?),
+            "orientation" => Some(valor == "portrait"),
+            "hover" | "any-hover" => Some(valor == "none"),
+            "pointer" | "any-pointer" => Some(valor == "coarse"),
+            "prefers-reduced-motion" | "prefers-contrast" | "prefers-reduced-transparency" => {
+                Some(valor == "no-preference")
+            }
+            "prefers-color-scheme" => Some((valor == "dark") == escuro),
+            "forced-colors" | "inverted-colors" => Some(valor == "none"),
+            "display-mode" => Some(valor == "browser"),
+            "-webkit-min-device-pixel-ratio" => Some(2.0 >= valor.parse::<f32>().ok()?),
+            "-webkit-max-device-pixel-ratio" => Some(2.0 <= valor.parse::<f32>().ok()?),
+            "min-resolution" => Some(2.0 >= resolucao(valor)?),
+            "max-resolution" => Some(2.0 <= resolucao(valor)?),
+            _ => None,
+        };
+    }
+    match dentro {
+        "color" | "pointer" | "any-pointer" => Some(true),
+        "hover" | "any-hover" => Some(false),
+        _ => faixa_casa(dentro, largura),
+    }
+}
+
+/// `2dppx`, `2x` ou `192dpi`, em pontos por pixel.
+fn resolucao(v: &str) -> Option<f32> {
+    if let Some(n) = v.strip_suffix("dppx") {
+        return n.trim().parse::<f32>().ok();
+    }
+    if let Some(n) = v.strip_suffix("dpi") {
+        return n.trim().parse::<f32>().ok().map(|x| x / 96.0);
+    }
+    if let Some(n) = v.strip_suffix('x') {
+        return n.trim().parse::<f32>().ok();
+    }
+    None
+}
+
+/// Sintaxe de faixa do CSS moderno (a do Tailwind 4): `width >= 40rem`, `600px <= width`,
+/// `400px <= width <= 700px`. Só entende `width` e `height`.
+fn faixa_casa(texto: &str, largura: f32) -> Option<bool> {
+    let mut operandos: Vec<String> = Vec::new();
+    let mut operadores: Vec<String> = Vec::new();
+    let mut atual = String::new();
+    let letras: Vec<char> = texto.chars().collect();
+    let mut i = 0;
+    while i < letras.len() {
+        let c = letras[i];
+        if c == '<' || c == '>' || c == '=' {
+            let mut op = c.to_string();
+            if c != '=' && i + 1 < letras.len() && letras[i + 1] == '=' {
+                op.push('=');
+                i += 1;
+            }
+            operandos.push(atual.trim().to_string());
+            operadores.push(op);
+            atual.clear();
+        } else {
+            atual.push(c);
+        }
+        i += 1;
+    }
+    operandos.push(atual.trim().to_string());
+    if operadores.is_empty() || operadores.len() > 2 || operandos.len() != operadores.len() + 1 {
+        return None;
+    }
+    let valor_de = |s: &str| -> Option<f32> {
+        match s {
+            "width" => Some(largura),
+            "height" => Some(ALTURA_TELA),
+            _ => comprimento(s),
+        }
+    };
+    let mut tudo = true;
+    for k in 0..operadores.len() {
+        let a = valor_de(&operandos[k])?;
+        let b = valor_de(&operandos[k + 1])?;
+        let ok = match operadores[k].as_str() {
+            "<" => a < b,
+            "<=" => a <= b,
+            ">" => a > b,
+            ">=" => a >= b,
+            "=" => (a - b).abs() < 0.01,
+            _ => return None,
+        };
+        tudo = tudo && ok;
     }
     Some(tudo)
 }
@@ -1996,6 +2113,61 @@ mod testes {
     fn media_calc_com_em() {
         let f = Folha::parse("@media (max-width: 40em) { p { display: none } }");
         assert!(estilo_para(&f, "p", "", &[], None).oculto);
+    }
+
+    #[test]
+    fn layer_aplica_o_conteudo() {
+        let f = Folha::parse("@layer base { p { display: none } }");
+        assert!(estilo_para(&f, "p", "", &[], None).oculto);
+        let g = Folha::parse("@layer a, b; @layer { p { display: none } }");
+        assert!(estilo_para(&g, "p", "", &[], None).oculto);
+    }
+
+    #[test]
+    fn supports_aplica_o_conteudo_e_not_fica_de_fora() {
+        let f = Folha::parse("@supports (display: grid) { p { display: none } }");
+        assert!(estilo_para(&f, "p", "", &[], None).oculto);
+        let g = Folha::parse("@supports not (display: grid) { p { display: none } }");
+        assert!(!estilo_para(&g, "p", "", &[], None).oculto);
+    }
+
+    #[test]
+    fn layer_dentro_de_media_respeita_a_media() {
+        let f = Folha::parse("@media (min-width: 1000px) { @layer x { p { display: none } } }");
+        assert!(!estilo_para(&f, "p", "", &[], None).oculto);
+        let g = Folha::parse("@media (max-width: 1000px) { @layer x { p { display: none } } }");
+        assert!(estilo_para(&g, "p", "", &[], None).oculto);
+    }
+
+    #[test]
+    fn media_com_condicoes_do_iphone() {
+        assert_eq!(partes_casam_com("(orientation: portrait)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(orientation: landscape)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(hover: hover)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(hover: none) and (pointer: coarse)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(min-resolution: 2dppx)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(-webkit-min-device-pixel-ratio: 3)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(prefers-reduced-motion: reduce)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(min-width: 300px) and (hover: none)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(foo: bar)", 375.0, false), None);
+    }
+
+    #[test]
+    fn media_prefers_color_scheme_segue_o_tema() {
+        assert_eq!(partes_casam_com("(prefers-color-scheme: dark)", 375.0, true), Some(true));
+        assert_eq!(partes_casam_com("(prefers-color-scheme: dark)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(prefers-color-scheme: light)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(prefers-color-scheme: light)", 375.0, true), Some(false));
+    }
+
+    #[test]
+    fn media_com_sintaxe_de_faixa() {
+        assert_eq!(partes_casam_com("(width >= 40rem)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(width < 640px)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(width<640px)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(300px <= width <= 400px)", 375.0, false), Some(true));
+        assert_eq!(partes_casam_com("(400px <= width <= 700px)", 375.0, false), Some(false));
+        assert_eq!(partes_casam_com("(width: bola)", 375.0, false), None);
     }
 
     #[test]

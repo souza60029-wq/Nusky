@@ -17,44 +17,47 @@ enum IdentificacaoNavegador {
 }
 
 /// Baixa uma página e informa o progresso (0 a 1) conforme os bytes chegam.
-/// Usa delegate, não leitura byte a byte, que é lenta no iPhone 6s.
-final class DownloadPagina: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+/// Usa a sessão compartilhada (conexão reaproveitada) e entrega os pedaços por delegate, não por
+/// leitura byte a byte, que é lenta no iPhone 6s.
+final class DownloadPagina: @unchecked Sendable {
     private let aoProgredir: @Sendable (Double) -> Void
     private var dados = Data()
     private var resposta: URLResponse?
     private var esperado: Int64 = 0
     private var ultimoAviso: Double = -1
     private var continuacao: CheckedContinuation<(Data, URLResponse), Error>?
-    private var sessao: URLSession?
+    private var tarefa: URLSessionDataTask?
 
     init(aoProgredir: @escaping @Sendable (Double) -> Void) {
         self.aoProgredir = aoProgredir
     }
 
     func baixar(_ url: URL) async throws -> (Data, URLResponse) {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, URLResponse), Error>) in
-            self.continuacao = cont
-            let sessao = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-            self.sessao = sessao
-            var pedido = URLRequest(url: url)
-            pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
-            sessao.dataTask(with: pedido).resume()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, URLResponse), Error>) in
+                self.continuacao = cont
+                var pedido = URLRequest(url: url)
+                pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
+                let nova = RedeNusky.sessao.dataTask(with: pedido)
+                // A página que o usuário pediu passa na frente de qualquer outra coisa.
+                nova.priority = URLSessionTask.highPriority
+                self.tarefa = nova
+                RedeNusky.roteador.registrar(nova, self)
+                nova.resume()
+            }
+        } onCancel: {
+            // Saiu da página antes de terminar: para de gastar banda com ela.
+            self.tarefa?.cancel()
         }
     }
 
-    func urlSession(
-        _ session: URLSession,
-        dataTask: URLSessionDataTask,
-        didReceive response: URLResponse,
-        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
-    ) {
-        resposta = response
-        esperado = response.expectedContentLength
-        completionHandler(.allow)
+    func receber(resposta nova: URLResponse) {
+        resposta = nova
+        esperado = nova.expectedContentLength
     }
 
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        dados.append(data)
+    func receber(dados novos: Data) {
+        dados.append(novos)
         let fracao: Double
         if esperado > 0 {
             fracao = min(1, Double(dados.count) / Double(esperado))
@@ -69,16 +72,15 @@ final class DownloadPagina: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         }
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error {
-            continuacao?.resume(throwing: error)
+    func concluir(erro: Error?) {
+        if let erro {
+            continuacao?.resume(throwing: erro)
         } else if let resposta {
             continuacao?.resume(returning: (dados, resposta))
         } else {
             continuacao?.resume(throwing: URLError(.badServerResponse))
         }
         continuacao = nil
-        sessao?.finishTasksAndInvalidate()
-        sessao = nil
+        tarefa = nil
     }
 }

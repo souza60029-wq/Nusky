@@ -17,6 +17,8 @@ char *nusky_render_imagens(const char *html, float viewport_width, nusky_measure
 char *nusky_diagnose(const char *html, float viewport_width, nusky_measure_fn measure);
 void nusky_free_string(char *s);
 char *nusky_arvore(const char *html);
+// Modo escuro do aparelho (1) ou claro (0), para o prefers-color-scheme das folhas de estilo.
+void nusky_definir_escuro(int escuro);
 
 // Busca de sites pelo nome.
 // nusky_busca_carregar: json NULL carrega a lista embutida. Retorna 0 se deu certo, 1 se a lista estiver errada.

@@ -325,6 +325,13 @@ pub extern "C" fn nusky_arvore(html: *const c_char) -> *mut c_char {
     devolver(arvore_de(&bruto))
 }
 
+/// Informa se o aparelho está no modo escuro (1) ou claro (0). Vale para o `prefers-color-scheme`
+/// das folhas de estilo nos próximos desenhos.
+#[no_mangle]
+pub extern "C" fn nusky_definir_escuro(escuro: c_int) {
+    crate::css::definir_escuro(escuro != 0);
+}
+
 /// Libera uma string devolvida por `nusky_render`, `nusky_diagnose`, `nusky_arvore` ou as funções de busca.
 #[no_mangle]
 pub extern "C" fn nusky_free_string(s: *mut c_char) {

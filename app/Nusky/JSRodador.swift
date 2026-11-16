@@ -44,6 +44,14 @@ final class JSRodador: @unchecked Sendable {
         var bloqueados = 0
     }
 
+    /// O que `processar` devolve: o HTML (já alterado pelos scripts), o relatório e a sessão, se continuou viva.
+    typealias Saida = (html: String, relatorio: Relatorio?, sessao: JSRodador?)
+
+    /// A página tem scripts e o JavaScript está ligado? Quem chama usa isto para pintar a página antes.
+    static func vaiRodar(_ html: String) -> Bool {
+        ativo && temScript(html)
+    }
+
     /// Resposta a um toque numa área que o JavaScript escuta.
     enum Toque {
         /// O clique não foi cancelado e termina num link: abrir este endereço.

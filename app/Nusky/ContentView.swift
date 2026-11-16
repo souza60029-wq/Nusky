@@ -16,6 +16,7 @@ struct ContentView: View {
 
     @AppStorage("nightMode") private var noturno = false
     @AppStorage("themeAuto") private var automatico = true
+    @AppStorage(ChavesTema.forcarNoturno) private var forcarNoturno = false
     @AppStorage("barAtBottom") private var barraEmbaixo = true
     @AppStorage(ChavesTema.desfoque) private var desfoque = true
     @AppStorage("usarMetal") private var usarMetal = false
@@ -62,13 +63,21 @@ struct ContentView: View {
     /// a página não segue o modo do app.
     private var fundoEscuro: Bool {
         if let f = model.fundoPagina { return f.luminancia < 0.5 }
-        return escuro
+        return escuroSemFundoProprio
+    }
+
+    /// Página sem fundo próprio é branca, como no Safari, mesmo com o iPhone no escuro. O tema escuro do app vale
+    /// para as barras e para a tela inicial. Antes, o fundo ia para preto e o texto que o site colorira (cinza
+    /// escuro) ficava ilegível. O conteúdo só escurece sozinho com "forçar modo noturno" ou quando o próprio
+    /// site tem tema escuro (que o motor agora entende).
+    private var escuroSemFundoProprio: Bool {
+        (model.currentURL != nil || model.carregando) ? forcarNoturno : escuro
     }
 
     /// Fundo atrás da página e das barras.
     private var fundo: Color {
         if let f = model.fundoPagina { return Color(red: f.r, green: f.g, blue: f.b) }
-        return escuro ? Color.black : Color.white
+        return escuroSemFundoProprio ? Color.black : Color.white
     }
 
     private var textoCor: Color { fundoEscuro ? Color.white : Color.black }
@@ -368,7 +377,7 @@ struct ContentView: View {
                 baseURL: model.currentURL,
                 fundoPagina: model.fundoPagina,
                 altura: CGFloat(model.contentHeight),
-                escuro: escuro,
+                escuro: escuroSemFundoProprio,
                 restoreY: CGFloat(model.restoreY),
                 aoRolar: { posicao in model.scrollY = posicao },
                 aoAbrirLink: { link in model.open(href: link) },

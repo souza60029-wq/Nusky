@@ -28,6 +28,7 @@ final class Desempenho: NSObject, @unchecked Sendable {
     private var desenhos: [Double] = []
     private var layouts: [Double] = []
     private var metais: [Double] = []
+    private var carregamentos: [String] = []
 
     /// Quantidade de coisas na página aberta: itens de texto, caixas de fundo, imagens e formas de SVG.
     var conteudo: (itens: Int, fundos: Int, imagens: Int, formas: Int) = (0, 0, 0, 0)
@@ -79,6 +80,16 @@ final class Desempenho: NSObject, @unchecked Sendable {
     func registrarDesenho(_ ms: Double) { acrescentar(&desenhos, ms) }
     func registrarLayout(_ ms: Double) { acrescentar(&layouts, ms) }
     func registrarMetal(_ ms: Double) { acrescentar(&metais, ms) }
+
+    /// Guarda os tempos de cada etapa do carregamento de uma página, para o relatório mostrar onde o tempo vai.
+    func registrarCarregamento(host: String, etapas: [(String, Double)]) {
+        let partes = etapas.map { "\($0.0) \(ms($0.1))" }
+        let linha = (host.isEmpty ? "página" : host) + ": " + partes.joined(separator: " · ")
+        trava.lock()
+        carregamentos.append(linha)
+        if carregamentos.count > 6 { carregamentos.removeFirst(carregamentos.count - 6) }
+        trava.unlock()
+    }
 
     private func acrescentar(_ lista: inout [Double], _ ms: Double) {
         trava.lock()
@@ -154,6 +165,17 @@ final class Desempenho: NSObject, @unchecked Sendable {
         linhas.append(l.n == 0
             ? "  Layout do motor: nenhum"
             : "  Layout do motor: \(l.n), média \(ms(l.media)), pior \(ms(l.pior))")
+
+        trava.lock()
+        let cargas = carregamentos
+        trava.unlock()
+        linhas.append("")
+        linhas.append("Carregamento das últimas páginas (HTML e CSS juntos pintam primeiro; o JavaScript troca a versão depois):")
+        if cargas.isEmpty {
+            linhas.append("  nenhuma página aberta ainda")
+        } else {
+            for c in cargas.suffix(4) { linhas.append("  - " + c) }
+        }
 
         linhas.append("")
         linhas.append("Página aberta: \(c.itens) textos, \(c.fundos) caixas de fundo, \(c.imagens) imagens, \(c.formas) formas de SVG")
