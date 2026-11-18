@@ -662,7 +662,7 @@ fn declaracoes_com(texto: &str, vars: &HashMap<String, String>) -> Decl {
             "position" => {
                 d.posicao = match valor.trim().to_ascii_lowercase().as_str() {
                     "absolute" => Some(Posicao::Absoluta),
-                    "fixed" => Some(Posicao::Fixa),
+                    "fixed" => Some(Posicao::Relativa),
                     "relative" | "sticky" => Some(Posicao::Relativa),
                     _ => None,
                 };
