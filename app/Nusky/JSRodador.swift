@@ -214,6 +214,8 @@ final class JSRodador: @unchecked Sendable {
         limitarExecucao(de: ctx, segundos: limite)
 
         _ = ctx.evaluateScript(AmbienteJS.codigo, withSourceURL: URL(string: "nusky://ambiente.js"))
+        // Recursos de navegador que o AmbienteJS ainda não tinha (CSS.supports, streams, MessageChannel...).
+        _ = ctx.evaluateScript(AmbienteJS.extra, withSourceURL: URL(string: "nusky://extra.js"))
         // Monta o document, roda os scripts na ordem e segue enquanto houver rede ou temporizador.
         _ = ctx.objectForKeyedSubscript("__iniciar")?.call(withArguments: [arvore])
     }
