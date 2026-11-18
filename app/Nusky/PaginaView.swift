@@ -353,7 +353,7 @@ final class DesenhoPagina: UIView {
             .font: fonte(item),
             .foregroundColor: cor(item)
         ]
-        if item.href != nil {
+                if item.href != nil && Apresentacao.sublinharLinks {
             a[.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
         return a
