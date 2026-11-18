@@ -491,6 +491,7 @@ final class BrowserModel: ObservableObject {
     private func desenhar(_ html: String) async -> PaginaDesenhada {
         let width = Float(textWidth)
         let tamanhos = tamanhosImagens
+    Apresentacao.sublinharLinks = !Apresentacao.paginaTemCSS(html)
         // `prefers-color-scheme` das folhas de estilo responde o mesmo que o `matchMedia` do JavaScript.
         Engine.definirEscuro(Aparencia.sitesEmModoEscuro())
         return await Task.detached(priority: .userInitiated) {
