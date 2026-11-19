@@ -3,8 +3,18 @@ import Foundation
 
 /// Recursos padrão de navegador que o `AmbienteJS` ainda não tinha, para sites modernos abrirem e funcionarem.
 /// Roda logo depois do `AmbienteJS`, antes de qualquer script da página.
+///
+/// O que entra aqui e por quê:
+/// - `CSS.supports` respondia sempre "não", e `matchMedia` ignorava orientação e resolução. Sites que conferem
+///   recursos antes de abrir (como o claude.ai) concluíam que o navegador estava desatualizado.
+/// - `ReadableStream`, `TransformStream`, `MessageChannel`, `customElements`, `TreeWalker`, `crypto.subtle.digest`
+///   e outros: apps feitos com Next.js e React usam isso para hidratar a página. Sem eles, a hidratação quebra,
+///   a página fica só desenhada e os botões não respondem (era o caso do arena.ai).
+/// - `fetch().body` passa a ser um stream, que é como os chats leem a resposta.
 extension AmbienteJS {
     static let extra = #"""
+// Recursos padrão de navegador que o AmbienteJS ainda não tinha. Roda logo depois dele e antes de qualquer
+// script da página. Só define o que falta (ou o que estava errado: CSS.supports e matchMedia).
 (function (G) {
   'use strict';
   var nada = function () {};
@@ -23,7 +33,8 @@ extension AmbienteJS {
   def(G, 'screenX', 0); def(G, 'screenY', 0);
 
   // ---------- CSS.supports ----------
-  // Responde o que o Safari 15.6 responderia. Antes devolvia sempre false.
+  // Responde o que o Safari 15.6 responderia. Antes devolvia sempre false, e qualquer site que confere
+  // recursos antes de abrir concluía que o navegador estava desatualizado.
   var CSS_AUSENTE = /container-type|container-name|container\s*:|text-wrap|field-sizing|anchor-name|position-anchor|view-transition|animation-timeline|scroll-timeline|timeline-scope|interpolate-size|color-mix\(|light-dark\(|subgrid|masonry|overscroll-behavior|text-box|:popover-open|:modal|@starting-style|@container|@scope|anchor\(/i;
   function topo(t) {
     var prof = 0, partes = [], ini = 0, op = null;
@@ -681,6 +692,10 @@ extension AmbienteJS {
     ['importKey', 'exportKey', 'generateKey', 'encrypt', 'decrypt', 'sign', 'verify', 'deriveBits', 'deriveKey', 'wrapKey', 'unwrapKey'].forEach(function (n) { subtle[n] = naoSuportado(n); });
     try { G.crypto.subtle = subtle; } catch (e) { forca(G.crypto, 'subtle', subtle); }
   }
+  // Classes que os sites citam em instanceof ou em verificações de recurso (o ChatGPT falhava com "Can't find variable: CryptoKey").
+  forma('CryptoKey', function () { return false; });
+  forma('SubtleCrypto', function (v) { return !!v && typeof v.digest === 'function'; });
+  forma('Crypto', function (v) { return !!v && typeof v.getRandomValues === 'function'; });
   G.__extra = true;
 })(this);
 """#

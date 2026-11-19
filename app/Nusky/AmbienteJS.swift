@@ -16,6 +16,33 @@ enum AmbienteJS {
   var doc = null;
   // Conta mudanças no DOM. O modo vivo só redesenha quando esse número anda.
   var sujeira = 0;
+  // MutationObserver: cada mutação do DOM vira um registro para quem observa aquele nó (ou um ancestral, com subtree).
+  var observadores = [];
+  function contemNo(a, n) { for (var p = n.parentNode; p; p = p.parentNode) if (p === a) return true; return false; }
+  function registrar(tipo, alvo, d) {
+    for (var i = 0; i < observadores.length; i++) {
+      var o = observadores[i];
+      for (var j = 0; j < o.__regs.length; j++) {
+        var r = o.__regs[j], op = r.opts;
+        if (!(r.alvo === alvo || (op.subtree && contemNo(r.alvo, alvo)))) continue;
+        if (tipo === 'childList' && !op.childList) continue;
+        if (tipo === 'attributes' && (!op.attributes || (op.attributeFilter && op.attributeFilter.indexOf(d.name) < 0))) continue;
+        if (tipo === 'characterData' && !op.characterData) continue;
+        o.__fila.push({ type: tipo, target: alvo, addedNodes: d.added || [], removedNodes: d.removed || [], previousSibling: d.prev || null, nextSibling: d.next || null,
+          attributeName: tipo === 'attributes' ? d.name : null, attributeNamespace: null,
+          oldValue: ((tipo === 'attributes' && op.attributeOldValue) || (tipo === 'characterData' && op.characterDataOldValue)) ? d.old : null });
+        if (!o.__agendado) {
+          o.__agendado = true;
+          (function (ob) { Promise.resolve().then(function () {
+            ob.__agendado = false;
+            var f = ob.__fila; ob.__fila = [];
+            if (f.length) { try { ob.__cb.call(ob, f, ob); } catch (e) { erro('MutationObserver: ' + e); } }
+          }); })(o);
+        }
+        break;
+      }
+    }
+  }
 
   // ---------- util ----------
   function kebab(s) { return String(s).replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
@@ -451,8 +478,8 @@ enum AmbienteJS {
       }
     }
   });
-  Node.prototype.__limpar = function () { sujeira++; for (var i = 0; i < this.childNodes.length; i++) this.childNodes[i].parentNode = null; this.childNodes = []; };
-  Node.prototype.__anexar = function (n) { sujeira++; n.parentNode = this; this.childNodes.push(n); };
+  Node.prototype.__limpar = function () { sujeira++; if (observadores.length && this.childNodes.length) registrar('childList', this, { removed: this.childNodes.slice() }); for (var i = 0; i < this.childNodes.length; i++) this.childNodes[i].parentNode = null; this.childNodes = []; };
+  Node.prototype.__anexar = function (n) { sujeira++; var ant = this.childNodes[this.childNodes.length - 1]; n.parentNode = this; this.childNodes.push(n); if (observadores.length) registrar('childList', this, { added: [n], prev: ant || null }); };
   Node.prototype.hasChildNodes = function () { return this.childNodes.length > 0; };
   Node.prototype.getRootNode = function () { var n = this; while (n.parentNode) n = n.parentNode; return n; };
   Node.prototype.contains = function (n) { while (n) { if (n === this) return true; n = n.parentNode; } return false; };
@@ -465,6 +492,7 @@ enum AmbienteJS {
     if (idx < 0) throw new Error('NotFoundError');
     this.childNodes.splice(idx, 0, n);
     n.parentNode = this; sujeira++;
+    if (observadores.length) registrar('childList', this, { added: [n], prev: this.childNodes[idx - 1] || null, next: this.childNodes[idx + 1] || null });
     if (n.nodeType === 1 && this.isConnected) iniciarScripts(n);
     return n;
   };
@@ -472,7 +500,10 @@ enum AmbienteJS {
   Node.prototype.removeChild = function (n) {
     var i = this.childNodes.indexOf(n);
     if (i < 0) throw new Error('NotFoundError');
-    this.childNodes.splice(i, 1); n.parentNode = null; sujeira++; return n;
+    var ant = this.childNodes[i - 1] || null, dep = this.childNodes[i + 1] || null;
+    this.childNodes.splice(i, 1); n.parentNode = null; sujeira++;
+    if (observadores.length) registrar('childList', this, { removed: [n], prev: ant, next: dep });
+    return n;
   };
   Node.prototype.replaceChild = function (novo, velho) { this.insertBefore(novo, velho); this.removeChild(velho); return velho; };
   Node.prototype.remove = function () { if (this.parentNode) this.parentNode.removeChild(this); };
@@ -507,7 +538,7 @@ enum AmbienteJS {
 
   function Text(d) { Node.call(this, 3); this.__d = d === undefined ? '' : String(d); }
   Text.prototype = Object.create(Node.prototype); Text.prototype.constructor = Text;
-  Object.defineProperty(Text.prototype, 'data', { get: function () { return this.__d; }, set: function (v) { v = String(v); if (v !== this.__d) { this.__d = v; sujeira++; } }, configurable: true });
+  Object.defineProperty(Text.prototype, 'data', { get: function () { return this.__d; }, set: function (v) { v = String(v); if (v !== this.__d) { var velho = this.__d; this.__d = v; sujeira++; if (observadores.length) registrar('characterData', this, { old: velho }); } }, configurable: true });
   def(Text.prototype, { nodeName: { get: function () { return '#text'; } }, length: { get: function () { return this.data.length; } }, wholeText: { get: function () { return this.data; } } });
   function Comment(d) { Node.call(this, 8); this.data = d === undefined ? '' : String(d); }
   Comment.prototype = Object.create(Node.prototype); Comment.prototype.constructor = Comment;
@@ -608,8 +639,9 @@ enum AmbienteJS {
     offsetParent: { get: function () { return null; } }
   });
   Element.prototype.__definirAttr = function (n, v, deEstilo) {
-    for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { if (this.__attrs[i][1] !== v) { this.__attrs[i][1] = v; sujeira++; } return; }
+    for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { if (this.__attrs[i][1] !== v) { var velho = this.__attrs[i][1]; this.__attrs[i][1] = v; sujeira++; if (observadores.length) registrar('attributes', this, { name: n, old: velho }); } return; }
     this.__attrs.push([n, v]); sujeira++;
+    if (observadores.length) registrar('attributes', this, { name: n, old: null });
   };
   Element.prototype.setAttribute = function (n, v) {
     n = String(n).toLowerCase(); v = String(v);
@@ -624,7 +656,7 @@ enum AmbienteJS {
   Element.prototype.hasAttribute = function (n) { return this.getAttribute(n) !== null; };
   Element.prototype.removeAttribute = function (n) {
     n = String(n).toLowerCase(); sujeira++;
-    for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { this.__attrs.splice(i, 1); break; }
+    for (var i = 0; i < this.__attrs.length; i++) if (this.__attrs[i][0] === n) { var velho = this.__attrs[i][1]; this.__attrs.splice(i, 1); if (observadores.length) registrar('attributes', this, { name: n, old: velho }); break; }
     if (n === 'style' && this.__estilo) this.__estilo.__carregar('');
   };
   Element.prototype.toggleAttribute = function (n, f) { var tem = this.hasAttribute(n), q = f === undefined ? !tem : !!f; q ? this.setAttribute(n, '') : this.removeAttribute(n); return q; };
@@ -902,12 +934,21 @@ enum AmbienteJS {
   // Modo vivo: depois da primeira exibição o JavaScript continua, com relógio de verdade
   // e frequência limitada (economia de CPU, bateria e memória no iPhone 6s).
   var vivo = false, pausado = false, pausadoEm = 0, proximoDue = Infinity;
+  var bombaAgendada = false;
+  function bombearTimers() {
+    if (vivo || bombaAgendada) return;
+    bombaAgendada = true;
+    Promise.resolve().then(function () { bombaAgendada = false; drenar(); });
+  }
   function agendar(fn, ms, args, repete) {
     ms = Math.max(0, Number(ms) || 0);
     if (vivo) ms = Math.max(ms, 4);
     var t = { id: proxId++, fn: fn, args: args, due: (vivo ? Date.now() : agora) + ms, ms: Math.max(ms, 1), repete: repete, vezes: 0 };
     fila.push(t);
     if (vivo && !pausado && t.due < proximoDue) { proximoDue = t.due; acordar(t.due - Date.now()); }
+    // Um módulo com await no topo continua depois de uma microtarefa, e ninguém mais chama o escoador de temporizadores
+    // virtuais nessa hora: sem isto, "await new Promise(r => setTimeout(r, 50))" ficava parado até os 6 s.
+    if (moduloEsperando) bombearTimers();
     return t.id;
   }
   function acordar(ms) { try { G.__acordar(Math.max(0, ms)); } catch (e) {} }
@@ -1252,7 +1293,7 @@ enum AmbienteJS {
   function transformarModulo(src) {
     if (src.charCodeAt(0) === 35 && src.charCodeAt(1) === 33) src = '//' + src.slice(2);   // #! de arquivo executável
     var n = src.length, i = 0, ini = 0, prev = '', prof = 0;
-    var out = [], specs = [], cabeca = [], getters = [], reexp = [];
+    var out = [], specs = [], cabeca = [], getters = [], reexp = [], tla = false;
     function spec(s) { var k = specs.indexOf(s); if (k < 0) { specs.push(s); k = specs.length - 1; } return k; }
     function corta(de, ate, troca) { out.push(src.slice(ini, de)); if (troca) out.push(troca); ini = ate; }
     function usa(re, pos) { re.lastIndex = pos; return re.exec(src); }
@@ -1273,6 +1314,7 @@ enum AmbienteJS {
       if (ehIdent(c)) {
         var j = i; while (j < n && ehIdent(src.charCodeAt(j))) j++;
         var w = src.slice(i, j), antesPonto = prev === '.';
+        if (w === 'await' && !antesPonto && prof === 0) tla = true;
         if (c >= 48 && c <= 57) { prev = 'num'; i = j; continue; }
         if (w === 'import' && !antesPonto) {
           var k2 = j; while (k2 < n && src.charCodeAt(k2) <= 32) k2++;
@@ -1342,11 +1384,11 @@ enum AmbienteJS {
       prev = src.charAt(i); i++;
     }
     out.push(src.slice(ini));
-    var topo = '(function(__exp,__imp,__meta,__import,__rex){"use strict";';
+    var topo = (tla ? '(async function' : '(function') + '(__exp,__imp,__meta,__import,__rex){"use strict";';
     getters.forEach(function (g) { topo += 'Object.defineProperty(__exp,' + JSON.stringify(g[0]) + ',{enumerable:true,configurable:true,get:function(){return ' + g[1] + '}});'; });
     reexp.forEach(function (k) { topo += '__rex(__exp,__imp[' + k + ']);'; });
     topo += cabeca.join('');
-    return { codigo: topo + out.join('') + '\n})', specs: specs };
+    return { codigo: topo + out.join('') + '\n})', specs: specs, tla: tla };
   }
 
   // ---------- carregador de módulos ----------
@@ -1375,10 +1417,67 @@ enum AmbienteJS {
   }
   function acordarEspera(r) { var e = r.espera; r.espera = []; e.forEach(function (f) { f(); }); }
   function falharModulo(r, e) { r.estado = 4; r.erro = e; erro('módulo ' + r.url + ': ' + (e && e.message || e)); acordarEspera(r); }
+  // Reescreve sintaxe que o JavaScriptCore do iOS 15 ainda não conhece. Hoje: blocos "static { ... }" de classe (Safari 16.4).
+  // Cada bloco vira um campo estático que roda os mesmos comandos, na mesma ordem e com o mesmo `this`:
+  //   static { corpo }   ->   static __nsb0=(()=>{ corpo })();
+  // Só é chamada quando o script falhou ao ler, então scripts comuns não pagam nada.
+  function modernizar(src) {
+    if (!/static\s*\{/.test(src)) return src;
+    var n = src.length, i = 0, prev = '', prevIni = -1, antesPonto = false, pilha = [], ed = [], k = 0;
+    while (i < n) {
+      var c = src.charCodeAt(i);
+      if (c <= 32) { i++; continue; }
+      if (c === 47) {
+        var d = src.charCodeAt(i + 1);
+        if (d === 47) { var f = src.indexOf('\n', i); i = f < 0 ? n : f; continue; }
+        if (d === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? n : g + 2; continue; }
+        if (regexPermitido(prev)) { i = pularRegex(src, i); prev = 'num'; continue; }
+        i++; prev = '/'; continue;
+      }
+      if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }
+      if (c === 96) { i = pularTemplate(src, i); prev = 'str'; continue; }
+      if (c === 123) { pilha.push(prev === 'static' && !antesPonto ? { ini: prevIni, abre: i } : null); prev = '{'; i++; continue; }
+      if (c === 125) {
+        var e = pilha.pop();
+        if (e) { ed.push([e.ini, e.abre + 1, 'static __nsb' + (k++) + '=(()=>{']); ed.push([i, i + 1, '})();']); }
+        prev = '}'; i++; continue;
+      }
+      if (ehIdent(c)) {
+        var j = i; while (j < n && ehIdent(src.charCodeAt(j))) j++;
+        antesPonto = prev === '.';
+        prev = c >= 48 && c <= 57 ? 'num' : src.slice(i, j); prevIni = i; i = j; continue;
+      }
+      prev = src.charAt(i); i++;
+    }
+    if (!ed.length) return src;
+    ed.sort(function (a, b) { return a[0] - b[0]; });
+    var out = [], pos = 0;
+    for (var q = 0; q < ed.length; q++) { out.push(src.slice(pos, ed[q][0]), ed[q][2]); pos = ed[q][1]; }
+    out.push(src.slice(pos));
+    return out.join('');
+  }
+  // Mensagens de "o script nem chegou a rodar": só nesses casos vale tentar de novo reescrito.
+  function erroDeLeitura(m) { return /^(Unexpected|Expected|Unterminated|Invalid regular|Invalid escape|Missing|Cannot use)/i.test(String(m)); }
+  function trechoDoErro(src, m) {
+    var x = /:(\d+):(\d+)\)$/.exec(String(m));
+    if (!x || !src) return '';
+    var linha = src.split('\n')[+x[1] - 1] || '', c = +x[2];
+    return ' | perto de: «' + linha.slice(Math.max(0, c - 50), c + 50) + '»';
+  }
+  function avaliarModulo(codigo, url) {
+    try { return (0, eval)(codigo + '\n//# sourceURL=' + url); }
+    catch (e) {
+      if (!(e instanceof SyntaxError)) throw e;
+      var novo = modernizar(codigo);
+      if (novo === codigo) throw e;
+      return (0, eval)(novo + '\n//# sourceURL=' + url);
+    }
+  }
   function preparar(r, texto) {
     try {
       var t = transformarModulo(texto);
-      r.fn = (0, eval)(t.codigo + '\n//# sourceURL=' + r.url);
+      r.fn = avaliarModulo(t.codigo, r.url);
+      r.tla = t.tla;
       r.deps = t.specs.map(function (sp) {
         var u = resolverModulo(sp, r.base);
         if (!u) throw new TypeError('Failed to resolve module specifier "' + sp + '"');
@@ -1404,30 +1503,53 @@ enum AmbienteJS {
       if (k !== 'default' && !(k in alvo)) Object.defineProperty(alvo, k, { enumerable: true, configurable: true, get: function () { return fonte[k]; } });
     });
   }
+  // Devolve undefined quando roda de uma vez, ou uma Promise quando o módulo (ou uma dependência) tem await no topo.
   function executarModulo(r) {
     if (r.estado === 4) throw r.erro;
-    if (r.estado >= 2) return;
+    if (r.estado >= 2) return r.promessa;
     r.estado = 2;
-    try {
-      for (var i = 0; i < r.deps.length; i++) executarModulo(r.deps[i]);
+    var i = 0;
+    function passo() {
+      while (i < r.deps.length) {
+        var p = executarModulo(r.deps[i++]);
+        if (p && typeof p.then === 'function') return p.then(passo);
+      }
       var imps = r.deps.map(function (d) { return d.exports; });
-      r.fn.call(undefined, r.exports, imps, { url: r.url }, function (sp) { return importarDinamico(sp, r.base); }, reexportar);
-    } catch (e) { r.estado = 4; r.erro = e; throw e; }
-    r.estado = 3;
+      var ret = r.fn.call(undefined, r.exports, imps, { url: r.url }, function (sp) { return importarDinamico(sp, r.base); }, reexportar);
+      if (r.tla) return ret.then(function () { r.estado = 3; });
+      r.estado = 3;
+    }
+    var pr;
+    try { pr = passo(); } catch (e) { r.estado = 4; r.erro = e; throw e; }
+    if (pr) {
+      r.promessa = pr.then(null, function (e) { r.estado = 4; r.erro = e; throw e; });
+      return r.promessa;
+    }
   }
   function importarDinamico(spec, base) {
     return new Promise(function (res, rej) {
       var u = resolverModulo(spec, base);
       if (!u) { rej(new TypeError('Failed to resolve module specifier "' + spec + '"')); return; }
       var r = modulo(u);
-      quandoPronto(r, function () { try { executarModulo(r); res(r.exports); } catch (e) { rej(e); } });
+      quandoPronto(r, function () {
+        var p;
+        try { p = executarModulo(r); } catch (e) { rej(e); return; }
+        if (p) p.then(function () { res(r.exports); }, rej); else res(r.exports);
+      });
     });
   }
-  function executarScriptModulo(a) {
+  // Devolve true se ficou esperando (await no topo); nesse caso chama fim() quando terminar.
+  function executarScriptModulo(a, fim) {
     var src = a.el.getAttribute('src');
-    try { executarModulo(a.r); estat.executados++; if (src) eventoCarga(a.el, 'load'); }
-    catch (e) { erro('módulo ' + a.r.url + ': ' + (e && e.message || e)); if (src) eventoCarga(a.el, 'error'); }
+    function ok() { estat.executados++; if (src) eventoCarga(a.el, 'load'); }
+    function falha(e) { erro('módulo ' + a.r.url + ': ' + (e && e.message || e)); if (src) eventoCarga(a.el, 'error'); }
+    var p;
+    try { p = executarModulo(a.r); } catch (e) { falha(e); return false; }
+    if (p) { p.then(function () { ok(); if (fim) fim(); }, function (e) { falha(e); if (fim) fim(); }); return true; }
+    ok();
+    return false;
   }
+  var moduloEsperando = false;
   function agendarModulo(s) {
     var src = s.getAttribute('src'), r;
     if (src) { var url = resolver(src); if (!url) return; r = modulo(url); }
@@ -1439,6 +1561,7 @@ enum AmbienteJS {
   // Módulos da página rodam depois de todos os scripts comuns e antes do DOMContentLoaded, na ordem do documento.
   // Devolve false enquanto ainda espera algum módulo chegar.
   function executarAdiados() {
+    if (moduloEsperando) return false;
     while (adiados.length) {
       var a = adiados[0];
       if (!a.pronto) {
@@ -1451,7 +1574,7 @@ enum AmbienteJS {
         if (!a.pronto) return false;
       }
       adiados.shift();
-      executarScriptModulo(a);
+      if (executarScriptModulo(a, function () { moduloEsperando = false; avancar(); })) { moduloEsperando = true; bombearTimers(); return false; }
     }
     return true;
   }
@@ -1477,11 +1600,25 @@ enum AmbienteJS {
     if (!r.nativo) { rodarCodigo(url, r.texto); return; }
     estat.executados++;
     var m = G.__avaliarGuardado(String(url));
+    if (m && erroDeLeitura(m) && typeof G.__fonteGuardada === 'function') {
+      // O script nem chegou a rodar: tenta de novo com a sintaxe nova reescrita (static { } de classe).
+      var fonte = G.__fonteGuardada(String(url)), novo = fonte ? modernizar(fonte) : fonte;
+      if (novo && novo !== fonte) m = G.__avaliar(String(url), novo);
+      else if (fonte) m += trechoDoErro(fonte, m);
+    }
     if (m) erro(m);
   }
   function rodarCodigo(origem, codigo) {
     estat.executados++;
-    if (typeof G.__avaliar === 'function') { var msg = G.__avaliar(String(origem), String(codigo)); if (msg) erro(msg); return; }
+    if (typeof G.__avaliar === 'function') {
+      var texto = String(codigo), msg = G.__avaliar(String(origem), texto);
+      if (msg && erroDeLeitura(msg)) {
+        var novo = modernizar(texto);
+        if (novo !== texto) msg = G.__avaliar(String(origem), novo); else msg += trechoDoErro(texto, msg);
+      }
+      if (msg) erro(msg);
+      return;
+    }
     try { (0, eval)(codigo + '\n//# sourceURL=' + origem); }
     catch (e) {
       var extra = '';
@@ -1715,8 +1852,97 @@ enum AmbienteJS {
   G.Option = function (t, v) { var e = doc.createElement('option'); if (t) e.textContent = t; if (v !== undefined) e.setAttribute('value', v); return e; };
   G.DOMParser = function () {}; G.DOMParser.prototype.parseFromString = function (h) {
     var d = new Document(); d.__mini = true; var f = fragmento(String(h), null); f.forEach(function (n) { d.__anexar(n); }); return d; };
-  G.MutationObserver = function () { this.observe = nada; this.disconnect = nada; this.takeRecords = function () { return []; }; };
-  G.ResizeObserver = G.IntersectionObserver = G.PerformanceObserver = G.MutationObserver;
+  // Antes os quatro eram o mesmo objeto vazio, que nunca avisava ninguém. Site que espera algo ficar "visível" (carregamento
+  // preguiçoso) ou reage a mudanças no DOM nunca andava.
+  function MutationObserver(cb) {
+    if (typeof cb !== 'function') throw new TypeError('MutationObserver callback is not a function');
+    this.__cb = cb; this.__regs = []; this.__fila = []; this.__agendado = false;
+  }
+  MutationObserver.prototype.observe = function (alvo, opts) {
+    opts = opts || {};
+    var o = { childList: !!opts.childList, subtree: !!opts.subtree,
+      attributes: opts.attributes !== undefined ? !!opts.attributes : !!(opts.attributeOldValue || opts.attributeFilter),
+      characterData: opts.characterData !== undefined ? !!opts.characterData : !!opts.characterDataOldValue,
+      attributeOldValue: !!opts.attributeOldValue, characterDataOldValue: !!opts.characterDataOldValue, attributeFilter: opts.attributeFilter || null };
+    for (var i = 0; i < this.__regs.length; i++) if (this.__regs[i].alvo === alvo) { this.__regs[i].opts = o; return; }
+    this.__regs.push({ alvo: alvo, opts: o });
+    if (observadores.indexOf(this) < 0) observadores.push(this);
+  };
+  MutationObserver.prototype.disconnect = function () { this.__regs = []; this.__fila = []; var k = observadores.indexOf(this); if (k >= 0) observadores.splice(k, 1); };
+  MutationObserver.prototype.takeRecords = function () { var f = this.__fila; this.__fila = []; return f; };
+  G.MutationObserver = MutationObserver;
+
+  // Não há layout dentro do JavaScript, então "visível" e "tamanho" são suposições: tudo conta como visível, com a largura da tela.
+  function retangulo() { return { x: 0, y: 0, width: pagina.largura || 375, height: 0, top: 0, left: 0, right: pagina.largura || 375, bottom: 0 }; }
+  function IntersectionObserver(cb, opts) {
+    if (typeof cb !== 'function') throw new TypeError('IntersectionObserver callback is not a function');
+    opts = opts || {};
+    this.__cb = cb; this.root = opts.root || null; this.rootMargin = opts.rootMargin || '0px';
+    this.thresholds = [].concat(opts.threshold === undefined ? [0] : opts.threshold);
+    this.__alvos = []; this.__pend = []; this.__agendado = false;
+  }
+  IntersectionObserver.prototype.observe = function (el) {
+    if (!el || this.__alvos.indexOf(el) >= 0) return;
+    this.__alvos.push(el);
+    // Trava contra "carregar mais" em laço: o aviso inicial vale no máximo 3 vezes por elemento, e não mais de uma por segundo.
+    var agora = Date.now();
+    if ((el.__io || 0) >= 3 || (el.__ioT && agora - el.__ioT < 1000)) return;
+    el.__io = (el.__io || 0) + 1; el.__ioT = agora;
+    this.__pend.push(el);
+    if (!this.__agendado) {
+      var self = this; this.__agendado = true;
+      G.setTimeout(function () {
+        self.__agendado = false;
+        var itens = self.__pend.splice(0).filter(function (x) { return self.__alvos.indexOf(x) >= 0; });
+        if (!itens.length) return;
+        var tempo = Date.now() - inicioMs;
+        try { self.__cb.call(self, itens.map(function (x) { return { target: x, isIntersecting: true, intersectionRatio: 1, boundingClientRect: retangulo(), intersectionRect: retangulo(), rootBounds: retangulo(), time: tempo }; }), self); }
+        catch (e) { erro('IntersectionObserver: ' + e); }
+      }, 0);
+    }
+  };
+  IntersectionObserver.prototype.unobserve = function (el) { var i = this.__alvos.indexOf(el); if (i >= 0) this.__alvos.splice(i, 1); };
+  IntersectionObserver.prototype.disconnect = function () { this.__alvos = []; this.__pend = []; };
+  IntersectionObserver.prototype.takeRecords = function () { return []; };
+  G.IntersectionObserver = IntersectionObserver;
+
+  function ResizeObserver(cb) {
+    if (typeof cb !== 'function') throw new TypeError('ResizeObserver callback is not a function');
+    this.__cb = cb; this.__alvos = [];
+  }
+  ResizeObserver.prototype.observe = function (el) {
+    if (!el || this.__alvos.indexOf(el) >= 0) return;
+    this.__alvos.push(el);
+    var self = this;
+    G.setTimeout(function () {
+      if (self.__alvos.indexOf(el) < 0) return;
+      var larg = pagina.largura || 375, caixa = [{ inlineSize: larg, blockSize: 0 }];
+      try { self.__cb.call(self, [{ target: el, contentRect: retangulo(), borderBoxSize: caixa, contentBoxSize: caixa, devicePixelContentBoxSize: caixa }], self); }
+      catch (e) { erro('ResizeObserver: ' + e); }
+    }, 0);
+  };
+  ResizeObserver.prototype.unobserve = function (el) { var i = this.__alvos.indexOf(el); if (i >= 0) this.__alvos.splice(i, 1); };
+  ResizeObserver.prototype.disconnect = function () { this.__alvos = []; };
+  G.ResizeObserver = ResizeObserver;
+
+  function PerformanceObserver(cb) { this.__cb = cb; }
+  PerformanceObserver.prototype.observe = nada; PerformanceObserver.prototype.disconnect = nada; PerformanceObserver.prototype.takeRecords = function () { return []; };
+  PerformanceObserver.supportedEntryTypes = ['mark', 'measure', 'navigation', 'resource'];
+  G.PerformanceObserver = PerformanceObserver;
+
+  // <template>: o conteúdo fica num fragmento à parte. Sites como o GitHub fazem template.content.appendChild(...).
+  Object.defineProperty(Element.prototype, 'content', {
+    configurable: true,
+    get: function () {
+      if (this.localName !== 'template') return undefined;
+      if (!this.__conteudo || this.__conteudoN !== this.childNodes.length || this.__conteudo1 !== this.childNodes[0]) {
+        var f = doc.createDocumentFragment();
+        for (var i = 0; i < this.childNodes.length; i++) f.appendChild(this.childNodes[i].cloneNode(true));
+        this.__conteudo = f; this.__conteudoN = this.childNodes.length; this.__conteudo1 = this.childNodes[0];
+      }
+      return this.__conteudo;
+    }
+  });
   G.WebSocket = function () { throw new Error('WebSocket não suportado'); };
   G.EventSource = G.WebSocket; G.Worker = G.WebSocket; G.indexedDB = undefined; G.caches = undefined;
   G.DOMException = function (m, n) { this.message = m; this.name = n || 'Error'; };

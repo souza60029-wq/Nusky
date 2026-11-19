@@ -279,10 +279,19 @@ final class JSRodador: @unchecked Sendable {
             defer { JSStringRelease(texto) }
             let resposta = self.avaliar(ctx: ctx, fonte: texto, origem: url)
             // Pacotes grandes não voltam a ser usados na mesma página: libera já. Os pequenos ficam (tags repetidas).
-            if bytes.count > 256_000 { self.scriptsGuardados[url] = nil }
+            // Se o script falhou ao ler, o texto fica: o JavaScript pode pedi-lo de volta para tentar de novo reescrito.
+            if resposta.isEmpty && bytes.count > 256_000 { self.scriptsGuardados[url] = nil }
             return resposta
         }
         ctx.setObject(aoAvaliarGuardado, forKeyedSubscript: "__avaliarGuardado" as NSString)
+
+        // Devolve o texto de um script guardado. Só é usado quando ele falhou ao ler (sintaxe nova demais para o
+        // iOS 15): o JavaScript reescreve essa sintaxe e roda de novo.
+        let aoLerGuardado: @convention(block) (String) -> String = { [weak self] url in
+            guard let self, let bytes = self.scriptsGuardados[url] else { return "" }
+            return String(decoding: bytes.dropLast(), as: UTF8.self)
+        }
+        ctx.setObject(aoLerGuardado, forKeyedSubscript: "__fonteGuardada" as NSString)
 
         // O JavaScript avisa que a primeira exibição está pronta. Fecha fora da pilha atual.
         let aoTerminar: @convention(block) () -> Void = { [weak self] in

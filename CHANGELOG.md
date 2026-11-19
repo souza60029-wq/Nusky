@@ -2,6 +2,40 @@
 
 ## Próxima versão (a partir da 0.0.5)
 
+### Rodada 4: o que os diagnósticos de claude.ai, arena.ai, chatgpt.com, github.com e youtube mostraram
+
+**Correção de uma hipótese minha.** Eu tinha dito que o claude.ai falhava por causa do `CSS.supports`. Os diagnósticos
+mostraram outra coisa: o `<html>` do site declara `data-browser-floor="…safari:17,ios:17"` (iOS 17 como mínimo) e 20 dos
+pacotes dele usam regex com *lookbehind*, que o JavaScriptCore só entende a partir do Safari 16.4. Isso não tem conserto
+dentro do app. O mesmo vale para o Safari do iPhone 6s. Os ajustes de `CSS.supports` e `matchMedia` continuam valendo
+para outros sites, mas não eram a causa.
+
+- **Observadores de verdade.** `ResizeObserver`, `IntersectionObserver` e `PerformanceObserver` eram apelidos do
+  `MutationObserver`, e ele era um objeto vazio que nunca avisava ninguém. Agora o `MutationObserver` registra
+  `childList`, `attributes` (com `attributeFilter` e `oldValue`), `characterData` e `subtree`. O `IntersectionObserver`
+  e o `ResizeObserver` avisam uma vez que o elemento está visível e com a largura da tela, com trava contra
+  "carregar mais" em laço. Era a causa mais provável do YouTube abrir vazio sem nenhum erro. *Testado.*
+- **`<template>.content`.** O GitHub falhava com `undefined is not an object (evaluating 'f.content.appendChild')` nos
+  três pacotes principais. *Testado.*
+- **`await` no nível do arquivo nos módulos.** O ChatGPT usa; o motor não aceitava (`Unexpected identifier`). O módulo
+  passa a rodar como função assíncrona, quem depende dele espera, e a ordem entre módulos e scripts se mantém.
+  Comparado com o ESM do Node em 5 casos, mais o caso de erro e o de ordem. *Testado.*
+- **`static { }` de classe** (arena.ai e o `vendor-intl` do claude.ai). O iOS 15 não lê esse bloco. Quando um script falha
+  ao ler, o app o reescreve (cada bloco vira um campo estático com os mesmos comandos) e tenta de novo. Só roda
+  nos scripts que falharam, então os outros não pagam nada. Cobre script inline, externo e módulo. *Testado com um iOS 15
+  simulado; confirmação no aparelho pendente.*
+- **Mensagem de erro com o trecho.** Quando um script não chega a rodar, o erro agora mostra o código perto do ponto
+  da falha. Assim o próximo diagnóstico aponta a causa em vez de uma coluna.
+- **`CryptoKey`, `SubtleCrypto` e `Crypto`** (o ChatGPT falhava com `Can't find variable: CryptoKey`).
+
+### Páginas que abriam erradas, continuação
+
+- Sublinhado dos links: o motor não lê `text-decoration`, então só páginas **sem CSS** sublinham links. Nova função
+  `Apresentacao.paginaTemCSS`.
+- `position: fixed` passa a ocupar o lugar dele no fluxo da página (antes ficava solto, sem espaço, e o menu do globo
+  se empilhava na lateral por cima do texto). Ele ainda não vai para o fim da página.
+
+
 Esta entrega junta tudo que foi feito em três rodadas de trabalho. Cada item diz se foi **medido**, **testado**
 (teste automático que roda no CI) ou **só revisado** (escrito e lido com cuidado, mas ainda não compilado nem
 rodado no iPhone: o CI do GitHub é quem confirma).
@@ -104,6 +138,6 @@ rodado no iPhone: o CI do GitHub é quem confirma).
 - Ícones e logos em SVG complexos, fontes próprias do site, bordas arredondadas em imagens e selos sobrepostos
   seguem diferentes do Safari.
 - Só dá para tocar onde há texto ou imagem; botão só de ícone SVG ou de fundo CSS não recebe o toque.
-- Módulos ES com `await` no nível do arquivo não rodam; dependências circulares de módulos podem ler valores
-  ainda vazios.
+- Dependências circulares de módulos podem ler valores ainda vazios.
+- Regex com *lookbehind* e outras sintaxes do Safari 16.4 em diante não têm como rodar no iOS 15.
 - Sites que têm tema escuro só por JavaScript e não por CSS podem ficar com tema misturado.

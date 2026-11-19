@@ -56,7 +56,8 @@ Histórico, favoritos, pesquisas, miniaturas das abas, cookies e sessões ficam 
 - Não desenha gradientes e máscaras de SVG, campos de formulário, fontes próprias dos sites nem fileiras que rolam de lado (viram uma lista vertical).
 - O JavaScript de páginas grandes usa bastante memória. Se ela ficar curta, o JavaScript vivo é fechado e a página fica como estava.
 - Só dá para tocar onde há texto ou imagem: um botão feito só de ícone SVG ou de fundo CSS ainda não recebe o toque.
-- Módulos ES com `await` no nível do arquivo (top-level await) não rodam, e dependências circulares de módulos podem ver valores ainda vazios.
+- Dependências circulares de módulos podem ver valores ainda vazios.
+- Sintaxe que o iOS 15 não conhece e que o app não consegue reescrever (como regex com *lookbehind*, `(?<=...)`) impede o script de rodar. É o caso do claude.ai, que também declara iOS 17 como versão mínima: ele não abre no iOS 15, nem no Safari.
 
 ## Para quem quer compilar
 
