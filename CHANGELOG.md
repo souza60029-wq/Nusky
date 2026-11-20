@@ -24,6 +24,13 @@ para outros sites, mas não eram a causa.
   ao ler, o app o reescreve (cada bloco vira um campo estático com os mesmos comandos) e tenta de novo. Só roda
   nos scripts que falharam, então os outros não pagam nada. Cobre script inline, externo e módulo. *Testado com um iOS 15
   simulado; confirmação no aparelho pendente.*
+- **Regex com lookbehind** (`(?<=…)`, `(?<!…)`), que o iOS 15 não lê e que derrubava 20 pacotes do claude.ai. Há um motor de
+  regex próprio em JavaScript (`AmbienteJSModerno.swift`). O `RegExp` global recorre a ele quando o nativo recusa uma expressão
+  com lookbehind, e as regex literais dos scripts que falham ao ler são reescritas para usá-lo. As demais continuam nativas.
+  Comparado com o regex do Node em ~1.900 padrões escritos à mão (0 diferenças) e 40.000 aleatórios (7 diferenças, todas em
+  regex com um grupo de captura *dentro* do lookbehind: o trecho capturado ali pode diferir). *Testado.*
+  Isso remove um bloqueio do claude.ai, mas **não garante** que ele abra: o site também declara iOS 17 como mínimo e pode usar
+  outros recursos que ainda faltam.
 - **Mensagem de erro com o trecho.** Quando um script não chega a rodar, o erro agora mostra o código perto do ponto
   da falha. Assim o próximo diagnóstico aponta a causa em vez de uma coluna.
 - **`CryptoKey`, `SubtleCrypto` e `Crypto`** (o ChatGPT falhava com `Can't find variable: CryptoKey`).

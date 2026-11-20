@@ -10,3 +10,4 @@ function extrair(arquivoSwift, marca, saida) {
 }
 extrair('AmbienteJS.swift', 'static let codigo = #"""\n', 'ambiente.js');
 extrair('AmbienteJSExtra.swift', 'static let extra = #"""\n', 'extra.js');
+extrair('AmbienteJSModerno.swift', 'static let moderno = #"""\n', 'moderno.js');

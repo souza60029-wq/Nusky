@@ -1,3 +1,4 @@
 /target
 **/*.rs.bk/testes/js/ambiente.js
 /testes/js/extra.js
+/testes/js/moderno.js

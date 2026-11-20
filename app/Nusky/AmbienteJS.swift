@@ -1417,12 +1417,13 @@ enum AmbienteJS {
   }
   function acordarEspera(r) { var e = r.espera; r.espera = []; e.forEach(function (f) { f(); }); }
   function falharModulo(r, e) { r.estado = 4; r.erro = e; erro('módulo ' + r.url + ': ' + (e && e.message || e)); acordarEspera(r); }
-  // Reescreve sintaxe que o JavaScriptCore do iOS 15 ainda não conhece. Hoje: blocos "static { ... }" de classe (Safari 16.4).
+  // Reescreve sintaxe que o JavaScriptCore do iOS 15 ainda não conhece (Safari 16.4): blocos "static { ... }" de classe e
+  // regex com lookbehind (?<=...) / (?<!...), que passam a usar o motor de regex do app.
   // Cada bloco vira um campo estático que roda os mesmos comandos, na mesma ordem e com o mesmo `this`:
   //   static { corpo }   ->   static __nsb0=(()=>{ corpo })();
   // Só é chamada quando o script falhou ao ler, então scripts comuns não pagam nada.
   function modernizar(src) {
-    if (!/static\s*\{/.test(src)) return src;
+    if (!/static\s*\{/.test(src) && !/\(\?<[=!]/.test(src)) return src;
     var n = src.length, i = 0, prev = '', prevIni = -1, antesPonto = false, pilha = [], ed = [], k = 0;
     while (i < n) {
       var c = src.charCodeAt(i);
@@ -1431,7 +1432,15 @@ enum AmbienteJS {
         var d = src.charCodeAt(i + 1);
         if (d === 47) { var f = src.indexOf('\n', i); i = f < 0 ? n : f; continue; }
         if (d === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? n : g + 2; continue; }
-        if (regexPermitido(prev)) { i = pularRegex(src, i); prev = 'num'; continue; }
+        if (regexPermitido(prev)) {
+          var fimRx = pularRegex(src, i), lit = src.slice(i, fimRx);
+          // Regex com lookbehind, que o iOS 15 não lê: vira uma chamada ao motor de regex do app (__rx).
+          if (/\(\?<[=!]/.test(lit)) {
+            var fl = /[a-z]*$/.exec(lit)[0];
+            ed.push([i, fimRx, '__rx(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl) + ')']);
+          }
+          i = fimRx; prev = 'num'; continue;
+        }
         i++; prev = '/'; continue;
       }
       if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }

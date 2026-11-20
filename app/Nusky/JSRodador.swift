@@ -213,6 +213,8 @@ final class JSRodador: @unchecked Sendable {
         instalarPonte(em: ctx)
         limitarExecucao(de: ctx, segundos: limite)
 
+        // Primeiro o que o iOS 15 não tem (regex com lookbehind), para valer também para o resto do ambiente.
+        _ = ctx.evaluateScript(AmbienteJS.moderno, withSourceURL: URL(string: "nusky://moderno.js"))
         _ = ctx.evaluateScript(AmbienteJS.codigo, withSourceURL: URL(string: "nusky://ambiente.js"))
         // Recursos de navegador que o AmbienteJS ainda não tinha (CSS.supports, streams, MessageChannel...).
         _ = ctx.evaluateScript(AmbienteJS.extra, withSourceURL: URL(string: "nusky://extra.js"))
