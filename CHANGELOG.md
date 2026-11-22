@@ -2,6 +2,68 @@
 
 ## Próxima versão (a partir da 0.0.5)
 
+### Rodada 5: comparação com o Safari do mesmo iPhone 6s (claude.ai, arena.ai, GitHub, YouTube, ChatGPT)
+
+Os prints do Safari mostram os cinco sites funcionando no mesmo aparelho, inclusive o claude.ai. Isso corrige a rodada
+anterior, que dava o claude.ai como impossível: se o Safari abre, o bloqueio não é só "iOS 15 é velho demais", e sim algo
+que o Nusky diz ter (ou deixa de ter) e o Safari não.
+
+**Nada desta rodada foi compilado nem rodou no aparelho** (o ambiente de trabalho não tem Rust nem Swift). O que está
+marcado *Testado* rodou no Node, contra o mesmo JavaScript que o app carrega. O resto depende do CI e do iPhone.
+
+- **GitHub sem estilo (a causa mais provável).** O carregador de CSS aceitava no máximo 8 folhas, 400 KB cada e 1 MB no
+  total. O GitHub manda mais de 10 folhas e a principal passa de 400 KB, então a página chegava ao motor quase sem CSS:
+  "Skip to content" e "Navigation Menu" visíveis, menu aberto, caixas cinzas de carregamento. Os limites agora são 40
+  folhas, 3 MB cada e 6 MB no total (`FolhasExternas.swift`). Também passam a valer: `<link>` sem aspas
+  (`href=/a.css`), `rel="preload" as="style"`, folhas com `media` que não combina com a tela (impressão, tema escuro
+  quando o site está claro, `min-width` maior que a tela) são puladas, `<noscript>` e comentários são ignorados, folha
+  com byte fora do UTF-8 não é mais descartada, e há uma segunda tentativa quando a rede falha.
+- **`PodaCSS`.** Antes de entregar o CSS ao motor, tira comentários, `@font-face`, `@keyframes`, `@media print` e
+  espaços repetidos (o motor já ignorava essas regras). Na amostra sintética de 2,3 MB, 24% a menos em ~100 ms no Node.
+  A lógica foi testada em JavaScript (`testes/js/poda_css.js`, 16 casos) e transcrita para Swift. Números reais de
+  sites ainda não foram medidos.
+- **Cores modernas (arena.ai).** O leitor de cores só entendia `#hex`, `rgb()`, `hsl()` e 17 nomes. O Tailwind 4, que o
+  arena.ai usa, escreve cores em `oklch()` e `color-mix()`: elas eram descartadas e o texto caía na cor padrão do link
+  (o "Sign up for free" azul do print). Novo módulo `engine/src/cores.rs`: os 148 nomes do CSS, `hwb()`, `lab()`, `lch()`,
+  `oklab()`, `oklch()`, `color()`, `color-mix()` e `light-dark()`. Cor fora da gama perde saturação até caber, como no
+  Safari. As contas foram conferidas em JavaScript contra valores conhecidos (red-500 do Tailwind = 251, 44, 54);
+  os testes em Rust (`cargo test`) usam esses valores. **Ainda não compilado.**
+- **Elementos personalizados de verdade (YouTube).** `customElements.define` só guardava o nome e nenhum componente era
+  criado: é a explicação mais provável para o `m.youtube.com` mostrar só um quadrado preto, e também afeta Polymer, Lit e
+  os componentes do GitHub. Agora há construtor, `attributeChangedCallback`, `connectedCallback`, `disconnectedCallback`,
+  upgrade de elementos que já estavam na página, `whenDefined`, `upgrade` e `attachInternals`. Os ganchos só são
+  instalados no primeiro `define`. *Testado* (`teste_componentes.js`). **Não garante** que o YouTube abra: pode haver
+  outras causas.
+- **Sombra (Shadow DOM) e `<slot>`.** `attachShadow` devolvia um fragmento solto que nunca aparecia na página. Agora a
+  sombra é "achatada" na hora de montar o HTML (a sombra, com os filhos do hospedeiro nos `<slot>`), o clique sobe da
+  sombra para o hospedeiro e `shadowRoot.innerHTML` funciona. *Testado.*
+- **Folhas de estilo.** `insertRule`, `deleteRule`, `replaceSync`, `new CSSStyleSheet()`, `<style>.sheet.cssRules`,
+  `document.styleSheets` e `adoptedStyleSheets` (na página e na sombra) agora chegam à página. Antes o `insertRule`
+  não fazia nada, e bibliotecas de CSS-em-JS (que deixam o `<style>` vazio) perdiam todo o estilo. *Testado.*
+- **JavaScript novo que o iOS 15 não tem.** `Promise.withResolvers`, `Array.fromAsync`, `Object.groupBy`,
+  `Map.groupBy`, `toSorted`/`toReversed`/`toSpliced`/`with`, métodos de `Set` (`union`...), `isWellFormed`,
+  `URL.canParse`, `AbortSignal.any`, `Symbol.dispose`, `ArrayBuffer.transfer` e helpers de `Iterator`. Cada um só
+  entra se o motor não tiver. A flag `v` de regex tenta a `u` quando a expressão serve para as duas. *Testado.*
+- **Perfis por site (`PerfisDeSite.swift`).** Até agora **não existia** um lugar para ajuste de um site só (a lista de
+  sites serve para a busca, não guarda correções). Criei um: cada perfil vale só para o domínio dele e seus subdomínios.
+  Campos: `agente` (mobile / ios17 / desktop / texto), `css`, `js`, `honesto`, `semJS`, `tempoJS`, `maxFolhas`,
+  `ignorarScripts`. A tabela de fábrica está no arquivo; um campo `"perfis"` na lista de sites baixada vale por cima, então
+  um conserto novo pode chegar pelo botão "Atualizar só a lista de sites".
+- **Modo honesto (experimento para o claude.ai).** O Nusky empresta ao site recursos que o iOS 15 não tem
+  (`TextDecoderStream`, `AbortSignal.timeout`, regex com lookbehind...). Se o claude.ai escolhe a versão do código pelo
+  que existe, ele manda ao Nusky o código novo demais, e o Safari, sem esses recursos, recebe o código antigo que
+  funciona. No perfil `claude.ai` o modo honesto esconde esses recursos. É uma hipótese que bate com o print do
+  Safari, **não uma certeza**. Se não resolver, o próximo diagnóstico do claude.ai diz o que ele consulta.
+- **Primeira pintura protegida.** Se a versão que o JavaScript monta fica sem texto e a do servidor tinha conteúdo, o
+  app mantém a do servidor e anota "2ª pintura descartada" no diagnóstico, em vez de trocar por uma tela em branco.
+- **Tempo de espera por site.** YouTube, ChatGPT e arena.ai esperam mais pela primeira exibição (8 a 10 s, em vez de 6).
+- **Diagnóstico.** A linha de cada página no relatório agora traz o resumo do CSS (folhas pedidas e recebidas, KB) e o
+  perfil usado.
+
+**ChatGPT em branco:** não achei causa com certeza. As mudanças acima (componentes, folhas, JavaScript novo, tempo)
+podem resolver, mas se continuar em branco, mande o relatório do Diagnóstico desse site: a lista de erros diz o que
+falta.
+
 ### Rodada 4: o que os diagnósticos de claude.ai, arena.ai, chatgpt.com, github.com e youtube mostraram
 
 **Correção de uma hipótese minha.** Eu tinha dito que o claude.ai falhava por causa do `CSS.supports`. Os diagnósticos

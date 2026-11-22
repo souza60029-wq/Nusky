@@ -294,14 +294,16 @@ final class BrowserModel: ObservableObject {
             // Três coisas começam ao mesmo tempo, porque nenhuma depende da outra: baixar o CSS externo,
             // rodar o JavaScript e (quando o CSS chega) desenhar a página.
             let inicioCSS = CFAbsoluteTimeGetCurrent()
-            async let estiloExterno = FolhasExternas.bloco(em: html, base: finalURL)
             let largura = Int(textWidth)
             let escuro = Aparencia.sitesEmModoEscuro()
+            let perfil = PerfisDeSite.para(host: finalURL.host)
+            async let estiloExterno = FolhasExternas.bloco(em: html, base: finalURL, largura: largura, escuro: escuro)
             var tarefaJS: Task<JSRodador.Saida, Never>?
-            if JSRodador.vaiRodar(html) {
+            if JSRodador.vaiRodar(html) && perfil?.semJS != true {
                 // Qualquer falha devolve o HTML original, então a página sempre abre.
+                let limiteJS = perfil?.tempoJS ?? JSRodador.limitePadrao
                 tarefaJS = Task {
-                    await JSRodador.processar(html: html, pagina: finalURL, largura: largura, escuro: escuro)
+                    await JSRodador.processar(html: html, pagina: finalURL, largura: largura, escuro: escuro, limite: limiteJS)
                 }
             }
             let inicioJS = CFAbsoluteTimeGetCurrent()
@@ -341,14 +343,26 @@ final class BrowserModel: ObservableObject {
                     rodado.sessao?.fechar()
                     return
                 }
-                if rodado.html != html {
+                var manterSessao = true
+                if rodado.html != html, Apresentacao.versaoDoJSEstaVazia(servidor: html, javascript: rodado.html) {
+                    // O JavaScript deixou a página sem texto: mantém a 1ª pintura em vez de trocar por uma tela em branco.
+                    ultimoRelatorioJS?.erros.append("2ª pintura descartada: a versão do JavaScript ficou sem texto e a do servidor tinha conteúdo.")
+                    // Sem a sessão viva, uma atualização tardia não apaga a página que ficou.
+                    rodado.sessao?.fechar()
+                    manterSessao = false
+                } else if rodado.html != html {
                     let inicioTroca = CFAbsoluteTimeGetCurrent()
                     await trocarPelaVersaoDoJS(rodado.html, geracao: minhaGeracao)
                     marcar("2ª pintura", desde: inicioTroca)
                 }
-                anexarSessaoViva(rodado.sessao, geracao: minhaGeracao)
+                if manterSessao {
+                    anexarSessaoViva(rodado.sessao, geracao: minhaGeracao)
+                }
             }
-            Desempenho.compartilhado.registrarCarregamento(host: finalURL.host ?? "", etapas: etapas)
+            var nota = FolhasExternas.ultimoResumo.valor
+            if let perfil, let agente = perfil.agente { nota += " · perfil: agente \(agente)" }
+            if perfil?.honesto == true { nota += " · perfil: honesto" }
+            Desempenho.compartilhado.registrarCarregamento(host: finalURL.host ?? "", etapas: etapas, nota: nota)
         } catch {
             guard !Task.isCancelled else { return }
             carregando = false

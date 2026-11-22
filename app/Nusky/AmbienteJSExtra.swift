@@ -312,17 +312,197 @@ extension AmbienteJS {
   def(G, 'BroadcastChannel', BroadcastChannel);
 
   // ---------- elementos personalizados ----------
-  var registro = Object.create(null), espera = Object.create(null);
-  def(G, 'customElements', {
-    define: function (n, c) {
+  // Antes, `define` só guardava o nome: nenhum elemento era criado, ligado ou atualizado, e sites feitos com
+  // componentes (YouTube, Polymer, Lit, GitHub) ficavam vazios. Agora há ciclo de vida de verdade: construtor,
+  // attributeChangedCallback, connectedCallback e disconnectedCallback, no upgrade de elementos que já estavam na
+  // página e nos criados depois. Os ganchos só são instalados no primeiro `define`: página sem componentes não paga nada.
+  var registro = Object.create(null), espera = Object.create(null), defs = Object.create(null), porCtor = [];
+  var ganchos = false, alvoUpgrade = null, lote = false;
+  var Elem = G.Element, NodeP = G.Node.prototype, ElemP = Elem.prototype;
+  function relatar(e) { try { if (typeof G.__erro === 'function') G.__erro('elemento personalizado: ' + (e && e.message ? e.message : e)); } catch (x) {} }
+  function defDoCtor(c) { for (var i = 0; i < porCtor.length; i++) if (porCtor[i].C === c) return porCtor[i]; return null; }
+  function chamar(el, nome, args) { var f = el[nome]; if (typeof f === 'function') { try { f.apply(el, args); } catch (e) { relatar(e); } } }
+  function percorrer(no, fn) {
+    if (no.nodeType === 1) fn(no);
+    var cs = no.childNodes.slice();
+    for (var i = 0; i < cs.length; i++) percorrer(cs[i], fn);
+    if (no.__sombra) percorrer(no.__sombra, fn);
+  }
+  function HTMLElementCE() {
+    var c = new.target, d = c ? defDoCtor(c) : null;
+    if (!d) throw new TypeError('Illegal constructor');
+    var el;
+    if (alvoUpgrade) { el = alvoUpgrade; alvoUpgrade = null; }
+    else { el = new Elem(d.nome); el.__ran = false; el.__ce = 2; el.__def = d; }
+    Object.setPrototypeOf(el, c.prototype);
+    return el;
+  }
+  HTMLElementCE.prototype = ElemP;
+  // A classe base vale desde já: `class X extends HTMLElement` costuma ser escrita antes do `define`.
+  forca(G, 'HTMLElement', HTMLElementCE);
+  function elevar(el, d) {
+    if (el.__ce) return;
+    el.__ce = 1; el.__def = d; alvoUpgrade = el;
+    try { new d.C(); } catch (e) { relatar(e); }
+    alvoUpgrade = null; el.__ce = 2;
+    if (d.attr) for (var i = 0; i < el.__attrs.length; i++) { var a = el.__attrs[i]; if (d.obs[a[0]]) chamar(el, 'attributeChangedCallback', [a[0], null, a[1]]); }
+    if (el.isConnected && !el.__conectado) { el.__conectado = true; chamar(el, 'connectedCallback', []); }
+  }
+  function conectar(raiz) {
+    percorrer(raiz, function (el) {
+      var d = defs[el.localName];
+      if (!d) return;
+      if (!el.__ce) { elevar(el, d); return; }
+      if (el.__ce === 2 && !el.__conectado) { el.__conectado = true; chamar(el, 'connectedCallback', []); }
+    });
+  }
+  function desconectar(raiz) {
+    percorrer(raiz, function (el) { if (el.__ce === 2 && el.__conectado) { el.__conectado = false; chamar(el, 'disconnectedCallback', []); } });
+  }
+  function instalarGanchos() {
+    if (ganchos) return; ganchos = true;
+    var oIns = NodeP.insertBefore, oAnex = NodeP.__anexar, oRem = NodeP.removeChild, oLimpar = NodeP.__limpar;
+    NodeP.insertBefore = function (n) { var r = oIns.apply(this, arguments); if (n && n.nodeType === 1 && this.isConnected) conectar(n); return r; };
+    NodeP.__anexar = function (n) { var r = oAnex.apply(this, arguments); if (n && n.nodeType === 1 && this.isConnected) conectar(n); return r; };
+    NodeP.removeChild = function (n) { var estava = this.isConnected, r = oRem.apply(this, arguments); if (estava && n && n.nodeType === 1) desconectar(n); return r; };
+    NodeP.__limpar = function () { var removidos = this.isConnected ? this.childNodes.slice() : null; var r = oLimpar.apply(this, arguments); if (removidos) removidos.forEach(function (n) { if (n.nodeType === 1) desconectar(n); }); return r; };
+    var oDef = ElemP.__definirAttr, oRemAttr = ElemP.removeAttribute;
+    ElemP.__definirAttr = function (n) {
+      var d = this.__ce === 2 ? this.__def : null;
+      if (!d || !d.attr || !d.obs[n]) return oDef.apply(this, arguments);
+      var velho = this.getAttribute(n), r = oDef.apply(this, arguments), novo = this.getAttribute(n);
+      if (velho !== novo) chamar(this, 'attributeChangedCallback', [n, velho, novo]);
+      return r;
+    };
+    ElemP.removeAttribute = function (n) {
+      var nome = String(n).toLowerCase(), d = this.__ce === 2 ? this.__def : null;
+      var velho = d && d.attr && d.obs[nome] ? this.getAttribute(nome) : null;
+      var r = oRemAttr.apply(this, arguments);
+      if (velho !== null) chamar(this, 'attributeChangedCallback', [nome, velho, null]);
+      return r;
+    };
+    var DP = Object.getPrototypeOf(G.document), oCria = DP.createElement;
+    DP.createElement = function (t) {
+      var d = defs[String(t).toLowerCase()];
+      if (d) { try { return new d.C(); } catch (e) { relatar(e); } }
+      return oCria.apply(this, arguments);
+    };
+  }
+  function elevarTudo() {
+    lote = false;
+    percorrer(G.document, function (el) { var d = defs[el.localName]; if (d && !el.__ce) elevar(el, d); });
+  }
+  var CE = {
+    define: function (n, C) {
       n = String(n).toLowerCase();
+      if (typeof C !== 'function') throw new TypeError('The referenced constructor is not a constructor');
+      if (n.indexOf('-') < 1 || !/^[a-z][a-z0-9._\u00b7-]*$/.test(n)) throw erroDom('"' + n + '" is not a valid custom element name', 'SyntaxError');
       if (registro[n]) throw erroDom('The name "' + n + '" has already been used with this registry', 'NotSupportedError');
-      registro[n] = c;
-      (espera[n] || []).forEach(function (f) { f(c); }); espera[n] = null;
+      if (defDoCtor(C)) throw erroDom('This constructor has already been used with this registry', 'NotSupportedError');
+      var obs = Object.create(null), lista = [];
+      try { if (C.observedAttributes) lista = Array.prototype.slice.call(C.observedAttributes); } catch (e) { relatar(e); }
+      lista.forEach(function (a) { obs[String(a).toLowerCase()] = true; });
+      var d = { nome: n, C: C, obs: obs, attr: lista.length > 0 };
+      registro[n] = C; defs[n] = d; porCtor.push(d);
+      instalarGanchos();
+      // vários define seguidos viram uma varredura só do documento
+      if (!lote) { lote = true; Promise.resolve().then(elevarTudo); }
+      var w = espera[n]; espera[n] = null;
+      if (w) Promise.resolve().then(function () { w.forEach(function (f) { f(C); }); });
     },
     get: function (n) { return registro[String(n).toLowerCase()]; },
+    getName: function (C) { var d = defDoCtor(C); return d ? d.nome : null; },
     whenDefined: function (n) { n = String(n).toLowerCase(); return registro[n] ? Promise.resolve(registro[n]) : new Promise(function (ok) { (espera[n] = espera[n] || []).push(ok); }); },
-    upgrade: nada
+    upgrade: function (raiz) { if (!raiz) return; percorrer(raiz, function (el) { var d = defs[el.localName]; if (d && !el.__ce) elevar(el, d); }); }
+  };
+  forca(G, 'customElements', CE);
+  forca(G, 'CustomElementRegistry', function CustomElementRegistry() {});
+  if (!ElemP.attachInternals) ElemP.attachInternals = function () {
+    return { setFormValue: nada, setValidity: nada, checkValidity: function () { return true; }, reportValidity: function () { return true; }, states: new Set(), form: null, labels: [], validity: { valid: true }, shadowRoot: this.shadowRoot || null };
+  };
+
+  // ShadowRoot tem innerHTML; DocumentFragment (que é o que usamos como raiz de sombra) não tinha.
+  if (!Object.getOwnPropertyDescriptor(G.DocumentFragment.prototype, 'innerHTML')) Object.defineProperty(G.DocumentFragment.prototype, 'innerHTML', {
+    configurable: true,
+    get: function () {
+      var o = [];
+      this.childNodes.forEach(function (n) { o.push(n.nodeType === 1 ? n.outerHTML : n.nodeType === 8 ? '<!--' + n.data + '-->' : String(n.data).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')); });
+      return o.join('');
+    },
+    set: function (h) {
+      var t = G.document.createElement('div'); t.innerHTML = h == null ? '' : String(h);
+      var filhos = t.childNodes.slice(); t.__limpar(); this.__limpar();
+      for (var i = 0; i < filhos.length; i++) this.__anexar(filhos[i]);
+    }
+  });
+
+  // ---------- folhas de estilo (CSSStyleSheet, <style>.sheet, adoptedStyleSheets) ----------
+  // Bibliotecas de CSS-em-JS gravam as regras com sheet.insertRule() e deixam o <style> vazio. Antes o insertRule
+  // não fazia nada, então esses sites perdiam todo o estilo. Agora o texto das regras vai para a página.
+  function separarRegras(texto) {
+    var regras = [], prof = 0, ini = 0, asp = 0;
+    for (var i = 0; i < texto.length; i++) {
+      var c = texto.charAt(i);
+      if (asp) { if (c === '\\') i++; else if (c === asp) asp = 0; continue; }
+      if (c === '"' || c === "'") { asp = c; continue; }
+      if (c === '/' && texto.charAt(i + 1) === '*') { var f = texto.indexOf('*/', i + 2); i = f < 0 ? texto.length : f + 1; continue; }
+      if (c === '{') prof++;
+      else if (c === '}') { prof--; if (prof === 0) { regras.push(texto.slice(ini, i + 1).trim()); ini = i + 1; } }
+      else if (c === ';' && prof === 0) { regras.push(texto.slice(ini, i + 1).trim()); ini = i + 1; }
+    }
+    var resto = texto.slice(ini).trim(); if (resto) regras.push(resto);
+    return regras.filter(Boolean).map(regraObj);
+  }
+  function regraObj(t) {
+    var m = /^([^{]*)\{/.exec(t);
+    return { cssText: t, selectorText: m ? m[1].trim() : '', type: t.charAt(0) === '@' ? 4 : 1, style: { cssText: m ? t.slice(m[0].length, t.lastIndexOf('}')) : '' } };
+  }
+  function FolhaCSS(opts) { this.cssRules = []; this.__t = ''; this.__dono = null; this.disabled = false; this.media = { mediaText: (opts && opts.media) || '' }; }
+  FolhaCSS.prototype.__sync = function () {
+    this.__t = this.cssRules.map(function (r) { return r.cssText; }).join('\n');
+    if (this.__dono) { this.__dono.__folha = this; if (typeof G.__sujar === 'function') G.__sujar(); }
+  };
+  FolhaCSS.prototype.insertRule = function (regra, i) {
+    var idx = i === undefined ? 0 : (i | 0);
+    if (idx < 0 || idx > this.cssRules.length) throw erroDom('Failed to execute \'insertRule\' on \'CSSStyleSheet\': The index provided is larger than the maximum index.', 'IndexSizeError');
+    this.cssRules.splice(idx, 0, regraObj(String(regra))); this.__sync(); return idx;
+  };
+  FolhaCSS.prototype.deleteRule = function (i) { if (i >= 0 && i < this.cssRules.length) { this.cssRules.splice(i, 1); this.__sync(); } };
+  FolhaCSS.prototype.removeRule = FolhaCSS.prototype.deleteRule;
+  FolhaCSS.prototype.addRule = function (sel, estilo, i) { return this.insertRule(sel + '{' + estilo + '}', i === undefined ? this.cssRules.length : i); };
+  FolhaCSS.prototype.replaceSync = function (t) { this.cssRules = separarRegras(String(t)); this.__sync(); };
+  FolhaCSS.prototype.replace = function (t) { this.replaceSync(t); return Promise.resolve(this); };
+  Object.defineProperty(FolhaCSS.prototype, 'rules', { get: function () { return this.cssRules; } });
+  forca(G, 'CSSStyleSheet', FolhaCSS);
+  if (!Object.getOwnPropertyDescriptor(ElemP, 'sheet')) Object.defineProperty(ElemP, 'sheet', {
+    configurable: true,
+    get: function () {
+      if (this.localName !== 'style') return null;
+      if (!this.__folhaObj) { var f = this.__folhaObj = new FolhaCSS(); f.__dono = this; f.cssRules = separarRegras(this.textContent); }
+      return this.__folhaObj;
+    }
+  });
+  function adotar(alvo, lista, ondeEstilos, primeiro) {
+    var antigas = alvo.__adotadas || [];
+    antigas.forEach(function (f) { if (lista.indexOf(f) < 0 && f.__dono && f.__dono.parentNode) { f.__dono.parentNode.removeChild(f.__dono); f.__dono = null; } });
+    lista.forEach(function (f) {
+      if (!f || typeof f !== 'object' || !('cssRules' in f)) return;
+      if (!f.__dono) { var st = G.document.createElement('style'); f.__dono = st; f.__sync(); st.__ran = true; if (primeiro) ondeEstilos.insertBefore(st, ondeEstilos.firstChild); else ondeEstilos.appendChild(st); }
+    });
+    alvo.__adotadas = lista.slice();
+  }
+  Object.defineProperty(G.DocumentFragment.prototype, 'adoptedStyleSheets', {
+    configurable: true, get: function () { return this.__adotadas || []; },
+    set: function (v) { adotar(this, Array.prototype.slice.call(v || []), this, true); }
+  });
+  var DocP = Object.getPrototypeOf(G.document);
+  Object.defineProperty(DocP, 'adoptedStyleSheets', {
+    configurable: true, get: function () { return this.__adotadas || []; },
+    set: function (v) { adotar(this, Array.prototype.slice.call(v || []), this.head || this.documentElement, false); }
+  });
+  Object.defineProperty(DocP, 'styleSheets', {
+    configurable: true,
+    get: function () { var r = [], self = this; (function v(n) { for (var i = 0; i < n.childNodes.length; i++) { var f = n.childNodes[i]; if (f.nodeType !== 1) continue; if (f.localName === 'style') r.push(f.sheet); else v(f); } })(self); return r; }
   });
 
   // ---------- streams ----------
@@ -696,6 +876,86 @@ extension AmbienteJS {
   forma('CryptoKey', function () { return false; });
   forma('SubtleCrypto', function (v) { return !!v && typeof v.digest === 'function'; });
   forma('Crypto', function (v) { return !!v && typeof v.getRandomValues === 'function'; });
+  // ---------- JavaScript que o iOS 15 ainda não tem ----------
+  // Cada item só entra se o motor não tiver. Sites escritos para o Safari 17 usam estes recursos sem checar.
+  // No modo `honesto` do perfil do site, nada disto é definido: alguns sites escolhem a versão do código pelo que existe
+  // (e, vendo o recurso, mandam o código novo demais). Lá o navegador se apresenta como o iOS 15 de verdade.
+  function pol(o, k, v) { if (o && typeof o[k] === 'undefined') { try { Object.defineProperty(o, k, { value: v, writable: true, configurable: true, enumerable: false }); } catch (e) {} } }
+  if (!pagina.honesto) {
+    pol(Promise, 'withResolvers', function () { var r = {}; r.promise = new Promise(function (a, b) { r.resolve = a; r.reject = b; }); return r; });
+    pol(Promise, 'try', function (f) { var a = Array.prototype.slice.call(arguments, 1); return new Promise(function (ok) { ok(f.apply(undefined, a)); }); });
+    pol(Array, 'fromAsync', async function (it, fn, th) {
+      var out = [], i = 0, v;
+      if (it && it[Symbol.asyncIterator]) { for await (v of it) out.push(fn ? await fn.call(th, v, i++) : v); }
+      else if (it && it[Symbol.iterator]) { for (v of it) { v = await v; out.push(fn ? await fn.call(th, v, i++) : v); } }
+      else { var n = it && it.length >>> 0; for (; i < n; i++) { v = await it[i]; out.push(fn ? await fn.call(th, v, i) : v); } }
+      return out;
+    });
+    pol(Object, 'groupBy', function (it, fn) { var o = Object.create(null), i = 0; for (var v of it) { var k = fn(v, i++); (o[k] = o[k] || []).push(v); } return o; });
+    pol(Map, 'groupBy', function (it, fn) { var m = new Map(), i = 0; for (var v of it) { var k = fn(v, i++); if (m.has(k)) m.get(k).push(v); else m.set(k, [v]); } return m; });
+    pol(Object, 'hasOwn', function (o, k) { return Object.prototype.hasOwnProperty.call(Object(o), k); });
+    var AP = Array.prototype;
+    pol(AP, 'at', function (i) { i = Math.trunc(i) || 0; if (i < 0) i += this.length; return this[i]; });
+    pol(AP, 'findLast', function (f, t) { for (var i = this.length - 1; i >= 0; i--) if (f.call(t, this[i], i, this)) return this[i]; return undefined; });
+    pol(AP, 'findLastIndex', function (f, t) { for (var i = this.length - 1; i >= 0; i--) if (f.call(t, this[i], i, this)) return i; return -1; });
+    pol(AP, 'toSorted', function (c) { return AP.slice.call(this).sort(c); });
+    pol(AP, 'toReversed', function () { return AP.slice.call(this).reverse(); });
+    pol(AP, 'toSpliced', function () { var c = AP.slice.call(this); AP.splice.apply(c, arguments); return c; });
+    pol(AP, 'with', function (i, v) { var n = this.length, k = Math.trunc(i) || 0; if (k < 0) k += n; if (k < 0 || k >= n) throw new RangeError('Invalid index : ' + i); var c = AP.slice.call(this); c[k] = v; return c; });
+    var SP = Set.prototype;
+    function chaves(o) { var r = []; var it = o.keys(); for (var x = it.next(); !x.done; x = it.next()) r.push(x.value); return r; }
+    pol(SP, 'union', function (o) { var r = new Set(this); chaves(o).forEach(function (v) { r.add(v); }); return r; });
+    pol(SP, 'intersection', function (o) { var r = new Set(), self = this; chaves(o).forEach(function (v) { if (self.has(v)) r.add(v); }); return r; });
+    pol(SP, 'difference', function (o) { var r = new Set(this); chaves(o).forEach(function (v) { r.delete(v); }); return r; });
+    pol(SP, 'symmetricDifference', function (o) { var r = new Set(this), self = this; chaves(o).forEach(function (v) { if (self.has(v)) r.delete(v); else r.add(v); }); return r; });
+    pol(SP, 'isSubsetOf', function (o) { var ok = true; this.forEach(function (v) { if (!o.has(v)) ok = false; }); return ok; });
+    pol(SP, 'isSupersetOf', function (o) { var self = this; return chaves(o).every(function (v) { return self.has(v); }); });
+    pol(SP, 'isDisjointFrom', function (o) { var self = this; return !chaves(o).some(function (v) { return self.has(v); }); });
+    pol(String.prototype, 'isWellFormed', function () { var s = String(this); for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i); if (c >= 0xd800 && c <= 0xdbff) { var d = s.charCodeAt(i + 1); if (d >= 0xdc00 && d <= 0xdfff) i++; else return false; } else if (c >= 0xdc00 && c <= 0xdfff) return false; } return true; });
+    pol(String.prototype, 'toWellFormed', function () { var s = String(this), o = ''; for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i); if (c >= 0xd800 && c <= 0xdbff) { var d = s.charCodeAt(i + 1); if (d >= 0xdc00 && d <= 0xdfff) { o += s.charAt(i) + s.charAt(i + 1); i++; } else o += '\ufffd'; } else if (c >= 0xdc00 && c <= 0xdfff) o += '\ufffd'; else o += s.charAt(i); } return o; });
+    pol(Symbol, 'dispose', Symbol('Symbol.dispose')); pol(Symbol, 'asyncDispose', Symbol('Symbol.asyncDispose'));
+    if (typeof ArrayBuffer === 'function') {
+      pol(ArrayBuffer.prototype, 'transfer', function (n) { return this.slice(0, n === undefined ? this.byteLength : n); });
+      pol(ArrayBuffer.prototype, 'transferToFixedLength', function (n) { return this.slice(0, n === undefined ? this.byteLength : n); });
+    }
+    if (G.URL) {
+      pol(G.URL, 'canParse', function (u, b) { try { new G.URL(u, b); return true; } catch (e) { return false; } });
+      pol(G.URL, 'parse', function (u, b) { try { return new G.URL(u, b); } catch (e) { return null; } });
+    }
+    if (G.AbortSignal && G.AbortController) pol(G.AbortSignal, 'any', function (lista) {
+      var c = new G.AbortController(), arr = Array.prototype.slice.call(lista);
+      for (var i = 0; i < arr.length; i++) { if (arr[i].aborted) { c.abort(arr[i].reason); return c.signal; } }
+      arr.forEach(function (s) { s.addEventListener('abort', function () { if (!c.signal.aborted) c.abort(s.reason); }); });
+      return c.signal;
+    });
+    // Iterator.prototype.map/filter/take/drop/flatMap/reduce/toArray/forEach/some/every/find
+    var IterProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+    if (!IterProto.map) {
+      var def2 = function (k, v) { try { Object.defineProperty(IterProto, k, { value: v, writable: true, configurable: true, enumerable: false }); } catch (e) {} };
+      def2('map', function* (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) yield f(x.value, i++); });
+      def2('filter', function* (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) if (f(x.value, i++)) yield x.value; });
+      def2('take', function* (n) { if (n <= 0) return; var i = 0; for (var x = this.next(); !x.done; x = this.next()) { yield x.value; if (++i >= n) return; } });
+      def2('drop', function* (n) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) if (i++ >= n) yield x.value; });
+      def2('flatMap', function* (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) yield* f(x.value, i++); });
+      def2('reduce', function (f, ini) { var acc = ini, i = 0, tem = arguments.length > 1; for (var x = this.next(); !x.done; x = this.next()) { if (!tem) { acc = x.value; tem = true; i++; continue; } acc = f(acc, x.value, i++); } return acc; });
+      def2('toArray', function () { var r = []; for (var x = this.next(); !x.done; x = this.next()) r.push(x.value); return r; });
+      def2('forEach', function (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) f(x.value, i++); });
+      def2('some', function (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) if (f(x.value, i++)) return true; return false; });
+      def2('every', function (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) if (!f(x.value, i++)) return false; return true; });
+      def2('find', function (f) { var i = 0; for (var x = this.next(); !x.done; x = this.next()) if (f(x.value, i++)) return x.value; return undefined; });
+      if (typeof G.Iterator === 'undefined') {
+        var Iter = function Iterator() { if (new.target === Iter) throw new TypeError('Abstract class Iterator not directly constructable'); };
+        Iter.prototype = IterProto;
+        Iter.from = function (o) { var it = o && o[Symbol.iterator] ? o[Symbol.iterator]() : o; return it; };
+        pol(G, 'Iterator', Iter);
+      }
+    }
+  } else {
+    // Modo honesto: o que o Safari 15 não tem, a página não vê.
+    try { delete G.TextDecoderStream; delete G.TextEncoderStream; } catch (e) {}
+    try { if (G.AbortSignal) { delete G.AbortSignal.timeout; delete G.AbortSignal.any; } } catch (e) {}
+    try { if (G.__rxNativo) G.RegExp = G.__rxNativo; } catch (e) {}
+  }
   G.__extra = true;
 })(this);
 """#

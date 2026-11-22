@@ -218,6 +218,10 @@ final class JSRodador: @unchecked Sendable {
         _ = ctx.evaluateScript(AmbienteJS.codigo, withSourceURL: URL(string: "nusky://ambiente.js"))
         // Recursos de navegador que o AmbienteJS ainda não tinha (CSS.supports, streams, MessageChannel...).
         _ = ctx.evaluateScript(AmbienteJS.extra, withSourceURL: URL(string: "nusky://extra.js"))
+        // JavaScript do perfil do site, antes dos scripts da página.
+        if let previo = PerfisDeSite.para(host: pagina.host)?.js, !previo.isEmpty {
+            _ = ctx.evaluateScript(previo, withSourceURL: URL(string: "nusky://perfil.js"))
+        }
         // Monta o document, roda os scripts na ordem e segue enquanto houver rede ou temporizador.
         _ = ctx.objectForKeyedSubscript("__iniciar")?.call(withArguments: [arvore])
     }
@@ -228,7 +232,7 @@ final class JSRodador: @unchecked Sendable {
             "href": pagina.absoluteString,
             "protocolo": (pagina.scheme ?? "https") + ":",
             "host": pagina.host ?? "",
-            "agente": IdentificacaoNavegador.atual,
+            "agente": PerfisDeSite.agente(para: pagina.host),
             "plataforma": desktop ? "MacIntel" : "iPhone",
             "toque": !desktop,
             "largura": desktop ? 1280 : largura,
@@ -236,7 +240,10 @@ final class JSRodador: @unchecked Sendable {
             "escala": 2,
             "escuro": escuro,
             "vivo": JSRodador.vivoAtivo,
-            "bloquear": JSRodador.bloquearAtivo
+            "bloquear": JSRodador.bloquearAtivo,
+            // Perfil do site (ver PerfisDeSite): modo honesto e scripts que não devem rodar.
+            "honesto": PerfisDeSite.para(host: pagina.host)?.honesto ?? false,
+            "ignorar": PerfisDeSite.para(host: pagina.host)?.ignorarScripts ?? []
         ]
         ctx.setObject(dados, forKeyedSubscript: "__pagina" as NSString)
 
@@ -381,7 +388,7 @@ final class JSRodador: @unchecked Sendable {
         let metodoFinal = metodo.uppercased()
         pedido.httpMethod = metodoFinal
         pedido.timeoutInterval = fase == .boot ? limite : 15
-        pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
+        pedido.setValue(PerfisDeSite.agente(para: pagina.host), forHTTPHeaderField: "User-Agent")
         pedido.setValue(pagina.absoluteString, forHTTPHeaderField: "Referer")
         if let dados = cabecalhos.data(using: .utf8),
            let objeto = try? JSONSerialization.jsonObject(with: dados) as? [String: Any] {

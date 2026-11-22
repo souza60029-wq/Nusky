@@ -82,9 +82,10 @@ final class Desempenho: NSObject, @unchecked Sendable {
     func registrarMetal(_ ms: Double) { acrescentar(&metais, ms) }
 
     /// Guarda os tempos de cada etapa do carregamento de uma página, para o relatório mostrar onde o tempo vai.
-    func registrarCarregamento(host: String, etapas: [(String, Double)]) {
+    func registrarCarregamento(host: String, etapas: [(String, Double)], nota: String = "") {
         let partes = etapas.map { "\($0.0) \(ms($0.1))" }
-        let linha = (host.isEmpty ? "página" : host) + ": " + partes.joined(separator: " · ")
+        var linha = (host.isEmpty ? "página" : host) + ": " + partes.joined(separator: " · ")
+        if !nota.isEmpty { linha += " · " + nota }
         trava.lock()
         carregamentos.append(linha)
         if carregamentos.count > 6 { carregamentos.removeFirst(carregamentos.count - 6) }

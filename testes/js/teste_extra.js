@@ -63,7 +63,7 @@ const ev=(c,s)=>vm.runInContext(s,c);
  ok(r==='bc','BroadcastChannel');
  r=await ev(ctx,`(function(){customElements.define('meu-el',function(){});return typeof customElements.get('meu-el')+'/'+typeof customElements.get('nao')})()`);
  ok(r==='function/undefined','customElements.define/get');
- r=await ev(ctx,`customElements.whenDefined('tardio').then(function(){return 'ok'}).then(function(v){return v}) && (function(){var p=customElements.whenDefined('t2');customElements.define('t2',function(){});return p.then(function(){return 'resolveu'})})()`);
+ r=await ev(ctx,`customElements.whenDefined('tardio').then(function(){return 'ok'}).then(function(v){return v}) && (function(){var p=customElements.whenDefined('t-2');customElements.define('t-2',function(){});return p.then(function(){return 'resolveu'})})()`);
  ok(r==='resolveu','customElements.whenDefined resolve após define');
  // 6. árvore, geometria, instanceof
  r=ev(ctx,`(function(){var tw=document.createTreeWalker(document.getElementById('a'),NodeFilter.SHOW_TEXT,null);var o=[],n;while(n=tw.nextNode())o.push(n.data);return o.join('|')})()`);

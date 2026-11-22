@@ -252,7 +252,7 @@ enum AmbienteJS {
       while (n) {
         caminho.push(n);
         if (n === G) break;
-        n = n.parentNode || (n === doc ? G : null);
+        n = n.parentNode || n.__host || (n === doc ? G : null);
       }
       for (var i = 0; i < caminho.length; i++) {
         if (i > 0 && !ev.bubbles && !(ev.type === 'load' || ev.type === 'DOMContentLoaded')) break;
@@ -464,7 +464,7 @@ enum AmbienteJS {
     parentElement: { get: function () { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : null; } },
     nextElementSibling: { get: function () { var n = this.nextSibling; while (n && n.nodeType !== 1) n = n.nextSibling; return n; } },
     previousElementSibling: { get: function () { var n = this.previousSibling; while (n && n.nodeType !== 1) n = n.previousSibling; return n; } },
-    isConnected: { get: function () { var n = this; while (n) { if (n === doc) return true; n = n.parentNode; } return false; } },
+    isConnected: { get: function () { var n = this; while (n) { if (n === doc) return true; n = n.parentNode || n.__host || null; } return false; } },
     nodeValue: { get: function () { return this.nodeType === 3 || this.nodeType === 8 ? this.data : null; }, set: function (v) { if (this.nodeType === 3 || this.nodeType === 8) this.data = String(v); } },
     textContent: {
       get: function () {
@@ -688,7 +688,12 @@ enum AmbienteJS {
   Element.prototype.focus = nada; Element.prototype.blur = nada; Element.prototype.scrollIntoView = nada;
   Element.prototype.scrollTo = nada; Element.prototype.scrollBy = nada; Element.prototype.select = nada;
   Element.prototype.click = function () { this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); };
-  Element.prototype.attachShadow = function () { var f = new DocumentFragment(); this.shadowRoot = f; return f; };
+  Element.prototype.attachShadow = function (init) {
+    if (this.__sombra) throw new Error('NotSupportedError: Shadow root cannot be created on a host which already hosts a shadow tree.');
+    var f = new DocumentFragment(); f.__host = this; f.host = this; f.mode = (init && init.mode) === 'closed' ? 'closed' : 'open';
+    this.__sombra = f; this.shadowRoot = f.mode === 'open' ? f : null; sujeira++;
+    return f;
+  };
   Element.prototype.animate = function () { return { cancel: nada, finish: nada, onfinish: null, finished: Promise.resolve() }; };
   Element.prototype.requestFullscreen = function () { return Promise.reject(new Error('sem tela cheia')); };
   Element.prototype.setPointerCapture = nada; Element.prototype.releasePointerCapture = nada;
@@ -783,14 +788,15 @@ enum AmbienteJS {
     }
     return '';
   }
-  function serializar(n, o, ignorarScripts, cob) {
+  function serializar(n, o, ignorarScripts, cob, host) {
     if (n.nodeType === 3) {
       var p = n.parentNode;
       o.push(p && p.nodeType === 1 && CRUS[p.localName] ? n.data : esc(n.data));
     } else if (n.nodeType === 8) { o.push('<!--' + n.data + '-->'); }
-    else if (n.nodeType === 11 || n.nodeType === 9) { for (var i = 0; i < n.childNodes.length; i++) serializar(n.childNodes[i], o, ignorarScripts, cob); }
+    else if (n.nodeType === 11 || n.nodeType === 9) { for (var i = 0; i < n.childNodes.length; i++) serializar(n.childNodes[i], o, ignorarScripts, cob, host); }
     else if (n.nodeType === 1) {
       var t = n.localName;
+      if (host && t === 'slot') { serializarSlot(n, host, o, ignorarScripts, cob); return; }
       if (ignorarScripts && (t === 'script' || t === 'noscript')) return;
       o.push('<' + t);
       for (var j = 0; j < n.__attrs.length; j++) o.push(' ' + n.__attrs[j][0] + '="' + escAttr(n.__attrs[j][1]) + '"');
@@ -805,9 +811,22 @@ enum AmbienteJS {
       }
       o.push('>');
       if (VAZIAS[t]) return;
-      for (var k = 0; k < n.childNodes.length; k++) serializar(n.childNodes[k], o, ignorarScripts, cobFilhos);
+      if (t === 'style' && n.__folha) o.push(n.__folha.__t);
+      else if (n.__sombra) {
+        // Árvore da sombra achatada: o que o navegador desenharia (a sombra, com os filhos do hospedeiro nos <slot>).
+        for (var s1 = 0; s1 < n.__sombra.childNodes.length; s1++) serializar(n.__sombra.childNodes[s1], o, ignorarScripts, cobFilhos, n);
+      } else for (var k = 0; k < n.childNodes.length; k++) serializar(n.childNodes[k], o, ignorarScripts, cobFilhos, host);
       o.push('</' + t + '>');
     }
+  }
+  // <slot>: no lugar dele entram os filhos do hospedeiro que escolheram esse slot (ou o conteúdo reserva do próprio slot).
+  function serializarSlot(slot, host, o, ignorarScripts, cob) {
+    var nome = slot.getAttribute('name') || '', achou = false;
+    for (var i = 0; i < host.childNodes.length; i++) {
+      var f = host.childNodes[i], alvo = f.nodeType === 1 ? (f.getAttribute('slot') || '') : '';
+      if (f.nodeType === 1 ? alvo === nome : (f.nodeType === 3 && nome === '')) { achou = true; serializar(f, o, ignorarScripts, cob); }
+    }
+    if (!achou) for (var j = 0; j < slot.childNodes.length; j++) serializar(slot.childNodes[j], o, ignorarScripts, cob, host);
   }
   var SVGNS = 'http://www.w3.org/2000/svg';
   function construir(json, pai, parser, nsPai) {
@@ -1423,7 +1442,7 @@ enum AmbienteJS {
   //   static { corpo }   ->   static __nsb0=(()=>{ corpo })();
   // Só é chamada quando o script falhou ao ler, então scripts comuns não pagam nada.
   function modernizar(src) {
-    if (!/static\s*\{/.test(src) && !/\(\?<[=!]/.test(src)) return src;
+    if (!/static\s*\{/.test(src) && !/\(\?<[=!]/.test(src) && !/\/[dgimsuy]*v[dgimsuy]*(?![\w$])/.test(src)) return src;
     var n = src.length, i = 0, prev = '', prevIni = -1, antesPonto = false, pilha = [], ed = [], k = 0;
     while (i < n) {
       var c = src.charCodeAt(i);
@@ -1435,9 +1454,12 @@ enum AmbienteJS {
         if (regexPermitido(prev)) {
           var fimRx = pularRegex(src, i), lit = src.slice(i, fimRx);
           // Regex com lookbehind, que o iOS 15 não lê: vira uma chamada ao motor de regex do app (__rx).
+          var fl = /[a-z]*$/.exec(lit)[0];
           if (/\(\?<[=!]/.test(lit)) {
-            var fl = /[a-z]*$/.exec(lit)[0];
-            ed.push([i, fimRx, '__rx(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl) + ')']);
+            ed.push([i, fimRx, '__rx(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl.replace('v', 'u')) + ')']);
+          } else if (fl.indexOf('v') >= 0) {
+            // Flag v (Safari 17): o RegExp global tenta a flag u no lugar.
+            ed.push([i, fimRx, 'new RegExp(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl) + ')']);
           }
           i = fimRx; prev = 'num'; continue;
         }
@@ -1644,6 +1666,9 @@ enum AmbienteJS {
     if (!(tipo in TIPOS_JS) && tipo !== 'module') return false;
     if (s.hasAttribute('nomodule')) return false;
     var src = s.getAttribute('src');
+    if (src && pagina.ignorar && pagina.ignorar.length) {
+      for (var ig = 0; ig < pagina.ignorar.length; ig++) if (String(src).indexOf(pagina.ignorar[ig]) >= 0) { if (!s.__bq) { s.__bq = 1; estat.ignorados++; } return false; }
+    }
     if (src && pagina.bloquear) { var u = resolver(src); if (u && bloqueado(u)) { if (!s.__bq) { s.__bq = 1; estat.bloqueados++; } return false; } }
     return true;
   }
@@ -1960,6 +1985,7 @@ enum AmbienteJS {
   G.ontouchstart = null;
 
   // ---------- entrada e saída ----------
+  G.__sujar = function () { sujeira++; };
   G.__iniciar = function (arvoreJson) {
     var json = JSON.parse(arvoreJson);
     montarDocumento(json);

@@ -10,6 +10,9 @@ enum IdentificacaoNavegador {
 
     static let desktop = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
+    /// iPhone com iOS 17, para os perfis de site que precisam dizer que o aparelho é mais novo.
+    static let mobileIOS17 = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+
     /// Identificação a usar agora, conforme o ajuste.
     static var atual: String {
         UserDefaults.standard.bool(forKey: chaveDesktop) ? desktop : mobile
@@ -37,7 +40,7 @@ final class DownloadPagina: @unchecked Sendable {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, URLResponse), Error>) in
                 self.continuacao = cont
                 var pedido = URLRequest(url: url)
-                pedido.setValue(IdentificacaoNavegador.atual, forHTTPHeaderField: "User-Agent")
+                pedido.setValue(PerfisDeSite.agente(para: url.host), forHTTPHeaderField: "User-Agent")
                 let nova = RedeNusky.sessao.dataTask(with: pedido)
                 // A página que o usuário pediu passa na frente de qualquer outra coisa.
                 nova.priority = URLSessionTask.highPriority

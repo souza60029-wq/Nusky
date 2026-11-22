@@ -1183,7 +1183,12 @@ fn cor_alfa(v: &str) -> Option<(u8, u8, u8, f32)> {
     } else if let Some(r) = v.strip_prefix("hsla(").or_else(|| v.strip_prefix("hsl(")) {
         ("hsl", r)
     } else {
-        return cor_nomeada(&v);
+        // Nomes, hwb(), lab(), lch(), oklab(), oklch(), color(), color-mix() e light-dark().
+        if let Some(c) = cor_nomeada(&v) {
+            return Some(c);
+        }
+        let escuro = MODO_ESCURO.load(std::sync::atomic::Ordering::Relaxed);
+        return crate::cores::funcao(&v, escuro, cor_alfa);
     };
     let args = resto.strip_suffix(')')?;
     let args = args.replace(|c: char| c == ',' || c == '/', " ");
@@ -1261,7 +1266,11 @@ fn cor_nomeada(v: &str) -> Option<(u8, u8, u8, f32)> {
         "aqua" | "cyan" => (0, 255, 255),
         "fuchsia" | "magenta" => (255, 0, 255),
         "olive" => (128, 128, 0),
-        _ => return None,
+        // Os demais nomes do CSS (148 no total).
+        _ => {
+            let c = crate::cores::por_nome(v)?;
+            return Some((c.0, c.1, c.2, 1.0));
+        }
     };
     Some((c.0, c.1, c.2, 1.0))
 }
@@ -2400,5 +2409,14 @@ mod testes {
         let alvo = info("span", "", &["y"], &[]);
         assert!(regras_casadas(&f, &alvo, &[], &[]).is_empty());
     }
-}
 
+    #[test]
+    fn nomes_completos_e_cores_modernas_chegam_ao_leitor_geral() {
+        assert_eq!(cor_alfa("RebeccaPurple"), Some((102, 51, 153, 1.0)));
+        assert_eq!(cor_alfa("gold"), Some((255, 215, 0, 1.0)));
+        let c = cor_alfa("oklch(63.7% 0.237 25.331)").unwrap();
+        assert!((c.0 as i32 - 251).abs() <= 1 && (c.1 as i32 - 44).abs() <= 1 && (c.2 as i32 - 54).abs() <= 1);
+        let m = cor_alfa("color-mix(in oklab, white 50%, transparent)").unwrap();
+        assert!(m.0 >= 254 && (m.3 - 0.5).abs() < 0.01);
+    }
+}

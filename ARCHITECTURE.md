@@ -68,3 +68,14 @@ Medir antes de otimizar. Nenhuma otimização entra sem uma medição que mostre
 4. **2ª pintura.** Quando o JavaScript termina, o HTML novo entra pelo mesmo caminho das atualizações do modo vivo (`desenharVivo`), que preserva a rolagem. O bloco de CSS é guardado à parte (`cssDaPagina`) e reaplicado em cada desenho.
 5. **Tema.** Antes de cada layout o Swift informa ao motor se o aparelho está no escuro (`nusky_definir_escuro`), para que `prefers-color-scheme` responda o mesmo que o `matchMedia` do JavaScript. Página sem fundo próprio é branca, a menos que o "forçar modo noturno" esteja ligado.
 6. **Medição.** Cada etapa é cronometrada e aparece no relatório do Diagnóstico.
+
+## Perfis por site e pré-processamento do CSS (rodada 5)
+
+- `PerfisDeSite.swift`: ajustes de um site só (agente, CSS e JS extra, modo honesto, tempo de espera...). A tabela de fábrica
+  é um JSON no próprio arquivo; um `"perfis"` na lista de sites baixada vale por cima. Quem lê: `BrowserModel` (tempo, `semJS`),
+  `FolhasExternas` (CSS extra, limite de folhas, agente), `JSRodador` (agente, `honesto`, `ignorarScripts`, `js` prévio).
+- `FolhasExternas.swift` baixa o CSS em paralelo, descarta folhas cuja `media` não casa com a tela e passa cada uma por
+  `PodaCSS.swift` (tira o que o motor ignora). Limites: 40 folhas, 3 MB cada, 6 MB no total.
+- `engine/src/cores.rs`: nomes de cor e funções modernas (`oklch`, `color-mix`, `light-dark`...), chamado por `css.rs::cor_alfa`.
+- Elementos personalizados, sombra achatada e folhas de estilo ficam em `AmbienteJSExtra.swift`; a sombra é serializada
+  por `serializar` (em `AmbienteJS.swift`), com os filhos do hospedeiro entrando nos `<slot>`.

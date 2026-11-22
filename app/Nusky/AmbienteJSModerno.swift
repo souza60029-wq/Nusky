@@ -485,7 +485,12 @@ extension AmbienteJS {
     try { return chamado ? Nativo(p, f) : Reflect.construct(Nativo, [p, f], new.target); }
     catch (e) {
       var fonte = p instanceof Nativo ? p.source : String(p);
-      if (e instanceof SyntaxError && temLookbehind(fonte)) return new RX(fonte, f === undefined ? (p instanceof Nativo ? p.flags : '') : f);
+      var flags = f === undefined ? (p instanceof Nativo ? p.flags : '') : String(f);
+      if (e instanceof SyntaxError && flags.indexOf('v') >= 0) {
+        // Flag v (Safari 17): quando a expressão também é válida com a flag u (o caso comum, sem operações de conjunto), vale a u.
+        try { return Reflect.construct(Nativo, [fonte, flags.replace('v', 'u')], new.target || RegExpNovo); } catch (e2) { flags = flags.replace('v', 'u'); }
+      }
+      if (e instanceof SyntaxError && temLookbehind(fonte)) return new RX(fonte, flags.replace('v', 'u'));
       throw e;
     }
   }
@@ -501,6 +506,7 @@ extension AmbienteJS {
   try { Object.defineProperty(Nativo.prototype, 'constructor', { value: RegExpNovo, writable: true, configurable: true, enumerable: false }); } catch (e) {}
   G.RegExp = RegExpNovo;
   G.__rxClasse = RX;
+  G.__rxNativo = Nativo;
 })(this);
 """#
 }
