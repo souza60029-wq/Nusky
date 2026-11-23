@@ -436,6 +436,28 @@ extension AmbienteJS {
     }
   });
 
+  // Interfaces HTML*Element de verdade: antes só havia 18, todas apelidos de HTMLElement (então `div instanceof HTMLLIElement`
+  // dava true), e as demais nem existiam: o GitHub falhava com "Can't find variable: HTMLMetaElement" e "HTMLLIElement".
+  // Cada uma agora confere a tag no instanceof; o prototype continua sendo o de Element (o que o resto do ambiente espera).
+  (function () {
+    var TAGS = { Anchor: ['a'], Area: ['area'], Audio: ['audio'], BR: ['br'], Base: ['base'], Body: ['body'], Button: ['button'], Canvas: ['canvas'],
+      DList: ['dl'], Data: ['data'], DataList: ['datalist'], Details: ['details'], Dialog: ['dialog'], Div: ['div'], Embed: ['embed'], FieldSet: ['fieldset'],
+      Font: ['font'], Form: ['form'], HR: ['hr'], Head: ['head'], Heading: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'], Html: ['html'], IFrame: ['iframe'], Image: ['img'],
+      Input: ['input'], LI: ['li'], Label: ['label'], Legend: ['legend'], Link: ['link'], Map: ['map'], Media: ['audio', 'video'], Menu: ['menu'], Meta: ['meta'],
+      Meter: ['meter'], Mod: ['ins', 'del'], OList: ['ol'], Object: ['object'], OptGroup: ['optgroup'], Option: ['option'], Output: ['output'], Paragraph: ['p'],
+      Param: ['param'], Picture: ['picture'], Pre: ['pre'], Progress: ['progress'], Quote: ['q', 'blockquote'], Script: ['script'], Select: ['select'], Slot: ['slot'],
+      Source: ['source'], Span: ['span'], Style: ['style'], TableCaption: ['caption'], TableCell: ['td', 'th'], TableCol: ['col', 'colgroup'], Table: ['table'],
+      TableRow: ['tr'], TableSection: ['thead', 'tbody', 'tfoot'], Template: ['template'], TextArea: ['textarea'], Time: ['time'], Title: ['title'], Track: ['track'],
+      UList: ['ul'], Video: ['video'] };
+    Object.keys(TAGS).forEach(function (n) {
+      var tags = TAGS[n], F = function () { throw new TypeError('Illegal constructor'); };
+      F.prototype = ElemP;
+      Object.defineProperty(F, Symbol.hasInstance, { value: function (v) { return !!v && v.nodeType === 1 && tags.indexOf(v.localName) >= 0; } });
+      forca(G, 'HTML' + n + 'Element', F);
+    });
+    if (typeof G.HTMLUnknownElement === 'undefined') forca(G, 'HTMLUnknownElement', HTMLElementCE);
+  })();
+
   // ---------- folhas de estilo (CSSStyleSheet, <style>.sheet, adoptedStyleSheets) ----------
   // Bibliotecas de CSS-em-JS gravam as regras com sheet.insertRule() e deixam o <style> vazio. Antes o insertRule
   // não fazia nada, então esses sites perdiam todo o estilo. Agora o texto das regras vai para a página.
@@ -954,7 +976,7 @@ extension AmbienteJS {
     // Modo honesto: o que o Safari 15 não tem, a página não vê.
     try { delete G.TextDecoderStream; delete G.TextEncoderStream; } catch (e) {}
     try { if (G.AbortSignal) { delete G.AbortSignal.timeout; delete G.AbortSignal.any; } } catch (e) {}
-    try { if (G.__rxNativo) G.RegExp = G.__rxNativo; } catch (e) {}
+    // O RegExp não é trocado: sem o motor de reserva, um `new RegExp("(?<=a)b")` solto no início do app derruba a página inteira.
   }
   G.__extra = true;
 })(this);

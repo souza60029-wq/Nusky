@@ -1313,6 +1313,9 @@ enum AmbienteJS {
     if (src.charCodeAt(0) === 35 && src.charCodeAt(1) === 33) src = '//' + src.slice(2);   // #! de arquivo executável
     var n = src.length, i = 0, ini = 0, prev = '', prof = 0;
     var out = [], specs = [], cabeca = [], getters = [], reexp = [], tla = false;
+    // `await` no topo vale também dentro de parênteses e blocos, como em `(z = await z).a` ou `try { await x } catch {}`.
+    // Para saber se o `await` está no topo, conta-se só a profundidade de corpos de função (não a de parênteses).
+    var parenAntes = [], chavesFn = [], fnProf = 0, fechouParen = '';
     function spec(s) { var k = specs.indexOf(s); if (k < 0) { specs.push(s); k = specs.length - 1; } return k; }
     function corta(de, ate, troca) { out.push(src.slice(ini, de)); if (troca) out.push(troca); ini = ate; }
     function usa(re, pos) { re.lastIndex = pos; return re.exec(src); }
@@ -1328,12 +1331,21 @@ enum AmbienteJS {
       }
       if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }
       if (c === 96) { i = pularTemplate(src, i); prev = 'str'; continue; }
-      if (c === 40 || c === 91 || c === 123) { prof++; prev = src.charAt(i); i++; continue; }
-      if (c === 41 || c === 93 || c === 125) { prof--; prev = src.charAt(i); i++; continue; }
+      if (c === 40) { parenAntes.push(prev); prof++; prev = '('; i++; continue; }
+      if (c === 41) { fechouParen = parenAntes.pop() || ''; prof--; prev = ')'; i++; continue; }
+      if (c === 123) {
+        // Corpo de função: `) {` que não é if/for/while/switch/catch/with, ou `=> {`.
+        var ehFn = prev === '>' || (prev === ')' && !/^(if|for|while|switch|catch|with|await)$/.test(fechouParen));
+        chavesFn.push(ehFn); if (ehFn) fnProf++;
+        prof++; prev = '{'; i++; continue;
+      }
+      if (c === 125) { if (chavesFn.pop()) fnProf--; prof--; prev = '}'; i++; continue; }
+      if (c === 91) { prof++; prev = '['; i++; continue; }
+      if (c === 93) { prof--; prev = ']'; i++; continue; }
       if (ehIdent(c)) {
         var j = i; while (j < n && ehIdent(src.charCodeAt(j))) j++;
         var w = src.slice(i, j), antesPonto = prev === '.';
-        if (w === 'await' && !antesPonto && prof === 0) tla = true;
+        if (w === 'await' && !antesPonto && fnProf === 0 && prev !== '>') tla = true;
         if (c >= 48 && c <= 57) { prev = 'num'; i = j; continue; }
         if (w === 'import' && !antesPonto) {
           var k2 = j; while (k2 < n && src.charCodeAt(k2) <= 32) k2++;
@@ -1443,43 +1455,65 @@ enum AmbienteJS {
   // Só é chamada quando o script falhou ao ler, então scripts comuns não pagam nada.
   function modernizar(src) {
     if (!/static\s*\{/.test(src) && !/\(\?<[=!]/.test(src) && !/\/[dgimsuy]*v[dgimsuy]*(?![\w$])/.test(src)) return src;
-    var n = src.length, i = 0, prev = '', prevIni = -1, antesPonto = false, pilha = [], ed = [], k = 0;
-    while (i < n) {
-      var c = src.charCodeAt(i);
-      if (c <= 32) { i++; continue; }
-      if (c === 47) {
-        var d = src.charCodeAt(i + 1);
-        if (d === 47) { var f = src.indexOf('\n', i); i = f < 0 ? n : f; continue; }
-        if (d === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? n : g + 2; continue; }
-        if (regexPermitido(prev)) {
-          var fimRx = pularRegex(src, i), lit = src.slice(i, fimRx);
-          // Regex com lookbehind, que o iOS 15 não lê: vira uma chamada ao motor de regex do app (__rx).
-          var fl = /[a-z]*$/.exec(lit)[0];
-          if (/\(\?<[=!]/.test(lit)) {
-            ed.push([i, fimRx, '__rx(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl.replace('v', 'u')) + ')']);
-          } else if (fl.indexOf('v') >= 0) {
-            // Flag v (Safari 17): o RegExp global tenta a flag u no lugar.
-            ed.push([i, fimRx, 'new RegExp(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl) + ')']);
+    var n = src.length, ed = [], k = 0;
+    // Varre o código de `i` até `lim`. As expressões dentro de `${ }` de um template também são varridas (recursão):
+    // um regex com lookbehind ali dentro também precisa ser trocado.
+    function varrer(i, lim) {
+      var prev = '', prevIni = -1, antesPonto = false, pilha = [];
+      while (i < lim) {
+        var c = src.charCodeAt(i);
+        if (c <= 32) { i++; continue; }
+        if (c === 47) {
+          var d = src.charCodeAt(i + 1);
+          if (d === 47) { var f = src.indexOf('\n', i); i = f < 0 ? n : f; continue; }
+          if (d === 42) { var g = src.indexOf('*/', i + 2); i = g < 0 ? n : g + 2; continue; }
+          var permitido = regexPermitido(prev), fimRx = 0, lit = '';
+          if (permitido) { fimRx = pularRegex(src, i); lit = src.slice(i, fimRx); }
+          else if (prev === ')' || prev === '}') {
+            // Depois de `)` ou `}` a barra costuma ser divisão, mas pode ser regex (`if (x) /re/.test(y)`). Como `(?<=` e
+            // `(?<!` não existem em código JavaScript fora de regex e strings, um lookbehind aqui prova que é um regex.
+            var fx = pularRegex(src, i), lt = src.slice(i, fx);
+            if (/\(\?<[=!]/.test(lt) && lt.indexOf('\n') < 0 && lt.length < 4000) { permitido = true; fimRx = fx; lit = lt; }
           }
-          i = fimRx; prev = 'num'; continue;
+          if (permitido) {
+            // Regex com lookbehind, que o iOS 15 não lê: vira uma chamada ao motor de regex do app (__rx).
+            var fl = /[a-z]*$/.exec(lit)[0];
+            if (/\(\?<[=!]/.test(lit)) {
+              ed.push([i, fimRx, '__rx(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl.replace('v', 'u')) + ')']);
+            } else if (fl.indexOf('v') >= 0) {
+              // Flag v (Safari 17): o RegExp global tenta a flag u no lugar.
+              ed.push([i, fimRx, 'new RegExp(' + JSON.stringify(lit.slice(1, lit.length - fl.length - 1)) + ',' + JSON.stringify(fl) + ')']);
+            }
+            i = fimRx; prev = 'num'; continue;
+          }
+          i++; prev = '/'; continue;
         }
-        i++; prev = '/'; continue;
+        if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }
+        if (c === 96) { i = varrerTemplate(i); prev = 'str'; continue; }
+        if (c === 123) { pilha.push(prev === 'static' && !antesPonto ? { ini: prevIni, abre: i } : null); prev = '{'; i++; continue; }
+        if (c === 125) {
+          var e = pilha.pop();
+          if (e) { ed.push([e.ini, e.abre + 1, 'static __nsb' + (k++) + '=(()=>{']); ed.push([i, i + 1, '})();']); }
+          prev = '}'; i++; continue;
+        }
+        if (ehIdent(c)) {
+          var j = i; while (j < n && ehIdent(src.charCodeAt(j))) j++;
+          antesPonto = prev === '.';
+          prev = c >= 48 && c <= 57 ? 'num' : src.slice(i, j); prevIni = i; i = j; continue;
+        }
+        prev = src.charAt(i); i++;
       }
-      if (c === 39 || c === 34) { i = pularString(src, i, c); prev = 'str'; continue; }
-      if (c === 96) { i = pularTemplate(src, i); prev = 'str'; continue; }
-      if (c === 123) { pilha.push(prev === 'static' && !antesPonto ? { ini: prevIni, abre: i } : null); prev = '{'; i++; continue; }
-      if (c === 125) {
-        var e = pilha.pop();
-        if (e) { ed.push([e.ini, e.abre + 1, 'static __nsb' + (k++) + '=(()=>{']); ed.push([i, i + 1, '})();']); }
-        prev = '}'; i++; continue;
-      }
-      if (ehIdent(c)) {
-        var j = i; while (j < n && ehIdent(src.charCodeAt(j))) j++;
-        antesPonto = prev === '.';
-        prev = c >= 48 && c <= 57 ? 'num' : src.slice(i, j); prevIni = i; i = j; continue;
-      }
-      prev = src.charAt(i); i++;
     }
+    function varrerTemplate(i) {
+      for (i++; i < n; i++) {
+        var c = src.charCodeAt(i);
+        if (c === 92) i++;
+        else if (c === 96) return i + 1;
+        else if (c === 36 && src.charCodeAt(i + 1) === 123) { var ini = i + 2, fim = pularCodigoAte(src, ini); varrer(ini, fim - 1); i = fim - 1; }
+      }
+      return n;
+    }
+    varrer(0, n);
     if (!ed.length) return src;
     ed.sort(function (a, b) { return a[0] - b[0]; });
     var out = [], pos = 0;
@@ -1487,6 +1521,7 @@ enum AmbienteJS {
     out.push(src.slice(pos));
     return out.join('');
   }
+  G.__modernizar = modernizar;
   // Mensagens de "o script nem chegou a rodar": só nesses casos vale tentar de novo reescrito.
   function erroDeLeitura(m) { return /^(Unexpected|Expected|Unterminated|Invalid regular|Invalid escape|Missing|Cannot use)/i.test(String(m)); }
   function trechoDoErro(src, m) {

@@ -662,10 +662,14 @@ enum DiagnosticoJS {
             }
         }
 
+        // Quais elementos o JavaScript deixou na página (diz se o app montou a tela, mesmo que nada tenha sido desenhado).
+        linhas.append("")
+        linhas.append(contagemDeElementos(final))
+
         // O começo do corpo mostra se o React trocou a página por outra coisa.
         linhas.append("")
-        linhas.append("Início do <body> final (sem scripts e estilos, 700 caracteres):")
-        linhas.append(inicioDoCorpo(final, limite: 700))
+        linhas.append("Início do <body> final (sem scripts, estilos e imagens embutidas, 1200 caracteres):")
+        linhas.append(inicioDoCorpo(final, limite: 1200))
 
         return linhas.joined(separator: "\n")
     }
@@ -682,10 +686,33 @@ enum DiagnosticoJS {
     private static func inicioDoCorpo(_ html: String, limite: Int) -> String {
         guard let achado = html.range(of: "<body", options: .caseInsensitive) else { return "(sem <body>)" }
         var corpo = String(html[achado.lowerBound...])
-        for padrao in ["<script\\b[\\s\\S]*?</script>", "<style\\b[\\s\\S]*?</style>", "<link\\b[^>]*>"] {
-            corpo = corpo.replacingOccurrences(of: padrao, with: "", options: [.regularExpression, .caseInsensitive])
+        for padrao in ["<script\\b[\\s\\S]*?</script>", "<style\\b[\\s\\S]*?</style>", "<link\\b[^>]*>", "data:[^\"')\\s]{40,}"] {
+            corpo = corpo.replacingOccurrences(of: padrao, with: padrao.hasPrefix("data:") ? "data:…" : "", options: [.regularExpression, .caseInsensitive])
         }
         return String(corpo.prefix(limite))
+    }
+
+    /// Total de elementos do HTML final, as tags mais comuns e os elementos personalizados (tag com hífen).
+    private static func contagemDeElementos(_ html: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "<([a-zA-Z][a-zA-Z0-9-]*)", options: []) else { return "Elementos no HTML final: -" }
+        let ns = html as NSString
+        var contagem: [String: Int] = [:]
+        var total = 0
+        regex.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+            guard let m = m, m.numberOfRanges > 1 else { return }
+            let nome = ns.substring(with: m.range(at: 1)).lowercased()
+            if nome == "script" || nome == "style" || nome == "link" || nome == "meta" || nome == "path" { return }
+            contagem[nome, default: 0] += 1
+            total += 1
+        }
+        let comuns = contagem.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(10).map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+        let personalizados = contagem.filter { $0.key.contains("-") }
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(15).map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+        return "Elementos no HTML final: \(total) (sem script, style, link, meta e path)\n"
+            + "  mais comuns: \(comuns.isEmpty ? "nenhum" : comuns)\n"
+            + "  personalizados (com hífen): \(personalizados.isEmpty ? "nenhum" : personalizados)"
     }
 }
 

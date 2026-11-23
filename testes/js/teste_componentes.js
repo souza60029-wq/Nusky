@@ -37,6 +37,7 @@ let falhas = 0; const ok = (c, m) => { if (!c) { falhas++; console.log('FALHOU:'
   ok(ev(ctx, 'try{customElements.define("x-a",class extends HTMLElement{});"sem erro"}catch(e){e.name}') === 'NotSupportedError', 'nome repetido dá NotSupportedError');
   ok(ev(ctx, 'try{customElements.define("semtraco",class extends HTMLElement{});"sem erro"}catch(e){e.name}') === 'SyntaxError', 'nome sem hífen dá SyntaxError');
   ok(erros.length === 0, 'nenhum erro registrado' + (erros.length ? ': ' + erros.join(' / ') : ''));
+  ok(ev(ctx, '[typeof HTMLMetaElement, typeof HTMLLIElement, document.createElement("li") instanceof HTMLLIElement, document.createElement("div") instanceof HTMLLIElement, document.createElement("div") instanceof HTMLElement, document.createElement("h3") instanceof HTMLHeadingElement].join()') === 'function,function,true,false,true,true', 'HTMLMetaElement/HTMLLIElement existem e o instanceof confere a tag');
   // 5. sombra achatada com slot
   ({ ctx, erros } = nova('<html><body><x-s><b slot="t">titulo</b><i>corpo</i></x-s></body></html>'));
   ev(ctx, `customElements.define('x-s',class extends HTMLElement{constructor(){super();var r=this.attachShadow({mode:'open'});r.innerHTML='<h1><slot name="t"></slot></h1><p><slot>vazio</slot></p>'}})`);

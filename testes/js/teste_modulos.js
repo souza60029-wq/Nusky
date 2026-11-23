@@ -35,6 +35,8 @@ async function caso(nome,entrada){
  await caso('import() dinâmico + import.meta.url','dyn.js');
  await caso('export com desestruturação e vários declaradores','destr.js');
  await caso('estilo sem ponto-e-vírgula + export default class','useasi.js');
+ await caso('await no topo dentro de parênteses, listas, blocos e for await (padrão do ChatGPT)','tlaparen.js');
+ await caso('await só dentro de funções não torna o módulo assíncrono','semtla.js');
  // importmap (especificador "nu")
  let m=montar(`<html><head><script type="importmap">{"imports":{"lib":"/fx/dep.js","pre/":"/fx/"}}</script></head><body><script type="module">import {a} from 'lib'; import d from 'pre/dep.js'; __log.push(['map',a,d]);</script></body></html>`,fxs);
  await ate(m);let l=vm.runInContext('JSON.stringify(__log)',m.ctx);

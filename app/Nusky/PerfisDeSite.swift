@@ -35,9 +35,8 @@ enum PerfisDeSite {
     static let padrao = #"""
     {
       "claude.ai": {
-        "honesto": true,
         "tempoJS": 10,
-        "nota": "EXPERIMENTAL. O site mostra 'sua versão está desatualizada'. No Safari do mesmo aparelho ele abre, então a decisão parece vir do que o navegador diz ter. O modo honesto esconde o JavaScript novo que o Nusky costuma emprestar."
+        "nota": "A mensagem 'sua versão está desatualizada' é o aviso de que o app não conseguiu iniciar. O modo honesto foi testado aqui e piorou (quebrou o início com um erro de regex), então ficou desligado."
       },
       "youtube.com": {
         "tempoJS": 10,

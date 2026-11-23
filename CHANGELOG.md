@@ -2,6 +2,31 @@
 
 ## Próxima versão (a partir da 0.0.5)
 
+### Rodada 6: relatórios do Diagnóstico (ChatGPT, claude.ai, GitHub, YouTube)
+
+Os relatórios mostraram o que estava acontecendo de verdade. O CSS do GitHub agora carrega (20 folhas, 2,5 MB) e a
+Wikipédia, o arena.ai e o GitHub renderizam estilo. O que faltava:
+
+- **ChatGPT em branco: causa achada.** O módulo `538990.f894669a06.js` termina com `A=(z=await z).a`: um `await` no
+  nível do arquivo, mas dentro de parênteses. A detecção de "módulo assíncrono" só reconhecia `await` com profundidade
+  zero (contando parênteses), então o módulo ficava síncrono e o `await` virava nome de variável: `Unexpected
+  identifier 'z'. Expected ')' to end a compound expression`. Agora a detecção conta só a profundidade de *corpos de
+  função*: `await` dentro de parênteses, listas, `try`, `if` e `for await` conta como topo; `await` dentro de funções,
+  não. Testado contra o ESM nativo do Node com o mesmo padrão do chunk (auto-importação incluída).
+- **GitHub: `Can't find variable: HTMLMetaElement` / `HTMLLIElement`.** O ambiente só tinha 18 interfaces `HTML*Element`,
+  todas apelidos de `HTMLElement` (então `div instanceof HTMLLIElement` dava `true`). Agora há todas as ~70, cada uma
+  conferindo a tag no `instanceof`. A mensagem "Error / Looks like something went wrong!" do GitHub é o erro de React #185
+  (laço de atualização), que **não** está resolvido; o relatório agora mostra mais para investigar.
+- **claude.ai: o modo honesto piorou e foi desligado.** O relatório mostra que o `index-*.js` falha com `Invalid regular
+  expression: invalid group specifier name` (regex com lookbehind), e o modo honesto tirava o motor de reserva de regex.
+  O perfil do claude.ai ficou só com o tempo de espera maior, e o modo honesto não mexe mais no `RegExp`. Também
+  endureci a reescrita de regex com lookbehind: agora ela acha o regex logo depois de `)` ou `}` e dentro de `${ }` de
+  templates (antes só achava depois de operadores). Se o erro do claude.ai continuar, o novo relatório diz qual é.
+- **YouTube: causa ainda desconhecida.** O JavaScript roda sem erros (21 scripts, `body.loading` vira `body`) mas só 3
+  pedidos de rede acontecem, e nada é desenhado. O Diagnóstico agora lista os elementos que o app deixou na página
+  (total, tags mais comuns e os personalizados, como `ytm-app`) e corta imagens embutidas do trecho do corpo, que
+  ocupavam o espaço todo.
+
 ### Rodada 5: comparação com o Safari do mesmo iPhone 6s (claude.ai, arena.ai, GitHub, YouTube, ChatGPT)
 
 Os prints do Safari mostram os cinco sites funcionando no mesmo aparelho, inclusive o claude.ai. Isso corrige a rodada

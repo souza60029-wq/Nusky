@@ -1,6 +1,6 @@
 // Roda todos os testes de JavaScript, um por um. Uso: cd testes/js && node rodar-tudo.js
 const { spawnSync } = require('child_process');
-const testes = ['extrair.js', 'teste.js', 'teste_vivo.js', 'teste_nativo.js', 'teste_modulos.js', 'teste_ids.js', 'teste_extra.js', 'teste_compat.js', 'teste_rx_integrado.js', 'teste_componentes.js', 'teste_polyfills.js', 'poda_css.js'];
+const testes = ['extrair.js', 'teste.js', 'teste_vivo.js', 'teste_nativo.js', 'teste_modulos.js', 'teste_ids.js', 'teste_extra.js', 'teste_compat.js', 'teste_rx_integrado.js', 'teste_componentes.js', 'teste_polyfills.js', 'poda_css.js', 'teste_modernizar.js'];
 let falhou = false;
 for (const t of testes) {
   const r = spawnSync(process.execPath, [t], { cwd: __dirname, encoding: 'utf8' });

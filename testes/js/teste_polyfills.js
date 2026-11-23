@@ -47,7 +47,7 @@ let falhas = 0; const ok = (c, m) => { if (!c) { falhas++; console.log('FALHOU:'
   const q = e => ev(h, e);
   ok(q('typeof Promise.withResolvers') === 'undefined' && q('typeof [].toSorted') === 'undefined' && q('typeof Object.groupBy') === 'undefined', 'honesto: não define o JavaScript novo');
   ok(q('typeof TextDecoderStream') === 'undefined' && q('typeof AbortSignal.timeout') === 'undefined', 'honesto: some o que o Safari 15 não tem (streams de texto, AbortSignal.timeout)');
-  ok(q('RegExp === __rxNativo') === true, 'honesto: o RegExp global volta a ser o nativo (sem lookbehind inventado)');
+  ok(q('RegExp !== __rxNativo') === true, 'honesto: o RegExp continua com o motor de reserva (trocar quebrava o início do claude.ai)');
   const normal = nova({}, false).ctx;
   ok(ev(normal, 'typeof TextDecoderStream') === 'function', 'sem honesto: TextDecoderStream continua existindo');
   console.log(falhas ? 'FALHAS: ' + falhas : 'TUDO OK'); process.exit(falhas ? 1 : 0);
