@@ -153,6 +153,7 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
     let mut css_texto = String::new();
     coletar_css(&nos, &mut css_texto);
 
+    css::limpar_cores_nao_lidas();
     let mut desenhado = String::new();
     for comando in layout(&nos, largura, medidor) {
         match comando {
@@ -381,6 +382,14 @@ pub fn relatorio(html: &str, largura: f32, medidor: &dyn TextMeasurer) -> String
             suspeita,
             motor
         ));
+    }
+
+    // Cores escritas com funções que o motor não leu (o texto ou o fundo cai na cor padrão).
+    let nao_lidas = css::cores_nao_lidas();
+    linhas.push(String::new());
+    linhas.push(format!("CORES QUE O MOTOR NÃO ENTENDEU: {} valores diferentes", nao_lidas.len()));
+    for (valor, vezes) in nao_lidas.iter().take(15) {
+        linhas.push(format!("  {} vezes: {}", vezes, valor));
     }
 
     linhas.push(String::new());

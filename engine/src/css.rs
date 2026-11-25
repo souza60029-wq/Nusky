@@ -1158,7 +1158,53 @@ fn cor(v: &str) -> Option<(u8, u8, u8)> {
 /// Cor com transparência: (r, g, b, alfa de 0 a 1).
 /// Aceita #rgb, #rgba, #rrggbb, #rrggbbaa, rgb()/rgba() e hsl()/hsla(), com vírgulas
 /// ou espaços e `/ alfa`, além de alguns nomes.
+thread_local! {
+    /// Valores de cor (funções como oklch(), color-mix()...) que o motor não conseguiu ler, com quantas vezes cada um apareceu.
+    /// Só serve ao relatório do Diagnóstico: mostra por que um site fica com a cor errada.
+    static COR_FALHAS: std::cell::RefCell<HashMap<String, usize>> = std::cell::RefCell::new(HashMap::new());
+}
+
+const FUNCOES_DE_COR: [&str; 12] = [
+    "rgb(", "rgba(", "hsl(", "hsla(", "hwb(", "lab(", "lch(", "oklab(", "oklch(", "color(", "color-mix(", "light-dark(",
+];
+
+fn anotar_cor_nao_lida(v: &str) {
+    let t = v.trim().to_ascii_lowercase();
+    if !FUNCOES_DE_COR.iter().any(|f| t.starts_with(*f)) {
+        return;
+    }
+    let chave: String = t.chars().take(90).collect();
+    COR_FALHAS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() < 300 || m.contains_key(&chave) {
+            *m.entry(chave).or_insert(0) += 1;
+        }
+    });
+}
+
+/// Zera a lista de cores não lidas (o relatório faz isso antes de montar a página).
+pub fn limpar_cores_nao_lidas() {
+    COR_FALHAS.with(|m| m.borrow_mut().clear());
+}
+
+/// Cores não lidas desde a última limpeza, da mais frequente para a menos.
+pub fn cores_nao_lidas() -> Vec<(String, usize)> {
+    COR_FALHAS.with(|m| {
+        let mut v: Vec<(String, usize)> = m.borrow().iter().map(|(k, n)| (k.clone(), *n)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    })
+}
+
 fn cor_alfa(v: &str) -> Option<(u8, u8, u8, f32)> {
+    let r = cor_alfa_interno(v);
+    if r.is_none() {
+        anotar_cor_nao_lida(v);
+    }
+    r
+}
+
+fn cor_alfa_interno(v: &str) -> Option<(u8, u8, u8, f32)> {
     let v = v.trim().to_ascii_lowercase();
     if let Some(hex) = v.strip_prefix('#') {
         let d: Vec<u8> = hex
@@ -2418,5 +2464,15 @@ mod testes {
         assert!((c.0 as i32 - 251).abs() <= 1 && (c.1 as i32 - 44).abs() <= 1 && (c.2 as i32 - 54).abs() <= 1);
         let m = cor_alfa("color-mix(in oklab, white 50%, transparent)").unwrap();
         assert!(m.0 >= 254 && (m.3 - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn cor_que_o_motor_nao_le_fica_anotada_para_o_relatorio() {
+        limpar_cores_nao_lidas();
+        assert!(cor_alfa("oklch(banana)").is_none());
+        assert!(cor_alfa("red").is_some());
+        let lista = cores_nao_lidas();
+        assert!(lista.iter().any(|(k, n)| k.starts_with("oklch(banana") && *n == 1));
+        assert!(!lista.iter().any(|(k, _)| k == "red"));
     }
 }

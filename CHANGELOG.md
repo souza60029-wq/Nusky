@@ -2,6 +2,21 @@
 
 ## Próxima versão (a partir da 0.0.5)
 
+### Rodada 7: claude.ai abre; faltam cores e tema escuro
+
+Com a rodada 6, o claude.ai passou a abrir no Nusky (era a correção do `await`/regex), mas sem estilo: todo o texto sai
+azul, como o texto de link. O arena.ai tem o mesmo sintoma em menor grau. Sem ver o CSS do site, a causa mais provável é um
+valor de cor que o motor não lê. Em vez de apostar de novo:
+
+- **Diagnóstico: "CORES QUE O MOTOR NÃO ENTENDEU".** O motor agora anota cada função de cor (`rgb`, `hsl`, `oklch`,
+  `color-mix`, `light-dark`...) que não conseguiu ler e lista as 15 mais frequentes, com a contagem. Isso mostra, site a
+  site, exatamente qual sintaxe de cor falta (`cor_alfa` em `css.rs`; teste em `css::testes`).
+- **Diagnóstico: tema.** O relatório traz "Tema dos sites: automático ligado/desligado, noturno manual..." e "Tema entregue
+  aos sites: claro/escuro". Os sites aparecem claros no Nusky e escuros no Safari porque o Nusky só entrega
+  `prefers-color-scheme: dark` com "Automático" ligado em Ajustes e o iPhone no escuro, ou com "Forçar modo noturno".
+  O relatório do arena.ai mostrou `color-scheme: light`, então o site recebeu tema claro. Nada foi mudado no
+  comportamento; falta saber o valor dos ajustes.
+
 ### Rodada 6: relatórios do Diagnóstico (ChatGPT, claude.ai, GitHub, YouTube)
 
 Os relatórios mostraram o que estava acontecendo de verdade. O CSS do GitHub agora carrega (20 folhas, 2,5 MB) e a

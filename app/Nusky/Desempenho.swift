@@ -183,6 +183,10 @@ final class Desempenho: NSObject, @unchecked Sendable {
         linhas.append("Opções: desfoque \(desfoque ? "ligado" : "desligado"), Metal \(metal ? "ligado" : "desligado"), "
             + "brilho de toque \(luminoso ? "ligado" : "desligado"), pulso de toque \(expansivo ? "ligado" : "desligado"), "
             + "modo noturno forçado \(noturno ? "ligado" : "desligado")")
+        // O tema que os sites recebem vem daqui: com "automático" ligado, só ficam escuros se o iPhone estiver no escuro.
+        let ajustesTema = UserDefaults.standard
+        let temaAutomatico = ajustesTema.object(forKey: "themeAuto") as? Bool ?? true
+        linhas.append("Tema dos sites: automático \(temaAutomatico ? "ligado" : "desligado"), noturno manual \(ajustesTema.bool(forKey: "nightMode") ? "ligado" : "desligado")")
 
         // Causas prováveis, da mais forte para a mais fraca.
         var causas: [String] = []

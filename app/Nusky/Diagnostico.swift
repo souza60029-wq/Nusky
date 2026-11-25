@@ -621,6 +621,7 @@ enum DiagnosticoJS {
             return linhas.joined(separator: "\n")
         }
 
+        linhas.append("Tema entregue aos sites (prefers-color-scheme): \(escuro ? "escuro" : "claro")")
         linhas.append("Scripts executados: \(r.executados)")
         linhas.append("Scripts ignorados: \(r.ignorados)")
         linhas.append("Pedidos de rede: \(r.requisicoes)")
