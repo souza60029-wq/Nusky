@@ -36,7 +36,8 @@ enum PerfisDeSite {
     {
       "claude.ai": {
         "tempoJS": 10,
-        "nota": "A mensagem 'sua versão está desatualizada' é o aviso de que o app não conseguiu iniciar. O modo honesto foi testado aqui e piorou (quebrou o início com um erro de regex), então ficou desligado."
+        "css": "#js-cannot-start{display:none!important}",
+        "nota": "O aviso 'sua versão está desatualizada' é o que a página mostra enquanto o app ainda não iniciou: no Nusky ele demora alguns segundos e a tela aparece depois. Por isso o aviso fica escondido. O modo honesto foi testado e piorou (quebrou o início com um erro de regex)."
       },
       "youtube.com": {
         "tempoJS": 10,

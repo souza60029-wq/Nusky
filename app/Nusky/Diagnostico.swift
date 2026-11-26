@@ -611,10 +611,30 @@ enum DiagnosticoJS {
 
         let inicio = CFAbsoluteTimeGetCurrent()
         let escuro = await MainActor.run { Aparencia.sitesEmModoEscuro() }
-        let rodado = await JSRodador.processar(html: html, pagina: base, largura: Int(largura), escuro: escuro)
+        let limiteJS = PerfisDeSite.para(host: base.host)?.tempoJS ?? JSRodador.limitePadrao
+        let rodado = await JSRodador.processar(html: html, pagina: base, largura: Int(largura), escuro: escuro, limite: limiteJS)
+        let tempoTotal = CFAbsoluteTimeGetCurrent() - inicio
+
+        // Alguns sites (claude.ai) só montam a tela depois da primeira exibição, no modo vivo. O diagnóstico espera
+        // um pouco (até 10 s, ou 2 s sem mudança) e usa o último HTML que o app montou: é a página que o usuário vê.
+        let vivo = HTMLVivo()
+        var esperaViva = 0.0
+        if let sessao = rodado.sessao {
+            sessao.ligar { vivo.guardar($0) }
+            var vistos = vivo.atualizacoes
+            var ultimaMudanca = 0.0
+            while esperaViva < 10 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                esperaViva += 0.5
+                if vivo.atualizacoes != vistos {
+                    vistos = vivo.atualizacoes
+                    ultimaMudanca = esperaViva
+                }
+                if vistos > 0 && esperaViva - ultimaMudanca >= 2 { break }
+            }
+        }
         // O diagnóstico só olha o resultado: a sessão viva não pode ficar aberta (memória).
         rodado.sessao?.fechar()
-        let tempoTotal = CFAbsoluteTimeGetCurrent() - inicio
 
         guard let r = rodado.relatorio else {
             linhas.append("O JavaScript não rodou (sem script ou o motor não leu a árvore).")
@@ -638,7 +658,10 @@ enum DiagnosticoJS {
             linhas.append("  … e mais \(r.erros.count - 25)")
         }
 
-        let final = rodado.html
+        let final = vivo.ultimo ?? rodado.html
+        if rodado.sessao != nil {
+            linhas.append("Espera no modo vivo: \(String(format: "%.1f", esperaViva)) s, \(vivo.atualizacoes) atualizações do HTML (o HTML final abaixo é o último recebido)")
+        }
         linhas.append("")
         linhas.append("HTML FINAL: \(final.utf8.count) bytes (antes: \(html.utf8.count) bytes)")
         linhas.append("Tag <html> final: " + trecho(de: final, padrao: "<html[^>]*>", limite: 300))
@@ -694,7 +717,12 @@ enum DiagnosticoJS {
     }
 
     /// Total de elementos do HTML final, as tags mais comuns e os elementos personalizados (tag com hífen).
-    private static func contagemDeElementos(_ html: String) -> String {
+    private static func contagemDeElementos(_ htmlCompleto: String) -> String {
+        // O texto de <script> e <style> tem "<length>", "<color>" e coisas assim (CSS @property): não são elementos.
+        var html = htmlCompleto
+        for padrao in ["<script\\b[\\s\\S]*?</script>", "<style\\b[\\s\\S]*?</style>"] {
+            html = html.replacingOccurrences(of: padrao, with: "", options: [.regularExpression, .caseInsensitive])
+        }
         guard let regex = try? NSRegularExpression(pattern: "<([a-zA-Z][a-zA-Z0-9-]*)", options: []) else { return "Elementos no HTML final: -" }
         let ns = html as NSString
         var contagem: [String: Int] = [:]
@@ -877,5 +905,31 @@ struct DiagnosticoView: View {
                 modelo.iniciar(url: url)
             }
         }
+    }
+}
+
+/// Guarda o último HTML que a sessão viva entregou, para o diagnóstico ler de outra fila.
+private final class HTMLVivo: @unchecked Sendable {
+    private let trava = NSLock()
+    private var texto: String?
+    private var total = 0
+
+    func guardar(_ novo: String) {
+        trava.lock()
+        texto = novo
+        total += 1
+        trava.unlock()
+    }
+
+    var ultimo: String? {
+        trava.lock()
+        defer { trava.unlock() }
+        return texto
+    }
+
+    var atualizacoes: Int {
+        trava.lock()
+        defer { trava.unlock() }
+        return total
     }
 }

@@ -2,6 +2,23 @@
 
 ## Próxima versão (a partir da 0.0.5)
 
+### Rodada 8: o que os relatórios do claude.ai e do arena.ai mostraram
+
+Os relatórios novos ainda eram do build da rodada 6 (sem as seções da rodada 7), mas já dizem bastante:
+
+- **arena.ai:** o tema escuro agora chega (`<html class="dark" style="color-scheme: dark">`) e as cores do texto saem
+  certas (claro sobre escuro). Com isso o diagnóstico das cores do arena.ai está limpo; o que sobra nele é layout
+  (botões que quebram linha, campo de texto desalinhado), não cor.
+- **claude.ai: o app demora para iniciar, e o aviso é só a tela de espera.** O JavaScript roda sem erros, mas o `#root`
+  ainda está vazio quando a primeira exibição termina. O app monta a tela depois, no modo vivo, e é isso que aparece
+  "do nada". O aviso "navegador desatualizado" é o `#js-cannot-start`, que a página mostra enquanto o app não iniciou.
+  Agora o perfil do claude.ai o esconde (`css` no perfil), então a primeira pintura fica em branco em vez de mostrar um
+  aviso errado.
+- **Diagnóstico espera o modo vivo.** Antes, o relatório fechava a sessão logo na primeira exibição e mostrava o
+  `#root` vazio. Agora espera até 10 s (ou 2 s sem mudança) e usa o último HTML que o app montou, que é a página que você vê,
+  e usa o `tempoJS` do perfil do site. O relatório ganhou a linha "Espera no modo vivo".
+- **Diagnóstico:** a contagem de elementos não conta mais `<length>`, `<color>` etc. de dentro de `<style>`.
+
 ### Rodada 7: claude.ai abre; faltam cores e tema escuro
 
 Com a rodada 6, o claude.ai passou a abrir no Nusky (era a correção do `await`/regex), mas sem estilo: todo o texto sai
